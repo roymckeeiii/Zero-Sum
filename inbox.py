@@ -19,7 +19,8 @@ def meta(account, mid):
     item = {"account": account["id"], "email": account["email"], "id": m["id"], "threadId": m["threadId"],
             "from": name or addr, "fromAddr": addr, "subject": header(hs, "subject") or "(no subject)",
             "snippet": m.get("snippet", ""), "ts": int(m.get("internalDate", 0)) // 1000,
-            "unread": "UNREAD" in ids, "labels": sorted(lab[x] for x in ids if x in lab)}
+            "unread": "UNREAD" in ids, "starred": "STARRED" in ids,
+            "labels": sorted(lab[x] for x in ids if x in lab)}
     _meta[k] = (time.time(), item)
     if len(_meta) > 20000:
         _meta.clear()
@@ -77,8 +78,11 @@ def messages(q):
     pairs = [p for lst in POOL.map(ids, accs) for p in lst]
     items = sorted((i for i in POOL.map(safe_meta, pairs) if i), key=lambda i: -i["ts"])
     rules = rules_for(items)
+    from cleanup import is_protected, protected_set
+    prot = protected_set()
     for it in items:
         it["rules"] = rules.get((it["account"], it["id"]), [])
+        it["protected"] = is_protected(it["fromAddr"].lower(), prot)
     return {"items": items, "errors": errors}
 
 
@@ -110,14 +114,23 @@ def message(q):
 
 
 ACTIONS = {"archive": {"removeLabelIds": ["INBOX"]}, "inbox": {"addLabelIds": ["INBOX"]},
-           "read": {"removeLabelIds": ["UNREAD"]}, "unread": {"addLabelIds": ["UNREAD"]}}
+           "read": {"removeLabelIds": ["UNREAD"]}, "unread": {"addLabelIds": ["UNREAD"]},
+           "star": {"addLabelIds": ["STARRED"]}, "unstar": {"removeLabelIds": ["STARRED"]},
+           "delete": None, "undelete": None}
 
 
 def action(d):
     if d.get("action") not in ACTIONS or not re.fullmatch(r"[0-9a-f]{6,32}", d.get("threadId", "")):
         raise ValueError("bad action")
     ACC.row(d["account"])
-    gmail(d["account"], f"/threads/{d['threadId']}/modify", "POST", ACTIONS[d["action"]])
+    if d["action"] == "delete":  # Trash (Gmail empties it after 30 days); gmail.modify cannot delete permanently
+        gmail(d["account"], f"/threads/{d['threadId']}/trash", "POST")
+    elif d["action"] == "undelete":
+        gmail(d["account"], f"/threads/{d['threadId']}/untrash", "POST")
+    elif d["action"] in ("star", "unstar") and re.fullmatch(r"[0-9a-f]{6,32}", d.get("id", "")):
+        gmail(d["account"], f"/messages/{d['id']}/modify", "POST", ACTIONS[d["action"]])  # Gmail stars one message
+    else:
+        gmail(d["account"], f"/threads/{d['threadId']}/modify", "POST", ACTIONS[d["action"]])
     for k in [k for k, (_, it) in list(_meta.items()) if it["threadId"] == d["threadId"] and k[0] == d["account"]]:
         _meta.pop(k, None)
     return {"ok": True}

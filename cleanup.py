@@ -132,6 +132,7 @@ def senders(q):
     search = q.get("q", [""])[0].strip().lower()
     hide = q.get("hide", ["1"])[0] == "1"
     accs = {a["id"]: a["email"] for a in ACC.list()}
+    protset = protected_set()
     with db() as c:
         rows = c.execute(
             "SELECT from_addr, max(from_name), min(domain), count(*), sum(unread::int), sum(inbox::int), "
@@ -148,14 +149,15 @@ def senders(q):
     out = []
     for addr, name, dom, n, unread, inbox, last, acc_ids, has_unsub in rows:
         st = status.get(addr, {})
+        prot = is_protected(addr, protset)
         handled = bool(st) and all(acc in st for acc in acc_ids)
-        if hide and handled:
+        if hide and handled and not prot:
             continue
         out.append({"addr": addr, "name": name, "domain": dom, "count": n, "unread": unread, "inbox": inbox,
                     "readPct": round(100 * (n - unread) / n) if n else 0, "last": int(last),
                     "accounts": [{"id": a, "email": accs.get(a, "?"), "status": st.get(a)} for a in acc_ids],
-                    "unsub": has_unsub})
-    return {"senders": out, "collect": collect_status()}
+                    "unsub": has_unsub, "protected": prot})
+    return {"senders": out, "collect": collect_status(), "protected": sorted(protset)}
 
 
 def _newsletter(c, acc_id, addr, status):
@@ -164,21 +166,65 @@ def _newsletter(c, acc_id, addr, status):
               'DO UPDATE SET status = EXCLUDED.status, "updatedAt" = now()', (new_id(), addr, status, acc_id))
 
 
-def _filter(acc_id, addr):
+# ---------------------------------------------------------------- protection
+def protected_set():
+    with db() as c:
+        return {r[0] for r in c.execute("SELECT key FROM unified.protected").fetchall()}
+
+
+def is_protected(addr, prot=None):
+    """A sender is protected by its exact address or its domain ("@example.com")."""
+    prot = protected_set() if prot is None else prot
+    return addr in prot or ("@" + addr.rsplit("@", 1)[-1]) in prot
+
+
+def protected_list(q=None):
+    with db() as c:
+        return [{"key": k, "at": a.isoformat()} for k, a in c.execute(
+            "SELECT key, created_at FROM unified.protected ORDER BY key").fetchall()]
+
+
+# ---------------------------------------------------------------- Gmail helpers
+def _filter(acc_id, addr, action, remove=False):
+    """Create (or with remove=True delete) the Gmail filter `from:addr` -> action."""
+    if remove:
+        for f in gmail(acc_id, "/settings/filters").get("filter", []):
+            if (f.get("criteria") or {}).get("from", "").lower() == addr and f.get("action") == action:
+                gmail(acc_id, f"/settings/filters/{f['id']}", "DELETE")
+        return
     try:
-        gmail(acc_id, "/settings/filters", "POST", {"criteria": {"from": addr}, "action": {"removeLabelIds": ["INBOX"]}})
+        gmail(acc_id, "/settings/filters", "POST", {"criteria": {"from": addr}, "action": action})
     except RuntimeError as e:
         if "exists" not in str(e).lower():
             raise
 
 
-def _archive_existing(acc_id, addr):
-    ids = [m["id"] for m in gmail_list(acc_id, qs(f"from:{addr} in:inbox"), "messages", 5000)]
+def _modify_existing(acc_id, query, add=(), remove=()):
+    """Apply label changes to every message matching `query` (batches of 1000). Returns the count."""
+    ids = [m["id"] for m in gmail_list(acc_id, qs(query), "messages", 5000)]
     for i in range(0, len(ids), 1000):
-        gmail(acc_id, "/messages/batchModify", "POST", {"ids": ids[i:i + 1000], "removeLabelIds": ["INBOX"]})
+        chunk = ids[i:i + 1000]
+        try:
+            gmail(acc_id, "/messages/batchModify", "POST",
+                  {"ids": chunk, "addLabelIds": list(add), "removeLabelIds": list(remove)})
+        except RuntimeError:
+            if "TRASH" not in add:
+                raise
+            for mid in chunk:  # some accounts refuse TRASH in batchModify: trash one by one
+                gmail(acc_id, f"/messages/{mid}/trash", "POST")
+    return len(ids)
+
+
+def _archive_existing(acc_id, addr):
+    n = _modify_existing(acc_id, f"from:{addr} in:inbox", remove=["INBOX"])
     with db() as c:
         c.execute("UPDATE unified.msg SET inbox = false WHERE account_id = %s AND from_addr = %s", (acc_id, addr))
-    return len(ids)
+    return n
+
+
+def _drop_rows(acc_id, addr):
+    with db() as c:
+        c.execute("DELETE FROM unified.msg WHERE account_id = %s AND from_addr = %s", (acc_id, addr))
 
 
 def _one_click(url):
@@ -194,10 +240,36 @@ def _one_click(url):
         return False
 
 
+TRASH_FILTER = {"addLabelIds": ["TRASH"]}
+ARCHIVE_FILTER = {"removeLabelIds": ["INBOX"]}
+STAR_FILTER = {"addLabelIds": ["STARRED"]}
+# actions that remove mail from view: refused for protected senders
+DESTRUCTIVE = {"unsubscribe", "autoarchive", "archive", "delete", "block", "spam"}
+ACTIONS = DESTRUCTIVE | {"keep", "reset", "star", "unstar", "protect", "unprotect"}
+
+
 def sender_action(d):
     addr, act = (d.get("addr") or "").strip().lower(), d.get("action")
-    if not re.fullmatch(r"[^@\s]+@[^@\s]+", addr) or act not in ("unsubscribe", "autoarchive", "archive", "keep", "reset"):
+    if act not in ACTIONS:
         raise ValueError("bad sender action")
+    if act in ("protect", "unprotect"):
+        if not re.fullmatch(r"[^@\s]*@[^@\s]+\.[^@\s]+", addr):
+            raise ValueError("protect an address (name@example.com) or a domain (@example.com)")
+        with db() as c:
+            if act == "protect":
+                c.execute("INSERT INTO unified.protected (key) VALUES (%s) ON CONFLICT DO NOTHING", (addr,))
+            else:
+                c.execute("DELETE FROM unified.protected WHERE key = %s", (addr,))
+        if act == "protect" and not addr.startswith("@"):  # also "kept" in Inbox Zero for every account that gets it
+            with db() as c:
+                for (a,) in c.execute("SELECT DISTINCT account_id FROM unified.msg WHERE from_addr = %s", (addr,)).fetchall():
+                    _newsletter(c, a, addr, "APPROVED")
+        log("cleanup", f"{act} {addr}")
+        return {"results": [{"email": "all accounts", "ok": True, "note": f"{addr} {act}ed"}], "manual": []}
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+", addr):
+        raise ValueError("bad sender address")
+    if act in DESTRUCTIVE and is_protected(addr):
+        raise PermissionError(f"{addr} is protected: unprotect it first")
     with db() as c:
         acc_ids = [r[0] for r in c.execute("SELECT DISTINCT account_id FROM unified.msg WHERE from_addr = %s",
                                            (addr,)).fetchall()]
@@ -221,12 +293,30 @@ def sender_action(d):
                 else:
                     note.append("no unsubscribe link: blocked with a filter instead")
             if act in ("unsubscribe", "autoarchive"):
-                _filter(a, addr)
-                n = _archive_existing(a, addr)
-                note.append(f"filter added, {n} archived")
-            if act == "archive":
+                _filter(a, addr, ARCHIVE_FILTER)
+                note.append(f"filter added, {_archive_existing(a, addr)} archived")
+            elif act == "archive":
                 note.append(f"{_archive_existing(a, addr)} archived")
-            status = {"unsubscribe": "UNSUBSCRIBED", "autoarchive": "AUTO_ARCHIVED", "keep": "APPROVED"}.get(act)
+            elif act == "delete":
+                note.append(f"{_modify_existing(a, f'from:{addr} -in:trash', add=['TRASH'])} moved to Trash")
+                _drop_rows(a, addr)
+            elif act == "block":
+                _filter(a, addr, TRASH_FILTER)
+                note.append(f"filter added (future mail goes to Trash), "
+                            f"{_modify_existing(a, f'from:{addr} -in:trash', add=['TRASH'])} moved to Trash")
+                _drop_rows(a, addr)
+            elif act == "spam":
+                note.append(f"{_modify_existing(a, f'from:{addr} -in:spam -in:trash', add=['SPAM'], remove=['INBOX'])} "
+                            "reported as spam")
+                _drop_rows(a, addr)
+            elif act == "star":
+                _filter(a, addr, STAR_FILTER)
+                note.append(f"filter added, {_modify_existing(a, f'from:{addr} in:inbox -is:starred', add=['STARRED'])} starred")
+            elif act == "unstar":
+                _filter(a, addr, STAR_FILTER, remove=True)
+                note.append(f"filter removed, {_modify_existing(a, f'from:{addr} is:starred', remove=['STARRED'])} unstarred")
+            status = {"unsubscribe": "UNSUBSCRIBED", "autoarchive": "AUTO_ARCHIVED", "block": "AUTO_ARCHIVED",
+                      "keep": "APPROVED"}.get(act)
             with db() as c:
                 if status:
                     _newsletter(c, a, addr, status)

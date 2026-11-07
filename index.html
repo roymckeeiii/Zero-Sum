@@ -99,6 +99,15 @@ td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
 .st.excluded { background:var(--chip); color:var(--faint); }
 @media (prefers-color-scheme: dark) { .st.pending, .st.changed { background:#3a2c0f; color:#f3c26b; } }
 .ops li { margin:2px 0; }
+.star { color:#c98500; }
+.chip.prot { background:var(--rule); color:var(--rule-t); }
+.chip .x { border:0; background:none; padding:0 0 0 4px; color:inherit; cursor:pointer; }
+.acts-cell .grp { display:flex; gap:4px; flex-wrap:wrap; margin:2px 0; }
+.acts-cell button { padding:2px 8px; font-size:12px; }
+button.danger { color:var(--err); }
+#toast { position:fixed; left:50%; bottom:20px; transform:translateX(-50%); display:none; gap:12px; align-items:center;
+  background:var(--text); color:var(--panel); padding:8px 14px; border-radius:8px; z-index:30; max-width:90vw; }
+#toast button { background:none; color:var(--panel); border:1px solid currentColor; }
 @media (max-width: 900px) {
   #v-inbox.on { grid-template-columns:1fr; grid-template-rows:auto 1fr; }
   #accounts { display:flex; overflow-x:auto; border-right:0; border-bottom:1px solid var(--line); padding:0; }
@@ -132,9 +141,11 @@ td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
       <select id="c-days"><option value="30">Last 30 days</option><option value="90" selected>Last 90 days</option>
         <option value="180">Last 180 days</option></select>
       <label><input type="checkbox" id="c-handled"> Show handled</label>
+      <input type="search" id="c-protect" placeholder="Protect name@x.com or @x.com"><button id="c-protect-btn">Protect</button>
       <span class="spacer"></span><button id="c-collect">Collect now</button>
     </div>
     <div id="c-status" class="note"></div>
+    <div id="c-prot" class="note" style="margin:6px 0"></div>
     <div id="c-result"></div>
     <div class="wide" id="c-table"><div class="empty">Loading…</div></div>
   </div></section>
