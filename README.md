@@ -82,7 +82,7 @@ All settings are environment variables; see [`.env.example`](.env.example).
 | `PORT` | `8080` | inside the container |
 | `COLLECT_EVERY_MIN`, `RULES_EVERY_MIN` | `15`, `10` | background jobs |
 | `BACKFILL_DAYS`, `BACKFILL_STEP` | `180`, `400` | history the collector gathers, per run per account |
-| `GMAIL_UNITS_PER_SEC` | `80` | Gmail quota units per second per account |
+| `GMAIL_UNITS_PER_SEC` | `50` | Gmail quota units per second per account |
 
 ## Security notes
 
@@ -91,11 +91,26 @@ All settings are environment variables; see [`.env.example`](.env.example).
 - POST requests need a custom header, so other sites cannot submit actions with your session.
 - The container runs read-only as an unprivileged user with all capabilities dropped.
 
-## Upgrading Inbox Zero
+## Inbox Zero versions
 
-Zero Sum reads and writes Inbox Zero's database directly. Before upgrading Inbox Zero, compare these at the new tag with
-**v2.25.8**: the `Rule`, `Action`, `Newsletter`, `Account`, `EmailAccount` and `ExecutedRule` models in
-`apps/web/prisma/schema.prisma`, and `apps/web/utils/encryption.ts`.
+[`inbox-zero.version`](inbox-zero.version) names the Inbox Zero release this version of Zero Sum is tested with.
+Zero Sum reads and writes some Inbox Zero tables directly, so run that release (or check first):
+
+```sh
+python3 tools/check_upstream.py              # supported version vs Inbox Zero's latest release
+python3 tools/check_upstream.py v2.25.8 v2.30.0
+```
+
+It compares only what Zero Sum depends on (the Prisma models and enums it uses, `utils/encryption.ts`, the
+environment variable names and the docker-compose services/endpoints). Exit 0 = nothing relevant changed: bump
+`inbox-zero.version`. Exit 1 = adapt Zero Sum first; the diff shows what changed.
+
+## Development
+
+```sh
+pip install cryptography==43.0.3 "psycopg[binary]==3.2.3"
+python3 -m unittest discover -s tests
+```
 
 ## License
 
