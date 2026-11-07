@@ -35,8 +35,14 @@ def key():
 
 
 def decrypt(value):
+    """Inbox Zero token: "v1:<hex>" (v2.30+, versioned keys; only v1 exists), legacy "<hex>", or plaintext."""
     if not value:
         return None
+    m = re.fullmatch(r"v(\d+):([0-9a-fA-F]+)", value)
+    if m:
+        if m.group(1) != "1":
+            raise ValueError(f"unknown Inbox Zero encryption version v{m.group(1)}: update Zero Sum")
+        value = m.group(2)
     try:
         b = bytes.fromhex(value)
     except ValueError:
@@ -111,8 +117,8 @@ ACC = Accounts()
 
 class Bucket:
     """Per-account token bucket in Gmail quota units. Gmail allows 15,000 units per user per minute (250/s), and
-    Inbox Zero spends from the same per-user quota, so this keeps well below: GMAIL_UNITS_PER_SEC (default 80)."""
-    RATE = float(os.environ.get("GMAIL_UNITS_PER_SEC", "80"))
+    Inbox Zero spends from the same per-user quota, so this keeps well below: GMAIL_UNITS_PER_SEC (default 50)."""
+    RATE = float(os.environ.get("GMAIL_UNITS_PER_SEC", "50"))
 
     def __init__(self):
         self.lock, self.tokens, self.at = threading.Lock(), self.RATE * 5, time.monotonic()

@@ -103,6 +103,9 @@ def collect_all():
                 if n:
                     print(f"[collect] {acc['email']}: +{n}", flush=True)
             except Exception as e:  # noqa: BLE001
+                if "quota exceeded" in str(e).lower():  # shared per-user Gmail quota (Inbox Zero uses it too): next run
+                    print(f"[collect] {acc['email']}: Gmail quota busy, continuing next run", flush=True)
+                    continue
                 log("collect-error", str(e)[:500], acc["email"])
                 with db() as c:
                     c.execute("INSERT INTO unified.collect_state (account_id, error) VALUES (%s, %s) "
