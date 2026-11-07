@@ -14,7 +14,7 @@ app never sends email.
 import email.utils, os, re, threading, time, urllib.error, urllib.parse, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-from core import ACC, db, gmail, gmail_list, header, log, new_id
+from core import ACC, POOL, db, gmail, gmail_list, header, label_id, log, new_id
 
 BACKFILL_DAYS = int(os.environ.get("BACKFILL_DAYS", "180"))
 BACKFILL_STEP = int(os.environ.get("BACKFILL_STEP", "400"))
@@ -204,7 +204,11 @@ def _filter(acc_id, addr, action, remove=False):
 
 def _modify_existing(acc_id, query, add=(), remove=()):
     """Apply label changes to every message matching `query` (batches of 1000). Returns the count."""
-    ids = [m["id"] for m in gmail_list(acc_id, qs(query), "messages", 5000)]
+    return _batch(acc_id, [m["id"] for m in gmail_list(acc_id, qs(query), "messages", 5000)], add, remove)
+
+
+def _batch(acc_id, ids, add=(), remove=()):
+    """Apply label changes to these message ids (batches of 1000). Returns the count."""
     for i in range(0, len(ids), 1000):
         chunk = ids[i:i + 1000]
         try:
@@ -243,11 +247,14 @@ def _one_click(url):
         return False
 
 
+QUARANTINE = os.environ.get("QUARANTINE_LABEL", "Quarantine")
 TRASH_FILTER = {"addLabelIds": ["TRASH"]}
 ARCHIVE_FILTER = {"removeLabelIds": ["INBOX"]}
 STAR_FILTER = {"addLabelIds": ["STARRED"]}
 # actions that remove mail from view: refused for protected senders
-DESTRUCTIVE = {"unsubscribe", "unsub_delete", "autoarchive", "archive", "delete", "block", "spam"}
+DESTRUCTIVE = {"unsubscribe", "unsub_archive", "unsub_quarantine", "unsub_delete", "autoarchive", "archive",
+               "quarantine", "delete", "block", "spam"}
+UNSUB = {"unsubscribe", "unsub_archive", "unsub_quarantine", "unsub_delete"}
 ACTIONS = DESTRUCTIVE | {"keep", "reset", "star", "unstar", "protect", "unprotect"}
 
 
@@ -286,7 +293,7 @@ def sender_action(d):
         em = ACC.email(a)
         try:
             note = []
-            if act in ("unsubscribe", "unsub_delete"):  # unsubscribe only; mail already there is left alone
+            if act in UNSUB:  # the unsubscribe part; what happens to their mail follows below
                 u, post = unsub.get(a, (None, False))
                 if u and u.startswith("https://") and post and _one_click(u):
                     note.append("unsubscribed (one-click)")
@@ -294,13 +301,20 @@ def sender_action(d):
                     manual.append({"email": em, "url": u})
                     note.append("open the link to finish unsubscribing")
                 else:
-                    note.append("no unsubscribe link" + ("" if act == "unsub_delete" else ": use Block to stop it"))
+                    note.append("no unsubscribe link" + ("" if act != "unsubscribe" else ": use Block or Quarantine"))
             if act == "unsub_delete":  # and clear it out: Trash now, future mail straight to Trash
                 _filter(a, addr, TRASH_FILTER)
                 note.append(f"{_modify_existing(a, f'from:{addr} -in:trash', add=['TRASH'])} moved to Trash, "
                             "future mail goes to Trash")
                 _drop_rows(a, addr)
-            if act == "autoarchive":
+            if act in ("quarantine", "unsub_quarantine"):  # held for review on the Quarantine tab, now and in future
+                lid = label_id(a, QUARANTINE)
+                _filter(a, addr, {"addLabelIds": [lid], "removeLabelIds": ["INBOX"]})
+                n = _modify_existing(a, f"from:{addr} in:inbox", add=[lid], remove=["INBOX"])
+                note.append(f"filter added, {n} moved to {QUARANTINE}")
+                with db() as c:
+                    c.execute("UPDATE unified.msg SET inbox = false WHERE account_id = %s AND from_addr = %s", (a, addr))
+            if act in ("autoarchive", "unsub_archive"):
                 _filter(a, addr, ARCHIVE_FILTER)
                 note.append(f"filter added, {_archive_existing(a, addr)} archived")
             elif act == "archive":
@@ -323,7 +337,8 @@ def sender_action(d):
             elif act == "unstar":
                 _filter(a, addr, STAR_FILTER, remove=True)
                 note.append(f"filter removed, {_modify_existing(a, f'from:{addr} is:starred', remove=['STARRED'])} unstarred")
-            status = {"unsubscribe": "UNSUBSCRIBED", "unsub_delete": "UNSUBSCRIBED", "autoarchive": "AUTO_ARCHIVED",
+            status = {"unsubscribe": "UNSUBSCRIBED", "unsub_archive": "UNSUBSCRIBED", "unsub_quarantine": "UNSUBSCRIBED",
+                      "unsub_delete": "UNSUBSCRIBED", "autoarchive": "AUTO_ARCHIVED", "quarantine": "AUTO_ARCHIVED",
                       "block": "AUTO_ARCHIVED",
                       "keep": "APPROVED"}.get(act)
             with db() as c:
@@ -337,3 +352,92 @@ def sender_action(d):
             results.append({"email": em, "ok": False, "note": str(e)[:200]})
     log("cleanup", f"{act} {addr}: " + "; ".join(f"{r['email']}: {r['note']}" for r in results))
     return {"results": results, "manual": manual}
+
+
+# ---------------------------------------------------------------- quarantine tab
+def _qlabel(acc_id):
+    return label_id(acc_id, QUARANTINE, create=False)
+
+
+def quarantine_list(q=None):
+    """Everything carrying the Quarantine label in every account, newest first, grouped by sender."""
+    from inbox import meta
+    errors = []
+
+    def ids(a):
+        try:
+            lid = _qlabel(a["id"])
+            return [(a, m["id"]) for m in gmail_list(a["id"], f"/messages?labelIds={lid}", "messages", 2000)] if lid else []
+        except Exception as e:  # noqa: BLE001
+            errors.append({"email": a["email"], "error": str(e)[:200]})
+            return []
+
+    def safe(p):
+        try:
+            return meta(*p)
+        except Exception:  # noqa: BLE001
+            return None
+    pairs = [p for lst in POOL.map(ids, ACC.list()) for p in lst]
+    items = sorted((i for i in POOL.map(safe, pairs) if i), key=lambda i: -i["ts"])
+    groups = {}
+    for it in items:
+        g = groups.setdefault(it["fromAddr"].lower(), {"addr": it["fromAddr"].lower(), "name": it["from"], "items": [],
+                                                        "accounts": {}})
+        g["items"].append(it)
+        g["accounts"][it["account"]] = it["email"]
+    senders = sorted(groups.values(), key=lambda g: -len(g["items"]))
+    for g in senders:
+        g["count"] = len(g["items"])
+        g["accounts"] = [{"id": k, "email": v} for k, v in g["accounts"].items()]
+    return {"label": QUARANTINE, "total": len(items), "senders": senders, "errors": errors}
+
+
+QACTIONS = {"delete": "moved to Trash", "archive": "archived (label removed)", "release": "back in the inbox"}
+
+
+def quarantine_action(d):
+    """delete / archive / release quarantined mail: chosen messages (items), one sender (sender), or all (all=true).
+    Releasing a sender also removes its quarantine filter, so new mail reaches the inbox again."""
+    act = d.get("action")
+    if act not in QACTIONS:
+        raise ValueError("bad quarantine action")
+    sender = (d.get("sender") or "").strip().lower()
+    chosen = {}
+    for it in d.get("items") or []:
+        if re.fullmatch(r"[0-9a-f]{6,32}", str(it.get("id", ""))):
+            chosen.setdefault(it.get("account"), []).append(it["id"])
+    if not (chosen or sender or d.get("all")):
+        raise ValueError("choose messages, a sender, or all")
+    results = []
+    for a in ACC.list():
+        if chosen and a["id"] not in chosen:
+            continue
+        try:
+            lid = _qlabel(a["id"])
+            if not lid:
+                continue
+            if chosen:
+                ids = chosen[a["id"]]
+            else:
+                query = f"/messages?labelIds={lid}" + (f"&q={urllib.parse.quote('from:' + sender)}" if sender else "")
+                ids = [m["id"] for m in gmail_list(a["id"], query, "messages", 5000)]
+            if not ids:
+                continue
+            add = {"delete": ["TRASH"], "archive": [], "release": ["INBOX"]}[act]
+            n = _batch(a["id"], ids, add=add, remove=[lid])
+            note = f"{n} {QACTIONS[act]}"
+            if act == "release" and sender:
+                _filter(a["id"], sender, {"addLabelIds": [lid], "removeLabelIds": ["INBOX"]}, remove=True)
+                note += ", quarantine filter removed"
+            results.append({"email": a["email"], "ok": True, "note": note})
+        except Exception as e:  # noqa: BLE001
+            results.append({"email": a["email"], "ok": False, "note": str(e)[:200]})
+    if act == "release" and sender:
+        with db() as c:
+            for (acc,) in c.execute("SELECT DISTINCT account_id FROM unified.msg WHERE from_addr = %s", (sender,)).fetchall():
+                c.execute('UPDATE "Newsletter" SET status = NULL, "updatedAt" = now() '
+                          'WHERE lower(email) = %s AND "emailAccountId" = %s AND status::text = \'AUTO_ARCHIVED\'',
+                          (sender, acc))
+    log("quarantine", f"{act} {sender or ('selected' if chosen else 'all')}: "
+        + "; ".join(f"{r['email']}: {r['note']}" for r in results))
+    return {"results": results}

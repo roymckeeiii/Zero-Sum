@@ -34,6 +34,7 @@ GET = {
     "/api/analytics": analytics.overview,
     "/api/rules": lambda q: rulesync.state(),
     "/api/protected": cleanup.protected_list,
+    "/api/quarantine": cleanup.quarantine_list,
     "/api/rules/preview": lambda q: rulesync.sync(apply=False),
 }
 
@@ -51,6 +52,7 @@ def _collect(d):
 POST = {
     "/api/action": inbox.action,
     "/api/sender": cleanup.sender_action,
+    "/api/quarantine": cleanup.quarantine_action,
     "/api/rules/sync": lambda d: rulesync.sync(apply=True),
     "/api/rules/include": rulesync.set_include,
     "/api/rules/auto": _auto,

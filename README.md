@@ -8,7 +8,8 @@ Inbox Zero handles each linked email account on its own. Zero Sum runs next to i
 | Tab | What it does |
 |---|---|
 | **Inbox** | The newest inbox mail from every account in one list. Read, archive, star, delete (to Trash, with undo), mark read/unread, search (Gmail syntax), filter by account, and see which Inbox Zero rule handled each email. Keys: `j`/`k` move, `e` archive, `s` star, `#` delete, `u` unread, `/` search. Replies happen in Gmail ("Reply in Gmail" opens the thread): Zero Sum never sends mail. |
-| **Cleanup** | Every sender across every account, with volume, read rate and which accounts get it, and one-click actions applied to every account that receives that sender: **Unsubscribe** (only that: RFC 8058 one-click where offered, otherwise links to open), **Unsubscribe & delete** (also moves their mail to Trash and sends anything that still arrives there), **Auto-archive** (Gmail `from:` filter + Inbox Zero's sender status), **Archive**, **Delete all** (to Trash), **Block** (to Trash now and in future), **Spam** (report, which also trains Gmail), **Auto-star** / **Un-star** (star now and in future), **Keep**, and **Protect**. |
+| **Cleanup** | Every sender across every account, with volume, read rate and which accounts get it, and one-click actions applied to every account that receives that sender: a **Clean up…** menu: **Unsubscribe** (only that: RFC 8058 one-click where offered, otherwise links to open), **Unsubscribe & archive**, **Unsubscribe & quarantine**, **Unsubscribe & delete** (Trash now and for anything that still arrives), **Quarantine**, **Auto-archive** (Gmail `from:` filter + Inbox Zero's sender status), **Archive**, **Delete all** (to Trash), **Block** (to Trash now and in future), **Spam** (report, which also trains Gmail), **Auto-star** / **Un-star** (star now and in future), **Keep**, and **Protect**. |
+| **Quarantine** | Senders you send to quarantine (from Cleanup) skip the inbox and get a `Quarantine` label (`QUARANTINE_LABEL`), now and for future mail. This tab lists everything held, grouped by sender across all accounts: tick messages or senders, then **Archive** or **Delete** (to Trash), or **Archive all** / **Delete all**; **Release sender** puts their mail back in the inbox and removes the filter. |
 | **Analytics** | Mail per day, read rate, top senders and domains, what Inbox Zero's rules did and cleanup totals, merged with a per-account breakdown. |
 | **Rules** | Write rules in Inbox Zero on a *master* account and share chosen ones with chosen accounts (opt-in: tick a rule under an account). Label actions are matched by label name; preview, sync now, and optional automatic sync. Nothing is shared by default, since each address usually gets different mail. |
 
@@ -18,7 +19,7 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
 
 - Deleting moves mail to **Trash**; Gmail empties Trash after 30 days, so mistakes can be undone until then. (Permanent
   deletion would need the full `https://mail.google.com/` scope, which Inbox Zero does not request.)
-- Delete all, Block and Spam ask for confirmation, with the number of emails and accounts affected.
+- Every Clean up action asks for confirmation, with the number of emails and accounts affected.
 - **Protected** senders (an address, or a whole domain like `@yourbank.com`) can't be unsubscribed, archived, deleted,
   blocked or marked as spam from the Cleanup tab: the buttons are disabled and the server refuses. Protecting an
   address also marks it "kept" in Inbox Zero. Auto-star still works on protected senders.
