@@ -1,0 +1,34 @@
+# Zero Sum as an add-on to Inbox Zero's own docker-compose.yml. Inside the Inbox Zero checkout:
+#
+#   git clone https://github.com/roymckeeiii/zero-sum.git zero-sum
+#   cp zero-sum/.env.example .env.zero-sum          # fill in DATABASE_URL password, ADMIN_DATABASE_URL, ALLOWED_EMAILS, ...
+#   docker compose -f docker-compose.yml -f zero-sum/compose.zero-sum.yml run --rm zero-sum python app.py init-db
+#   docker compose -f docker-compose.yml -f zero-sum/compose.zero-sum.yml up -d
+#
+# Paths here resolve against the Inbox Zero checkout (compose's project directory), hence ZERO_SUM_DIR.
+# It reuses Inbox Zero's env file (EMAIL_ENCRYPT_SECRET / SALT, GOOGLE_CLIENT_ID / SECRET), then .env.zero-sum, which
+# wins where both set a value (DATABASE_URL). It joins Inbox Zero's network and talks to its `db` service. Put it behind an authenticating
+# reverse proxy (Cloudflare Access, oauth2-proxy, ...) that sets AUTH_EMAIL_HEADER: it serves no login page itself.
+services:
+  zero-sum:
+    build:
+      context: ${ZERO_SUM_DIR:-./zero-sum}
+      dockerfile: Containerfile
+    image: zero-sum:local
+    restart: always
+    env_file:
+      - path: ${INBOX_ZERO_ENV_FILE:-./apps/web/.env}
+        required: false
+      - path: ${ZERO_SUM_ENV_FILE:-./.env.zero-sum}
+        required: true
+    depends_on:
+      db:
+        condition: service_healthy
+        required: false
+    ports:
+      - "${ZERO_SUM_BIND_HOST:-127.0.0.1}:${ZERO_SUM_PORT:-3101}:8080"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks:
+      - inbox-zero-network

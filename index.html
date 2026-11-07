@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zero Sum</title>
+<style>
+:root { color-scheme:light; --bg:#f4f4f2; --panel:#fcfcfb; --line:#e3e2de; --text:#0b0b0b; --muted:#52514e; --faint:#8a8984;
+  --accent:#2a78d6; --hover:#eceef2; --chip:#ecebe7; --rule:#e3f2ea; --rule-t:#11603f; --err:#b3261e; --ok:#11603f;
+  --bar:#2a78d6; --grid:#e3e2de;
+  --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a; --s4:#eda100; --s5:#e87ba4; --s6:#008300; --s7:#6250d6; --s8:#e34948; --s9:#8a8984; }
+@media (prefers-color-scheme: dark) { :root { color-scheme:dark; --bg:#121211; --panel:#1a1a19; --line:#2e2e2c; --text:#f0efec;
+  --muted:#c3c2b7; --faint:#8f8e86; --accent:#3987e5; --hover:#24272d; --chip:#2a2a28; --rule:#1b3328; --rule-t:#8fd6ae;
+  --err:#ff8a80; --ok:#8fd6ae; --bar:#3987e5; --grid:#2e2e2c;
+  --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500; --s5:#d55181; --s6:#008300; --s7:#9085e9; --s8:#e66767; --s9:#8f8e86; } }
+* { box-sizing:border-box; }
+html, body { height:100%; }
+body { margin:0; font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--text);
+  display:flex; flex-direction:column; }
+header { display:flex; gap:6px; align-items:center; padding:8px 12px; background:var(--panel); border-bottom:1px solid var(--line);
+  flex-wrap:wrap; }
+header h1 { font-size:15px; margin:0 10px 0 0; white-space:nowrap; }
+.tabs { display:flex; gap:2px; }
+.tabs button { border:0; background:none; padding:6px 12px; border-radius:6px; color:var(--muted); }
+.tabs button.on { background:var(--hover); color:var(--text); font-weight:600; }
+.spacer { flex:1; }
+button, select, input[type=search] { font:inherit; padding:5px 10px; border:1px solid var(--line); border-radius:6px;
+  background:var(--panel); color:var(--text); }
+button { cursor:pointer; } button:hover { background:var(--hover); } button:disabled { opacity:.5; cursor:default; }
+button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+label { display:inline-flex; gap:4px; align-items:center; color:var(--muted); white-space:nowrap; }
+main { flex:1; min-height:0; overflow:auto; }
+.view { display:none; height:100%; } .view.on { display:block; }
+.page { max-width:1200px; margin:0 auto; padding:16px; }
+.bar-row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
+.note { color:var(--muted); font-size:12px; }
+.err { color:var(--err); padding:6px 12px; font-size:12px; }
+.ok { color:var(--ok); }
+.empty { padding:24px; color:var(--muted); }
+.chip { display:inline-block; padding:0 6px; margin:1px 4px 1px 0; border-radius:9px; background:var(--chip); font-size:11px;
+  white-space:nowrap; }
+.chip.rule { background:var(--rule); color:var(--rule-t); }
+.dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:5px; flex:none; vertical-align:middle; }
+table { border-collapse:collapse; width:100%; background:var(--panel); border:1px solid var(--line); border-radius:8px; }
+th, td { text-align:left; padding:7px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+th { font-weight:600; color:var(--muted); font-size:12px; background:var(--panel); position:sticky; top:0; }
+td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+.card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin-bottom:14px; }
+.card h3 { margin:0 0 10px; font-size:14px; }
+.tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin-bottom:14px; }
+.tile { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
+.tile .v { font-size:24px; font-weight:650; font-variant-numeric:tabular-nums; }
+.tile .k { color:var(--muted); font-size:12px; }
+.grid2 { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+.hbar { display:grid; grid-template-columns:minmax(120px,32%) 1fr auto; gap:8px; align-items:center; padding:3px 0; }
+.hbar .lab { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.hbar .track { height:10px; }
+.hbar .fill { height:10px; background:var(--bar); border-radius:0 4px 4px 0; min-width:2px; }
+.hbar .val { color:var(--muted); font-variant-numeric:tabular-nums; font-size:12px; }
+#tip { position:fixed; pointer-events:none; background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:6px 8px;
+  font-size:12px; box-shadow:0 4px 14px rgba(0,0,0,.15); display:none; z-index:20; max-width:280px; }
+/* inbox */
+#v-inbox.on { display:grid; grid-template-columns:240px minmax(320px,1fr) minmax(0,1.3fr); height:100%; }
+#accounts, #list, #reader { overflow:auto; }
+#accounts { border-right:1px solid var(--line); padding:8px 0; background:var(--panel); }
+#accounts a { display:flex; justify-content:space-between; gap:8px; padding:6px 12px; color:var(--text); text-decoration:none;
+  cursor:pointer; }
+#accounts a span:first-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#accounts a.on { background:var(--hover); font-weight:600; }
+#accounts a .n { color:var(--muted); }
+#accounts a.bad span:first-child { color:var(--err); }
+#accounts .tools { padding:8px 12px; display:flex; flex-direction:column; gap:6px; }
+#list { border-right:1px solid var(--line); }
+.row { display:grid; grid-template-columns:auto 1fr auto; gap:1px 8px; padding:8px 12px; border-bottom:1px solid var(--line);
+  cursor:pointer; }
+.row:hover, .row.sel { background:var(--hover); }
+.row .from { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.row .when { color:var(--muted); font-size:12px; white-space:nowrap; }
+.row .subj, .row .snip, .row .chips { grid-column:2/4; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.row .snip { color:var(--muted); }
+.row.unread .from, .row.unread .subj { font-weight:650; }
+.row .acts { grid-column:3; grid-row:1; display:none; gap:4px; }
+.row:hover .acts { display:flex; } .row:hover .when { display:none; }
+.row .acts button { padding:1px 6px; font-size:12px; }
+#more { margin:12px; }
+#reader { background:var(--panel); display:flex; flex-direction:column; }
+#reader .hd { padding:12px 16px; border-bottom:1px solid var(--line); }
+#reader .hd h2 { font-size:17px; margin:0 0 6px; }
+#reader .hd .meta { color:var(--muted); font-size:13px; word-break:break-word; }
+#reader .tools { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
+#reader iframe { flex:1; width:100%; border:0; background:#fff; }
+#reader pre { flex:1; margin:0; padding:16px; white-space:pre-wrap; word-break:break-word; font:13px/1.5 ui-monospace,monospace; }
+.mobile { display:none; }
+/* rules */
+.matrix td.cell { text-align:center; white-space:nowrap; }
+.st { font-size:11px; padding:0 6px; border-radius:9px; }
+.st.synced { background:var(--rule); color:var(--rule-t); }
+.st.pending, .st.changed { background:#fff1d6; color:#7a4b00; }
+.st.excluded { background:var(--chip); color:var(--faint); }
+@media (prefers-color-scheme: dark) { .st.pending, .st.changed { background:#3a2c0f; color:#f3c26b; } }
+.ops li { margin:2px 0; }
+@media (max-width: 900px) {
+  #v-inbox.on { grid-template-columns:1fr; grid-template-rows:auto 1fr; }
+  #accounts { display:flex; overflow-x:auto; border-right:0; border-bottom:1px solid var(--line); padding:0; }
+  #accounts a { flex:none; } #accounts .tools { display:none; }
+  #reader { display:none; position:fixed; inset:0; z-index:5; }
+  body.reading #reader { display:flex; } .mobile { display:inline-block; }
+  .grid2 { grid-template-columns:1fr; }
+  .wide { overflow-x:auto; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>Zero Sum</h1>
+  <nav class="tabs" id="tabs">
+    <button data-tab="inbox" class="on">Inbox</button><button data-tab="cleanup">Cleanup</button>
+    <button data-tab="analytics">Analytics</button><button data-tab="rules">Rules</button>
+  </nav>
+  <span class="spacer"></span>
+  <a id="iz-link" href="#" target="_blank" rel="noopener" hidden><button>Inbox Zero ↗</button></a>
+</header>
+<main>
+  <section class="view on" id="v-inbox">
+    <nav id="accounts"></nav>
+    <div id="list"><div class="empty">Loading…</div></div>
+    <section id="reader"><div class="empty">Select an email. Keys: j/k move, e archive, u unread, r refresh, / search.</div></section>
+  </section>
+  <section class="view" id="v-cleanup"><div class="page">
+    <div class="bar-row">
+      <input type="search" id="c-q" placeholder="Filter senders">
+      <select id="c-days"><option value="30">Last 30 days</option><option value="90" selected>Last 90 days</option>
+        <option value="180">Last 180 days</option></select>
+      <label><input type="checkbox" id="c-handled"> Show handled</label>
+      <span class="spacer"></span><button id="c-collect">Collect now</button>
+    </div>
+    <div id="c-status" class="note"></div>
+    <div id="c-result"></div>
+    <div class="wide" id="c-table"><div class="empty">Loading…</div></div>
+  </div></section>
+  <section class="view" id="v-analytics"><div class="page">
+    <div class="bar-row">
+      <select id="a-days"><option value="7">Last 7 days</option><option value="30" selected>Last 30 days</option>
+        <option value="90">Last 90 days</option><option value="180">Last 180 days</option></select>
+      <span id="a-cover" class="note"></span>
+    </div>
+    <div id="a-body"><div class="empty">Loading…</div></div>
+  </div></section>
+  <section class="view" id="v-rules"><div class="page">
+    <div class="bar-row">
+      <span id="r-master" class="note"></span><span class="spacer"></span>
+      <label><input type="checkbox" id="r-auto"> Auto sync every 10 min</label>
+      <button id="r-preview">Preview changes</button><button id="r-sync" class="primary">Sync now</button>
+    </div>
+    <div id="r-ops"></div>
+    <div class="wide" id="r-matrix"><div class="empty">Loading…</div></div>
+    <div id="r-log"></div>
+  </div></section>
+</main>
+<div id="tip" role="tooltip"></div>
+<script src="/app.js"></script>
+</body>
+</html>
