@@ -99,6 +99,15 @@ td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
 .st.removing { background:var(--chip); color:var(--faint); }
 @media (prefers-color-scheme: dark) { .st.pending, .st.changed { background:#3a2c0f; color:#f3c26b; } }
 .ops li { margin:2px 0; }
+.qgroup { background:var(--panel); border:1px solid var(--line); border-radius:8px; margin-bottom:10px; }
+.qgroup .qh { display:flex; gap:10px; align-items:center; flex-wrap:wrap; padding:8px 12px; border-bottom:1px solid var(--line); }
+.qgroup .qh .who { flex:1; min-width:200px; }
+.qgroup .qm { display:grid; grid-template-columns:auto auto 1fr auto; gap:8px; align-items:center; padding:4px 12px;
+  border-bottom:1px solid var(--line); font-size:13px; }
+.qgroup .qm:last-child { border-bottom:0; }
+.qgroup .qm .s { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#tabs .n { color:var(--muted); font-weight:400; }
+select.cleanup { padding:3px 6px; font-size:12px; }
 .star { color:#c98500; }
 .chip.prot { background:var(--rule); color:var(--rule-t); }
 .chip .x { border:0; background:none; padding:0 0 0 4px; color:inherit; cursor:pointer; }
@@ -124,6 +133,7 @@ button.danger { color:var(--err); }
   <h1>Zero Sum</h1>
   <nav class="tabs" id="tabs">
     <button data-tab="inbox" class="on">Inbox</button><button data-tab="cleanup">Cleanup</button>
+    <button data-tab="quarantine">Quarantine <span id="q-count" class="n"></span></button>
     <button data-tab="analytics">Analytics</button><button data-tab="rules">Rules</button>
   </nav>
   <span class="spacer"></span>
@@ -148,6 +158,16 @@ button.danger { color:var(--err); }
     <div id="c-prot" class="note" style="margin:6px 0"></div>
     <div id="c-result"></div>
     <div class="wide" id="c-table"><div class="empty">Loading…</div></div>
+  </div></section>
+  <section class="view" id="v-quarantine"><div class="page">
+    <div class="bar-row">
+      <span id="q-summary" class="note"></span><span class="spacer"></span>
+      <button id="q-refresh">Refresh</button>
+      <button id="q-archive-sel" disabled>Archive selected</button><button id="q-delete-sel" class="danger" disabled>Delete selected</button>
+      <button id="q-archive-all">Archive all</button><button id="q-delete-all" class="danger">Delete all</button>
+    </div>
+    <div id="q-result"></div>
+    <div id="q-body"><div class="empty">Loading…</div></div>
   </div></section>
   <section class="view" id="v-analytics"><div class="page">
     <div class="bar-row">

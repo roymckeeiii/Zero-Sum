@@ -39,7 +39,7 @@ $("#tabs").onclick = (e) => {
   S.tab = b.dataset.tab;
   document.querySelectorAll("#tabs button").forEach((x) => x.classList.toggle("on", x === b));
   document.querySelectorAll(".view").forEach((v) => v.classList.toggle("on", v.id === `v-${S.tab}`));
-  if (!loaded[S.tab]) { loaded[S.tab] = true; ({ cleanup: loadSenders, analytics: loadAnalytics, rules: loadRules })[S.tab]?.(); }
+  if (!loaded[S.tab]) { loaded[S.tab] = true; ({ cleanup: loadSenders, quarantine: loadQuarantine, analytics: loadAnalytics, rules: loadRules })[S.tab]?.(); }
 };
 
 /* ------------------------------------------------------------------ inbox */
@@ -183,16 +183,31 @@ document.onkeydown = (e) => {
 };
 
 /* ------------------------------------------------------------------ cleanup */
-const STATUS = { UNSUBSCRIBED: "unsubscribed", AUTO_ARCHIVED: "auto-archived", APPROVED: "kept" };
-const LABELS = { unsubscribe: "Unsubscribe", unsub_delete: "Unsubscribe & delete", autoarchive: "Auto-archive", archive: "Archive", delete: "Delete all", block: "Block", spam: "Spam" };
+const STATUS = { UNSUBSCRIBED: "unsubscribed", AUTO_ARCHIVED: "auto-archived / quarantined", APPROVED: "kept" };
+const MENU = [["Unsubscribe", ["unsubscribe", "unsub_archive", "unsub_quarantine", "unsub_delete"]],
+  ["Without unsubscribing", ["autoarchive", "quarantine", "archive"]], ["Remove", ["delete", "block", "spam"]]];
+const LABELS = { unsubscribe: "Unsubscribe", unsub_archive: "Unsubscribe & archive", unsub_quarantine: "Unsubscribe & quarantine",
+  quarantine: "Quarantine", unsub_delete: "Unsubscribe & delete", autoarchive: "Auto-archive", archive: "Archive", delete: "Delete all", block: "Block", spam: "Spam" };
 const TIPS = { unsubscribe: "Unsubscribe only (one-click where offered); mail already there stays where it is",
   unsub_delete: "Unsubscribe, move all mail from this sender to Trash, and send anything that still arrives to Trash",
+  unsub_archive: "Unsubscribe, archive what is in the inbox, and keep anything that still arrives out of the inbox",
+  unsub_quarantine: "Unsubscribe, and hold their mail (now and future) on the Quarantine tab for review",
+  quarantine: "Hold their mail (now and future) on the Quarantine tab, out of the inbox, to review and clear in bulk",
   autoarchive: "Skip the inbox from now on (Gmail filter), and archive what is there", archive: "Archive what is in the inbox now",
   delete: "Move all mail from this sender to Trash (Gmail empties Trash after 30 days)",
   block: "Move all mail from this sender to Trash, and send future mail straight to Trash (Gmail filter)",
   spam: "Report all mail from this sender as spam (also trains Gmail's spam filter)" };
 const CONFIRM = { unsub_delete: "Unsubscribe and move ALL mail from", delete: "Move ALL mail from", block: "Move ALL mail from",
   spam: "Report ALL mail from" };
+function confirmText(a, s) {  // every removal action asks first (Roy, 11-07)
+  const n = `${s.addr} (${s.count} recent emails across ${s.accounts.length} account(s))`;
+  if (CONFIRM[a]) return `${CONFIRM[a]} ${n}` + (a === "spam" ? " as spam?" : " to Trash?") +
+    (["block", "unsub_delete"].includes(a) ? " Future mail from this sender will go straight to Trash." : "");
+  return { unsubscribe: `Unsubscribe from ${n}?`, unsub_archive: `Unsubscribe from ${n} and archive their mail? Future mail skips the inbox.`,
+    unsub_quarantine: `Unsubscribe from ${n} and move their mail to Quarantine? Future mail goes there too.`,
+    quarantine: `Move mail from ${n} to Quarantine? Future mail goes there too.`,
+    autoarchive: `Archive mail from ${n}? Future mail skips the inbox.`, archive: `Archive what is in the inbox from ${n}?` }[a];
+}
 async function loadSenders() {
   const p = new URLSearchParams({ q: $("#c-q").value, days: $("#c-days").value, hide: $("#c-handled").checked ? "0" : "1" });
   let d;
@@ -213,8 +228,9 @@ async function loadSenders() {
           <button data-i="${i}" data-a="star" title="Star what is in the inbox, and future mail (Gmail filter)">Auto-star</button>
           <button data-i="${i}" data-a="unstar" title="Remove the auto-star filter and the stars">Un-star</button>
           <button data-i="${i}" data-a="keep" title="Mark as wanted in Inbox Zero (hides it here)">Keep</button></div>
-        <div class="grp">${["unsubscribe", "unsub_delete", "autoarchive", "archive", "delete", "block", "spam"].map((a) => `<button data-i="${i}" data-a="${a}"
-          ${s.protected ? "disabled title='Protected sender'" : `title="${esc(TIPS[a])}"`} class="${["unsub_delete", "delete", "block", "spam"].includes(a) ? "danger" : ""}">${LABELS[a]}</button>`).join("")}</div></td></tr>`).join("") + "</tbody></table>";
+        <div class="grp"><select class="cleanup" data-i="${i}" ${s.protected ? "disabled title='Protected sender'" : ""}>
+          <option value="">Clean up…</option>${MENU.map(([g, acts]) => `<optgroup label="${g}">${acts.map((a) =>
+            `<option value="${a}" title="${esc(TIPS[a])}">${LABELS[a]}</option>`).join("")}</optgroup>`).join("")}</select></div></td></tr>`).join("") + "</tbody></table>";
   $("#c-prot").innerHTML = d.protected.length ? "Protected: " + d.protected.map((k) => `<span class="chip prot">${esc(k)}
     <button class="x" data-unprot="${esc(k)}" title="Unprotect">×</button></span>`).join("") : "";
 }
@@ -222,13 +238,13 @@ $("#c-table").onclick = async (e) => {
   const b = e.target.closest("button[data-a]");
   if (!b) return;
   const s = S.senders[+b.dataset.i], a = b.dataset.a;
-  if (CONFIRM[a] && !confirm(`${CONFIRM[a]} ${s.addr} (${s.count} recent emails across ${s.accounts.length} account(s))` +
-    (a === "spam" ? " as spam?" : " to Trash?") + (["block", "unsub_delete"].includes(a) ? " Future mail from this sender will go straight to Trash." : ""))) return;
+  const ask = confirmText(a, s);
+  if (ask && !confirm(ask)) return;
   b.disabled = true; b.textContent = "…";
   try {
     const r = await api("/api/sender", { addr: s.addr, action: b.dataset.a });
     S.lastSender = s;
-    const next = ["delete", "block", "archive", "unsubscribe"].filter((x) => x !== a)
+    const next = ["delete", "quarantine", "block", "archive", "unsubscribe"].filter((x) => x !== a)
       .map((x) => `<button data-next="${x}" class="${["delete", "block"].includes(x) ? "danger" : ""}">${LABELS[x]}</button>`).join(" ");
     $("#c-result").innerHTML = `<div class="card"><b>${esc(LABELS[a] || a)}: ${esc(s.addr)}</b>
       ${s.protected ? "" : `<div class="grp" style="margin:6px 0">Next for this sender: ${next}</div>`}<ul>` +
@@ -237,6 +253,13 @@ $("#c-table").onclick = async (e) => {
         r.manual.map((m) => `<li>${esc(m.email)}: <a href="${esc(m.url)}" target="_blank" rel="noopener noreferrer">${esc(m.url.slice(0, 80))}</a></li>`).join("") + "</ul>" : "") + "</div>";
   } catch (err) { $("#c-result").innerHTML = `<div class="err">${esc(err.message)}</div>`; }
   loadSenders();
+};
+$("#c-table").onchange = (e) => {  // the "Clean up…" menu runs the chosen action through the button handler
+  const sel = e.target.closest("select.cleanup");
+  if (!sel || !sel.value) return;
+  const btn = document.createElement("button");
+  btn.dataset.i = sel.dataset.i; btn.dataset.a = sel.value; sel.value = "";
+  $("#c-table").appendChild(btn); btn.click(); btn.remove();
 };
 let ct;
 $("#c-q").oninput = () => { clearTimeout(ct); ct = setTimeout(loadSenders, 400); };
@@ -262,6 +285,74 @@ $("#c-protect-btn").onclick = async () => {
   loadSenders();
 };
 $("#c-collect").onclick = async () => { await api("/api/collect", {}).catch(() => {}); $("#c-status").textContent = "Collecting… refresh in a minute."; };
+
+/* ------------------------------------------------------------------ quarantine */
+async function loadQuarantine() {
+  $("#q-body").innerHTML = `<div class="empty">Loading…</div>`;
+  let d;
+  try { d = await api("/api/quarantine"); } catch (e) { $("#q-body").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
+  S.quar = d;
+  renderQuarantine();
+}
+function renderQuarantine() {
+  const d = S.quar;
+  $("#q-count").textContent = d.total || "";
+  $("#q-summary").textContent = d.total ? `${fmt(d.total)} emails from ${d.senders.length} senders held in "${d.label}" across your accounts.`
+    : `Nothing in "${d.label}". Use Clean up… > Quarantine on the Cleanup tab to hold a sender's mail here.`;
+  $("#q-body").innerHTML = (d.errors || []).map((e) => `<div class="err">${esc(e.email)}: ${esc(e.error)}</div>`).join("") +
+    d.senders.map((g, gi) => `<div class="qgroup"><div class="qh">
+      <label><input type="checkbox" data-group="${gi}"></label>
+      <span class="who"><b>${esc(g.name || g.addr)}</b> <span class="note">${esc(g.addr)} · ${g.count} email(s)</span><br>
+        ${g.accounts.map((a) => acctChip(a.id, a.email)).join("")}</span>
+      <button data-qa="release" data-g="${gi}" title="Back to the inbox, and stop quarantining this sender">Release sender</button>
+      <button data-qa="archive" data-g="${gi}">Archive</button><button data-qa="delete" data-g="${gi}" class="danger">Delete</button></div>` +
+      g.items.slice(0, g.open ? 1000 : 5).map((it, ii) => `<div class="qm"><input type="checkbox" data-g="${gi}" data-ii="${ii}">
+        ${acctChip(it.account, it.email)}<span class="s">${esc(it.subject)} <span class="note">${esc(it.snippet)}</span></span>
+        <span class="note">${when(it.ts)}</span></div>`).join("") +
+      (g.items.length > 5 && !g.open ? `<div class="qm"><span></span><span></span><a href="#" data-more="${gi}">Show all ${g.count}</a><span></span></div>` : "") +
+      "</div>").join("");
+  selChanged();
+}
+function selected() {
+  return [...document.querySelectorAll("#q-body input[data-ii]:checked")].map((c) => S.quar.senders[+c.dataset.g].items[+c.dataset.ii])
+    .map((it) => ({ account: it.account, id: it.id }));
+}
+function selChanged() {
+  const n = selected().length;
+  $("#q-archive-sel").disabled = $("#q-delete-sel").disabled = !n;
+  $("#q-archive-sel").textContent = `Archive selected${n ? ` (${n})` : ""}`;
+  $("#q-delete-sel").textContent = `Delete selected${n ? ` (${n})` : ""}`;
+}
+async function qact(body, ask) {
+  if (!confirm(ask)) return;
+  $("#q-result").innerHTML = `<div class="note">Working…</div>`;
+  try {
+    const r = await api("/api/quarantine", body);
+    $("#q-result").innerHTML = `<div class="card"><ul>` + (r.results.length ? r.results.map((x) => `<li class="${x.ok ? "" : "err"}">${esc(x.email)}: ${esc(x.note)}</li>`).join("")
+      : "<li>Nothing to do.</li>") + "</ul></div>";
+  } catch (e) { $("#q-result").innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+  loadQuarantine();
+}
+const QVERB = { delete: "Move to Trash", archive: "Archive (remove the label)", release: "Release back to the inbox" };
+$("#q-body").onchange = (e) => {
+  const g = e.target.dataset.group;
+  if (g != null) document.querySelectorAll(`#q-body input[data-g="${g}"][data-ii]`).forEach((c) => { c.checked = e.target.checked; });
+  selChanged();
+};
+$("#q-body").onclick = (e) => {
+  const more = e.target.closest("a[data-more]");
+  if (more) { e.preventDefault(); S.quar.senders[+more.dataset.more].open = true; return renderQuarantine(); }
+  const b = e.target.closest("button[data-qa]");
+  if (!b) return;
+  const g = S.quar.senders[+b.dataset.g], a = b.dataset.qa;
+  qact({ action: a, sender: g.addr }, `${QVERB[a]}: all ${g.count} quarantined email(s) from ${g.addr} in every account?` +
+    (a === "release" ? " New mail from them will reach the inbox again." : ""));
+};
+$("#q-refresh").onclick = loadQuarantine;
+$("#q-archive-sel").onclick = () => { const it = selected(); qact({ action: "archive", items: it }, `Archive ${it.length} selected email(s)?`); };
+$("#q-delete-sel").onclick = () => { const it = selected(); qact({ action: "delete", items: it }, `Move ${it.length} selected email(s) to Trash?`); };
+$("#q-archive-all").onclick = () => qact({ action: "archive", all: true }, `Archive ALL ${S.quar?.total || 0} quarantined emails in every account?`);
+$("#q-delete-all").onclick = () => qact({ action: "delete", all: true }, `Move ALL ${S.quar?.total || 0} quarantined emails in every account to Trash?`);
 
 /* ------------------------------------------------------------------ analytics */
 function hbars(rows, label, value, title) {
@@ -365,4 +456,5 @@ $("#r-matrix").onchange = async (e) => {
 
 api("/api/config").then((c) => { S.izUrl = c.inboxZeroUrl; if (c.inboxZeroUrl) { const a = $("#iz-link"); a.href = c.inboxZeroUrl; a.hidden = false; } }).catch(() => {});
 loadAccounts().then(() => loadList());
+api("/api/quarantine").then((d) => { $("#q-count").textContent = d.total || ""; }).catch(() => {});
 setInterval(() => { if (!document.hidden && S.tab === "inbox") { loadAccounts(); loadList(true); } }, 120000);
