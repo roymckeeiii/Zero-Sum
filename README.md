@@ -1,9 +1,124 @@
-# Zero Sum
+# Zero Sum: one unified inbox for all your Inbox Zero accounts
 
-**A unified inbox add-on for self-hosted [Inbox Zero](https://github.com/elie222/inbox-zero).** One inbox, one
-cleanup, one set of rules across all your Gmail accounts.
+**Got five Gmail accounts? Ten? Stop switching between them.** Zero Sum is a free, open-source, self-hosted add-on for
+[Inbox Zero](https://github.com/elie222/inbox-zero), the AI email assistant, that puts **every connected email account
+in one place**: one unified inbox, one cleanup list, one quarantine and one analytics dashboard. Reach inbox zero across
+all of your mailboxes at once instead of one account at a time.
 
-Inbox Zero handles each linked email account on its own. Zero Sum runs next to it and works across all of them:
+> *Zero Sum adds up all your inboxes so the total can reach zero.*
+
+---
+
+## Who it's for
+
+Inbox Zero is excellent at taming *one* inbox. It handles each linked account on its own: its rules, history and bulk
+unsubscribe live per account, and you switch accounts to work through each one. That's fine with two accounts. With
+many it becomes the chore you were trying to escape.
+
+Zero Sum is for you if you:
+
+- run **multiple Gmail accounts**: personal, work, a business or two, side projects, an old address that still gets mail;
+- manage **several Google Workspace mailboxes** (support@, sales@, hello@) and want them in one view;
+- keep **unsubscribing from the same newsletter** separately in every account;
+- want to see **which account is drowning** and who's sending you the most email, across everything;
+- **self-host Inbox Zero** already, or want to, and like keeping your email data on your own server.
+
+## What you get
+
+### One unified inbox for every account
+Every account's newest mail in a single list, newest first, colour-coded by account. Read, archive, star, delete
+(with undo), mark read/unread, search with Gmail syntax across all accounts at once, and see which Inbox Zero rule
+handled each email. Keyboard shortcuts included: `j`/`k`, `e` archive, `s` star, `#` delete, `/` search.
+
+### Cross-account bulk unsubscribe and cleanup
+A single list of **every sender across every account**, with volume, read rate and which mailboxes they hit. One click
+applies to *all* of them:
+
+- **Unsubscribe**: RFC 8058 one-click unsubscribe where the sender supports it
+- **Unsubscribe & archive**, **Unsubscribe & delete**, **Unsubscribe & quarantine**
+- **Auto-archive**, **Delete all**, **Block** (straight to Trash), **Report spam**, **Auto-star** the senders that matter
+- **Protect** important senders or whole domains (`@yourbank.com`) so they can never be bulk-deleted by accident
+
+Every action asks for confirmation first, showing how many emails and accounts it will touch.
+
+### Quarantine: review first, then clear everything at once
+Not sure a sender is junk? **Quarantine** them. Their mail, now and in future, skips the inbox in every account and
+lands on one Quarantine page. Skim it whenever you like, then **Archive all** or **Delete all** across every account in
+one click, or **Release** a sender you want back.
+
+### Email analytics across all your mailboxes
+Mail volume per day, read rate, top senders and top domains, what Inbox Zero's AI rules did, and how many senders
+you've unsubscribed from. Merged totals plus a per-account breakdown, so you can see where the noise comes from.
+
+### Share Inbox Zero rules between accounts
+Write an AI rule once on your main account and share it with the accounts that need it: tick a box per rule and
+account. Labels are matched by name and created where missing. Nothing is shared unless you choose it, because every
+address gets different mail.
+
+## Why self-hosted
+
+- **Your mail stays on your server.** Zero Sum talks to Gmail directly from your machine; nothing goes to a third-party
+  service.
+- **Free and open source** (AGPL-3.0), no subscription.
+- **Drops in next to Inbox Zero** with one extra docker-compose file, and works with the Google accounts you've already
+  connected there: no new OAuth app to set up.
+- **Kept current with Inbox Zero releases**: it pins the Inbox Zero version it's tested with and ships a checker that
+  flags upstream changes before you upgrade.
+
+## Zero Sum vs switching accounts in Inbox Zero
+
+| | Inbox Zero alone | Inbox Zero + Zero Sum |
+|---|---|---|
+| Read mail from all accounts | switch account by account | one unified inbox |
+| Bulk unsubscribe a sender | once per account | once, applied to every account |
+| Review junk before deleting | per account | one Quarantine page for all accounts |
+| Analytics | per account | merged and per account |
+| AI rules | written per account | written once, shared where you choose |
+| Protect important senders | | addresses or whole domains |
+
+Zero Sum doesn't replace Inbox Zero: Inbox Zero still does the AI sorting, drafting and rules on each account. Zero Sum
+gives you one place to see and clean all of them.
+
+## Quick start
+
+You need a self-hosted Inbox Zero with your Google accounts connected and an authenticating reverse proxy (Cloudflare
+Access, oauth2-proxy, ...). Then, inside the Inbox Zero checkout:
+
+```sh
+git clone https://github.com/roymckeeiii/zero-sum.git zero-sum
+cp zero-sum/.env.example .env.zero-sum      # set ALLOWED_EMAILS, a database password, ...
+docker compose -f docker-compose.yml -f zero-sum/compose.zero-sum.yml run --rm zero-sum python app.py init-db
+docker compose -f docker-compose.yml -f zero-sum/compose.zero-sum.yml up -d
+```
+
+Full details are under [Install](#install-docker-compose) below.
+
+## FAQ
+
+**Can Inbox Zero show all my email accounts in one inbox?** Not on its own: it handles each connected account
+separately and you switch between them. Zero Sum adds the combined view on top of your existing Inbox Zero.
+
+**Does it work with Google Workspace accounts?** Yes, any Gmail or Google Workspace account connected in Inbox Zero.
+Microsoft/Outlook accounts are not supported yet.
+
+**Will it delete anything without asking?** No. Every bulk action asks first, deleting means Gmail's Trash
+(recoverable for 30 days), and protected senders can't be bulk-removed.
+
+**Does it send email?** Never. Replies happen in Gmail; Zero Sum only reads, labels, archives and trashes.
+
+**Is it an official Inbox Zero product?** No. It's an independent add-on that works alongside Inbox Zero.
+
+---
+
+<sub>Keywords: Inbox Zero add-on, Inbox Zero unified inbox, Inbox Zero multiple accounts, unified inbox for multiple Gmail
+accounts, combine Gmail inboxes, manage multiple email accounts in one place, multi-account email client, bulk unsubscribe
+across all accounts, mass unsubscribe Gmail, cross-account email cleanup, email quarantine, email analytics dashboard,
+self-hosted email dashboard, open-source email management, AI email assistant, Gmail inbox zero, Google Workspace
+shared inbox.</sub>
+
+Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zero Inc.
+
+## Features in detail
 
 | Tab | What it does |
 |---|---|
@@ -12,8 +127,6 @@ Inbox Zero handles each linked email account on its own. Zero Sum runs next to i
 | **Quarantine** | Senders you send to quarantine (from Cleanup) skip the inbox and get a `Quarantine` label (`QUARANTINE_LABEL`), now and for future mail. This tab lists everything held, grouped by sender across all accounts: tick messages or senders, then **Archive** or **Delete** (to Trash), or **Archive all** / **Delete all**; **Release sender** puts their mail back in the inbox and removes the filter. |
 | **Analytics** | Mail per day, read rate, top senders and domains, what Inbox Zero's rules did and cleanup totals, merged with a per-account breakdown. |
 | **Rules** | Write rules in Inbox Zero on a *master* account and share chosen ones with chosen accounts (opt-in: tick a rule under an account). Label actions are matched by label name; preview, sync now, and optional automatic sync. Nothing is shared by default, since each address usually gets different mail. |
-
-Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zero Inc.
 
 ### Delete, block and protect
 
@@ -24,7 +137,7 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
   blocked or marked as spam from the Cleanup tab: the buttons are disabled and the server refuses. Protecting an
   address also marks it "kept" in Inbox Zero. Auto-star still works on protected senders.
 
-## How it works
+## How it works (for the technically curious)
 
 - It reads the Google tokens Inbox Zero already stores and decrypts them the same way Inbox Zero does (AES-256-GCM with
   a key derived from `EMAIL_ENCRYPT_SECRET` / `EMAIL_ENCRYPT_SALT`). Refreshed access tokens stay in memory: it never
