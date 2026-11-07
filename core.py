@@ -235,6 +235,8 @@ CREATE TABLE IF NOT EXISTS unified.msg (
   unsub text, unsub_post boolean NOT NULL DEFAULT false, PRIMARY KEY (account_id, id));
 CREATE INDEX IF NOT EXISTS msg_from ON unified.msg (from_addr);
 CREATE INDEX IF NOT EXISTS msg_ts ON unified.msg (ts);
+CREATE TABLE IF NOT EXISTS unified.protected (
+  key text PRIMARY KEY, created_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS unified.collect_state (
   account_id text PRIMARY KEY, newest timestamptz, oldest timestamptz, backfill_done boolean NOT NULL DEFAULT false,
   updated_at timestamptz NOT NULL DEFAULT now(), error text);

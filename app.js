@@ -76,9 +76,11 @@ function row(it, i) {
     it.labels.map((l) => `<span class="chip">${esc(l)}</span>`).join("");
   return `<div class="row ${it.unread ? "unread" : ""} ${i === S.sel ? "sel" : ""}" data-i="${i}">
     <span class="dot" style="background:${slotOf(it.account)}"></span>
-    <span class="from" title="${esc(it.fromAddr)}">${esc(it.from)}</span><span class="when">${when(it.ts)}</span>
+    <span class="from" title="${esc(it.fromAddr)}">${it.starred ? '<span class="star" title="Starred">★</span> ' : ""}${it.protected ? '<span class="chip prot" title="Protected sender">protected</span>' : ""}${esc(it.from)}</span><span class="when">${when(it.ts)}</span>
     <span class="acts"><button data-act="archive" title="Archive (e)">Archive</button>
-      <button data-act="${it.unread ? "read" : "unread"}">${it.unread ? "Read" : "Unread"}</button></span>
+      <button data-act="${it.starred ? "unstar" : "star"}" title="Star (s)">${it.starred ? "Unstar" : "Star"}</button>
+      <button data-act="${it.unread ? "read" : "unread"}">${it.unread ? "Read" : "Unread"}</button>
+      <button data-act="delete" title="Move to Trash (#)">Delete</button></span>
     <span class="subj">${esc(it.subject)}</span><span class="snip">${esc(it.snippet)}</span>
     <span class="chips">${S.account ? "" : acctChip(it.account, it.email)}${chips}</span></div>`;
 }
@@ -94,15 +96,27 @@ function redraw() {
 async function act(i, action) {
   const it = S.items[i];
   if (!it) return;
-  try { await api("/api/action", { account: it.account, threadId: it.threadId, action }); }
+  try { await api("/api/action", { account: it.account, threadId: it.threadId, id: it.id, action }); }
   catch (e) { alert(`${action} failed: ${e.message}`); return; }
-  if (action === "archive") {
+  if (action === "archive" || action === "delete") {
     S.items = S.items.filter((x) => !(x.threadId === it.threadId && x.account === it.account));
     if (S.sel >= S.items.length) S.sel = S.items.length - 1;
     redraw();
-    if (S.sel >= 0) open(S.sel); else $("#reader").innerHTML = `<div class="empty">Archived.</div>`;
-  } else { it.unread = action === "unread"; redraw(); }
+    if (action === "delete") toast(`Moved to Trash: ${esc(it.subject)}`, "Undo",
+      () => api("/api/action", { account: it.account, threadId: it.threadId, action: "undelete" }).then(() => loadList(true)));
+    if (S.sel >= 0) open(S.sel); else $("#reader").innerHTML = `<div class="empty">${action === "delete" ? "Deleted" : "Archived"}.</div>`;
+  } else if (action === "star" || action === "unstar") { it.starred = action === "star"; redraw(); if (S.sel === i) open(i); }
+  else { it.unread = action === "unread"; redraw(); }
   loadAccounts();
+}
+
+function toast(html, label, fn) {
+  let t = $("#toast");
+  if (!t) { t = document.createElement("div"); t.id = "toast"; document.body.appendChild(t); }
+  t.innerHTML = `<span>${html}</span>${label ? `<button>${esc(label)}</button>` : ""}`;
+  t.style.display = "flex";
+  if (label) t.querySelector("button").onclick = () => { fn(); t.style.display = "none"; };
+  clearTimeout(toast.t); toast.t = setTimeout(() => { t.style.display = "none"; }, 8000);
 }
 
 function frameDoc(m) {
@@ -124,7 +138,8 @@ async function open(i) {
   const gmailUrl = `https://mail.google.com/mail/?authuser=${encodeURIComponent(m.email)}#all/${encodeURIComponent(m.threadId)}`;
   r.innerHTML = `<div class="hd"><h2>${esc(m.subject || "(no subject)")}</h2>
     <div class="meta"><b>${esc(m.from)}</b><br>to ${esc(m.to)}${m.cc ? `, cc ${esc(m.cc)}` : ""}<br>${esc(m.date)} · ${acctChip(it.account, m.email)}</div>
-    <div class="tools"><button id="r-archive">Archive (e)</button><button id="r-unread">Mark unread (u)</button>
+    <div class="tools"><button id="r-archive">Archive (e)</button><button id="r-star">${it.starred ? "Unstar" : "Star"} (s)</button>
+      <button id="r-unread">Mark unread (u)</button><button id="r-delete">Delete (#)</button>
       <a href="${gmailUrl}" target="_blank" rel="noopener"><button>Reply in Gmail ↗</button></a>
       ${m.kind === "html" ? `<button id="r-img">${S.images ? "Hide" : "Show"} images</button>` : ""}
       <button id="r-close" class="mobile">Close</button></div></div>` +
@@ -133,6 +148,8 @@ async function open(i) {
   if (m.kind === "html") r.querySelector("iframe").srcdoc = frameDoc(m);
   $("#r-archive").onclick = () => act(S.sel, "archive");
   $("#r-unread").onclick = () => act(S.sel, "unread");
+  $("#r-delete").onclick = () => act(S.sel, "delete");
+  $("#r-star").onclick = () => act(S.sel, S.items[S.sel].starred ? "unstar" : "star");
   $("#r-close").onclick = () => document.body.classList.remove("reading");
   const img = $("#r-img");
   if (img) img.onclick = () => { S.images = !S.images; open(S.sel); };
@@ -159,12 +176,21 @@ document.onkeydown = (e) => {
   else if (e.key === "k" && n) open(Math.max(S.sel - 1, 0));
   else if (e.key === "e" && S.sel >= 0) act(S.sel, "archive");
   else if (e.key === "u" && S.sel >= 0) act(S.sel, "unread");
+  else if (e.key === "#" && S.sel >= 0) act(S.sel, "delete");
+  else if (e.key === "s" && S.sel >= 0) act(S.sel, S.items[S.sel].starred ? "unstar" : "star");
   else if (e.key === "r") { loadAccounts(); loadList(true); }
   else if (e.key === "/") { e.preventDefault(); $("#q")?.focus(); }
 };
 
 /* ------------------------------------------------------------------ cleanup */
 const STATUS = { UNSUBSCRIBED: "unsubscribed", AUTO_ARCHIVED: "auto-archived", APPROVED: "kept" };
+const LABELS = { unsubscribe: "Unsubscribe", autoarchive: "Auto-archive", archive: "Archive", delete: "Delete all", block: "Block", spam: "Spam" };
+const TIPS = { unsubscribe: "Unsubscribe (one-click where offered), skip the inbox from now on, archive what is there",
+  autoarchive: "Skip the inbox from now on (Gmail filter), and archive what is there", archive: "Archive what is in the inbox now",
+  delete: "Move all mail from this sender to Trash (Gmail empties Trash after 30 days)",
+  block: "Move all mail from this sender to Trash, and send future mail straight to Trash (Gmail filter)",
+  spam: "Report all mail from this sender as spam (also trains Gmail's spam filter)" };
+const CONFIRM = { delete: "Move ALL mail from", block: "Move ALL mail from", spam: "Report ALL mail from" };
 async function loadSenders() {
   const p = new URLSearchParams({ q: $("#c-q").value, days: $("#c-days").value, hide: $("#c-handled").checked ? "0" : "1" });
   let d;
@@ -180,15 +206,22 @@ async function loadSenders() {
       <td class="num">${fmt(s.count)}</td><td class="num">${s.readPct}%</td><td class="num">${fmt(s.inbox)}</td>
       <td>${s.accounts.map((a) => `${acctChip(a.id, a.email)}${a.status ? `<span class="note">${STATUS[a.status] || a.status}</span> ` : ""}`).join("")}</td>
       <td class="note">${when(s.last)}</td>
-      <td style="white-space:nowrap"><button data-i="${i}" data-a="unsubscribe" ${s.unsub ? "" : "title='No unsubscribe link: blocks with a filter instead'"}>Unsubscribe</button>
-        <button data-i="${i}" data-a="autoarchive" title="Skip the inbox from now on, and archive what is there">Auto-archive</button>
-        <button data-i="${i}" data-a="archive" title="Archive what is in the inbox now">Archive</button>
-        <button data-i="${i}" data-a="keep" title="Mark as wanted (hides it here)">Keep</button></td></tr>`).join("") + "</tbody></table>";
+      <td class="acts-cell">${s.protected ? '<span class="chip prot">protected</span> ' : ""}
+        <div class="grp"><button data-i="${i}" data-a="${s.protected ? "unprotect" : "protect"}" title="Protected senders are never archived, deleted or blocked in bulk">${s.protected ? "Unprotect" : "Protect"}</button>
+          <button data-i="${i}" data-a="star" title="Star what is in the inbox, and future mail (Gmail filter)">Auto-star</button>
+          <button data-i="${i}" data-a="unstar" title="Remove the auto-star filter and the stars">Un-star</button>
+          <button data-i="${i}" data-a="keep" title="Mark as wanted in Inbox Zero (hides it here)">Keep</button></div>
+        <div class="grp">${["unsubscribe", "autoarchive", "archive", "delete", "block", "spam"].map((a) => `<button data-i="${i}" data-a="${a}"
+          ${s.protected ? "disabled title='Protected sender'" : `title="${esc(TIPS[a])}"`} class="${["delete", "block", "spam"].includes(a) ? "danger" : ""}">${LABELS[a]}</button>`).join("")}</div></td></tr>`).join("") + "</tbody></table>";
+  $("#c-prot").innerHTML = d.protected.length ? "Protected: " + d.protected.map((k) => `<span class="chip prot">${esc(k)}
+    <button class="x" data-unprot="${esc(k)}" title="Unprotect">×</button></span>`).join("") : "";
 }
 $("#c-table").onclick = async (e) => {
   const b = e.target.closest("button[data-a]");
   if (!b) return;
-  const s = S.senders[+b.dataset.i];
+  const s = S.senders[+b.dataset.i], a = b.dataset.a;
+  if (CONFIRM[a] && !confirm(`${CONFIRM[a]} ${s.addr} (${s.count} recent emails across ${s.accounts.length} account(s))` +
+    (a === "spam" ? " as spam?" : " to Trash?") + (a === "block" ? " Future mail from this sender will go straight to Trash." : ""))) return;
   b.disabled = true; b.textContent = "…";
   try {
     const r = await api("/api/sender", { addr: s.addr, action: b.dataset.a });
@@ -202,6 +235,18 @@ $("#c-table").onclick = async (e) => {
 let ct;
 $("#c-q").oninput = () => { clearTimeout(ct); ct = setTimeout(loadSenders, 400); };
 $("#c-days").onchange = loadSenders; $("#c-handled").onchange = loadSenders;
+$("#c-prot").onclick = async (e) => {
+  const x = e.target.closest("button[data-unprot]");
+  if (!x) return;
+  await api("/api/sender", { addr: x.dataset.unprot, action: "unprotect" }).catch((err) => alert(err.message));
+  loadSenders();
+};
+$("#c-protect-btn").onclick = async () => {
+  const v = $("#c-protect").value.trim().toLowerCase();
+  if (!v) return;
+  try { await api("/api/sender", { addr: v, action: "protect" }); $("#c-protect").value = ""; } catch (err) { alert(err.message); }
+  loadSenders();
+};
 $("#c-collect").onclick = async () => { await api("/api/collect", {}).catch(() => {}); $("#c-status").textContent = "Collecting… refresh in a minute."; };
 
 /* ------------------------------------------------------------------ analytics */

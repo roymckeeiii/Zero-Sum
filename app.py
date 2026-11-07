@@ -33,6 +33,7 @@ GET = {
     "/api/senders": cleanup.senders,
     "/api/analytics": analytics.overview,
     "/api/rules": lambda q: rulesync.state(),
+    "/api/protected": cleanup.protected_list,
     "/api/rules/preview": lambda q: rulesync.sync(apply=False),
 }
 
