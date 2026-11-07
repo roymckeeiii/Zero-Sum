@@ -247,7 +247,7 @@ TRASH_FILTER = {"addLabelIds": ["TRASH"]}
 ARCHIVE_FILTER = {"removeLabelIds": ["INBOX"]}
 STAR_FILTER = {"addLabelIds": ["STARRED"]}
 # actions that remove mail from view: refused for protected senders
-DESTRUCTIVE = {"unsubscribe", "autoarchive", "archive", "delete", "block", "spam"}
+DESTRUCTIVE = {"unsubscribe", "unsub_delete", "autoarchive", "archive", "delete", "block", "spam"}
 ACTIONS = DESTRUCTIVE | {"keep", "reset", "star", "unstar", "protect", "unprotect"}
 
 
@@ -286,7 +286,7 @@ def sender_action(d):
         em = ACC.email(a)
         try:
             note = []
-            if act == "unsubscribe":
+            if act in ("unsubscribe", "unsub_delete"):  # unsubscribe only; mail already there is left alone
                 u, post = unsub.get(a, (None, False))
                 if u and u.startswith("https://") and post and _one_click(u):
                     note.append("unsubscribed (one-click)")
@@ -294,8 +294,13 @@ def sender_action(d):
                     manual.append({"email": em, "url": u})
                     note.append("open the link to finish unsubscribing")
                 else:
-                    note.append("no unsubscribe link: blocked with a filter instead")
-            if act in ("unsubscribe", "autoarchive"):
+                    note.append("no unsubscribe link" + ("" if act == "unsub_delete" else ": use Block to stop it"))
+            if act == "unsub_delete":  # and clear it out: Trash now, future mail straight to Trash
+                _filter(a, addr, TRASH_FILTER)
+                note.append(f"{_modify_existing(a, f'from:{addr} -in:trash', add=['TRASH'])} moved to Trash, "
+                            "future mail goes to Trash")
+                _drop_rows(a, addr)
+            if act == "autoarchive":
                 _filter(a, addr, ARCHIVE_FILTER)
                 note.append(f"filter added, {_archive_existing(a, addr)} archived")
             elif act == "archive":
@@ -318,7 +323,8 @@ def sender_action(d):
             elif act == "unstar":
                 _filter(a, addr, STAR_FILTER, remove=True)
                 note.append(f"filter removed, {_modify_existing(a, f'from:{addr} is:starred', remove=['STARRED'])} unstarred")
-            status = {"unsubscribe": "UNSUBSCRIBED", "autoarchive": "AUTO_ARCHIVED", "block": "AUTO_ARCHIVED",
+            status = {"unsubscribe": "UNSUBSCRIBED", "unsub_delete": "UNSUBSCRIBED", "autoarchive": "AUTO_ARCHIVED",
+                      "block": "AUTO_ARCHIVED",
                       "keep": "APPROVED"}.get(act)
             with db() as c:
                 if status:

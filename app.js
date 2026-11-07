@@ -184,13 +184,15 @@ document.onkeydown = (e) => {
 
 /* ------------------------------------------------------------------ cleanup */
 const STATUS = { UNSUBSCRIBED: "unsubscribed", AUTO_ARCHIVED: "auto-archived", APPROVED: "kept" };
-const LABELS = { unsubscribe: "Unsubscribe", autoarchive: "Auto-archive", archive: "Archive", delete: "Delete all", block: "Block", spam: "Spam" };
-const TIPS = { unsubscribe: "Unsubscribe (one-click where offered), skip the inbox from now on, archive what is there",
+const LABELS = { unsubscribe: "Unsubscribe", unsub_delete: "Unsubscribe & delete", autoarchive: "Auto-archive", archive: "Archive", delete: "Delete all", block: "Block", spam: "Spam" };
+const TIPS = { unsubscribe: "Unsubscribe only (one-click where offered); mail already there stays where it is",
+  unsub_delete: "Unsubscribe, move all mail from this sender to Trash, and send anything that still arrives to Trash",
   autoarchive: "Skip the inbox from now on (Gmail filter), and archive what is there", archive: "Archive what is in the inbox now",
   delete: "Move all mail from this sender to Trash (Gmail empties Trash after 30 days)",
   block: "Move all mail from this sender to Trash, and send future mail straight to Trash (Gmail filter)",
   spam: "Report all mail from this sender as spam (also trains Gmail's spam filter)" };
-const CONFIRM = { delete: "Move ALL mail from", block: "Move ALL mail from", spam: "Report ALL mail from" };
+const CONFIRM = { unsub_delete: "Unsubscribe and move ALL mail from", delete: "Move ALL mail from", block: "Move ALL mail from",
+  spam: "Report ALL mail from" };
 async function loadSenders() {
   const p = new URLSearchParams({ q: $("#c-q").value, days: $("#c-days").value, hide: $("#c-handled").checked ? "0" : "1" });
   let d;
@@ -211,8 +213,8 @@ async function loadSenders() {
           <button data-i="${i}" data-a="star" title="Star what is in the inbox, and future mail (Gmail filter)">Auto-star</button>
           <button data-i="${i}" data-a="unstar" title="Remove the auto-star filter and the stars">Un-star</button>
           <button data-i="${i}" data-a="keep" title="Mark as wanted in Inbox Zero (hides it here)">Keep</button></div>
-        <div class="grp">${["unsubscribe", "autoarchive", "archive", "delete", "block", "spam"].map((a) => `<button data-i="${i}" data-a="${a}"
-          ${s.protected ? "disabled title='Protected sender'" : `title="${esc(TIPS[a])}"`} class="${["delete", "block", "spam"].includes(a) ? "danger" : ""}">${LABELS[a]}</button>`).join("")}</div></td></tr>`).join("") + "</tbody></table>";
+        <div class="grp">${["unsubscribe", "unsub_delete", "autoarchive", "archive", "delete", "block", "spam"].map((a) => `<button data-i="${i}" data-a="${a}"
+          ${s.protected ? "disabled title='Protected sender'" : `title="${esc(TIPS[a])}"`} class="${["unsub_delete", "delete", "block", "spam"].includes(a) ? "danger" : ""}">${LABELS[a]}</button>`).join("")}</div></td></tr>`).join("") + "</tbody></table>";
   $("#c-prot").innerHTML = d.protected.length ? "Protected: " + d.protected.map((k) => `<span class="chip prot">${esc(k)}
     <button class="x" data-unprot="${esc(k)}" title="Unprotect">×</button></span>`).join("") : "";
 }
@@ -221,11 +223,15 @@ $("#c-table").onclick = async (e) => {
   if (!b) return;
   const s = S.senders[+b.dataset.i], a = b.dataset.a;
   if (CONFIRM[a] && !confirm(`${CONFIRM[a]} ${s.addr} (${s.count} recent emails across ${s.accounts.length} account(s))` +
-    (a === "spam" ? " as spam?" : " to Trash?") + (a === "block" ? " Future mail from this sender will go straight to Trash." : ""))) return;
+    (a === "spam" ? " as spam?" : " to Trash?") + (["block", "unsub_delete"].includes(a) ? " Future mail from this sender will go straight to Trash." : ""))) return;
   b.disabled = true; b.textContent = "…";
   try {
     const r = await api("/api/sender", { addr: s.addr, action: b.dataset.a });
-    $("#c-result").innerHTML = `<div class="card"><b>${esc(b.dataset.a)} ${esc(s.addr)}</b><ul>` +
+    S.lastSender = s;
+    const next = ["delete", "block", "archive", "unsubscribe"].filter((x) => x !== a)
+      .map((x) => `<button data-next="${x}" class="${["delete", "block"].includes(x) ? "danger" : ""}">${LABELS[x]}</button>`).join(" ");
+    $("#c-result").innerHTML = `<div class="card"><b>${esc(LABELS[a] || a)}: ${esc(s.addr)}</b>
+      ${s.protected ? "" : `<div class="grp" style="margin:6px 0">Next for this sender: ${next}</div>`}<ul>` +
       r.results.map((x) => `<li class="${x.ok ? "" : "err"}">${esc(x.email)}: ${esc(x.note)}</li>`).join("") + "</ul>" +
       (r.manual.length ? `<p>Finish unsubscribing by opening these (one per account):</p><ul>` +
         r.manual.map((m) => `<li>${esc(m.email)}: <a href="${esc(m.url)}" target="_blank" rel="noopener noreferrer">${esc(m.url.slice(0, 80))}</a></li>`).join("") + "</ul>" : "") + "</div>";
@@ -235,6 +241,14 @@ $("#c-table").onclick = async (e) => {
 let ct;
 $("#c-q").oninput = () => { clearTimeout(ct); ct = setTimeout(loadSenders, 400); };
 $("#c-days").onchange = loadSenders; $("#c-handled").onchange = loadSenders;
+$("#c-result").onclick = (e) => {
+  const n = e.target.closest("button[data-next]");
+  if (!n || !S.lastSender) return;
+  S.senders.push(S.lastSender);  // reuse the table's handler for the sender just handled, even if it is now hidden
+  const btn = document.createElement("button");
+  btn.dataset.i = S.senders.length - 1; btn.dataset.a = n.dataset.next;
+  $("#c-table").appendChild(btn); btn.click(); btn.remove();
+};
 $("#c-prot").onclick = async (e) => {
   const x = e.target.closest("button[data-unprot]");
   if (!x) return;
