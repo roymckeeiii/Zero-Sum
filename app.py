@@ -52,7 +52,7 @@ POST = {
     "/api/action": inbox.action,
     "/api/sender": cleanup.sender_action,
     "/api/rules/sync": lambda d: rulesync.sync(apply=True),
-    "/api/rules/exclude": rulesync.set_exclude,
+    "/api/rules/include": rulesync.set_include,
     "/api/rules/auto": _auto,
     "/api/collect": _collect,
 }
