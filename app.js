@@ -316,7 +316,7 @@ async function loadRules() {
   try { d = await api("/api/rules"); } catch (e) { $("#r-matrix").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
   if (d.error) { $("#r-matrix").innerHTML = `<div class="err">${esc(d.error)}</div>`; return; }
   setSlots([d.master, ...d.accounts]);
-  $("#r-master").innerHTML = `Rules are written in Inbox Zero on <b>${esc(d.master.email)}</b> and copied to the other ${d.accounts.length} accounts.
+  $("#r-master").innerHTML = `Rules are written in Inbox Zero on <b>${esc(d.master.email)}</b>. Tick a rule under an account to share it there; nothing is shared unless ticked.
     ${S.izUrl ? `<a href="${esc(S.izUrl)}" target="_blank" rel="noopener">Edit rules ↗</a>` : ""}`;
   $("#r-auto").checked = d.auto;
   $("#r-matrix").innerHTML = d.rules.length ? `<table class="matrix"><thead><tr><th>Master rule</th>` +
@@ -324,8 +324,8 @@ async function loadRules() {
     d.rules.map((r) => `<tr><td><b>${esc(r.name)}</b>${r.enabled ? "" : ' <span class="note">(off)</span>'}<br>
       <span class="note">${esc(r.actions.join(", ").toLowerCase())}</span></td>` +
       d.accounts.map((a) => { const st = r.cells[a.id];
-        return `<td class="cell"><label title="Copy this rule to ${esc(a.email)}"><input type="checkbox" data-r="${esc(r.id)}" data-a="${esc(a.id)}" ${st === "excluded" ? "" : "checked"}>
-          <span class="st ${st}">${st}</span></label></td>`; }).join("") + "</tr>").join("") + "</tbody></table>"
+        return `<td class="cell"><label title="Copy this rule to ${esc(a.email)}"><input type="checkbox" data-r="${esc(r.id)}" data-a="${esc(a.id)}" ${st === "off" || st === "removing" ? "" : "checked"}>
+          ${st === "off" ? "" : `<span class="st ${st}">${st}</span>`}</label></td>`; }).join("") + "</tr>").join("") + "</tbody></table>"
     : `<div class="empty">The master account has no rules yet: create them in Inbox Zero.</div>`;
   $("#r-log").innerHTML = d.log.length ? `<div class="card"><h3>Recent sync activity</h3><ul class="ops">` +
     d.log.map((l) => `<li class="${l.kind.includes("error") ? "err" : ""}"><span class="note">${esc(l.at.slice(0, 16).replace("T", " "))}</span>
@@ -345,7 +345,7 @@ $("#r-auto").onchange = (e) => api("/api/rules/auto", { on: e.target.checked }).
 $("#r-matrix").onchange = async (e) => {
   const c = e.target.closest("input[data-r]");
   if (!c) return;
-  await api("/api/rules/exclude", { rule: c.dataset.r, account: c.dataset.a, exclude: !c.checked }).catch((err) => alert(err.message));
+  await api("/api/rules/include", { rule: c.dataset.r, account: c.dataset.a, include: c.checked }).catch((err) => alert(err.message));
   loadRules();
 };
 

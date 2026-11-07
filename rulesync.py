@@ -6,7 +6,8 @@
   same system type or name that existed before the first sync is adopted (overwritten with the master's version).
 - Gmail label ids differ per account: LABEL actions are matched by label name and the label is created when missing.
 - Learned sender patterns (Rule.groupId) and deprecated category filters are per-account history: not copied.
-- unified.rule_exclude keeps a master rule off chosen accounts (its copy there is deleted).
+- Opt-in: a master rule is copied only to the accounts ticked for it (unified.rule_include); untick and its copy
+  there is deleted. Nothing is shared by default: each address usually gets different mail.
 """
 import hashlib, json, threading
 
@@ -61,7 +62,7 @@ def digest(rule, actions):
 
 
 def state():
-    """Everything the Rules tab shows: master rules, accounts, per-cell status and exclusions."""
+    """Everything the Rules tab shows: master rules, accounts, per-cell status and which copies are ticked."""
     master = ACC.master()
     if not master:
         return {"error": "MASTER_EMAIL is not set, or that account is not linked in Inbox Zero" if MASTER_HINT else
@@ -71,7 +72,7 @@ def state():
         mrules = load_rules(c, master["id"])
         rmap = {(m, a): (t, h, s) for m, a, t, h, s in c.execute(
             "SELECT master_rule_id, account_id, target_rule_id, hash, synced_at FROM unified.rule_map").fetchall()}
-        excl = set(c.execute("SELECT master_rule_id, account_id FROM unified.rule_exclude").fetchall())
+        incl = set(c.execute("SELECT master_rule_id, account_id FROM unified.rule_include").fetchall())
         targets = {a["id"]: set(r[0] for r in c.execute('SELECT id FROM "Rule" WHERE "emailAccountId" = %s',
                                                          (a["id"],)).fetchall()) for a in accounts}
         logs = c.execute("SELECT at, kind, account, msg FROM unified.log WHERE kind LIKE 'rules%%' "
@@ -82,8 +83,8 @@ def state():
         cells = {}
         for a in accounts:
             m = rmap.get((r["id"], a["id"]))
-            if (r["id"], a["id"]) in excl:
-                cells[a["id"]] = "excluded"
+            if (r["id"], a["id"]) not in incl:
+                cells[a["id"]] = "removing" if m and m[0] in targets[a["id"]] else "off"
             elif not m or m[0] not in targets[a["id"]]:
                 cells[a["id"]] = "pending"
             else:
@@ -94,13 +95,13 @@ def state():
             "log": [{"at": a.isoformat(), "kind": k, "account": acc, "msg": m} for a, k, acc, m in logs]}
 
 
-def set_exclude(d):
+def set_include(d):
     with db() as c:
-        if d.get("exclude"):
-            c.execute("INSERT INTO unified.rule_exclude VALUES (%s, %s) ON CONFLICT DO NOTHING",
+        if d.get("include"):
+            c.execute("INSERT INTO unified.rule_include VALUES (%s, %s) ON CONFLICT DO NOTHING",
                       (d["rule"], d["account"]))
         else:
-            c.execute("DELETE FROM unified.rule_exclude WHERE master_rule_id = %s AND account_id = %s",
+            c.execute("DELETE FROM unified.rule_include WHERE master_rule_id = %s AND account_id = %s",
                       (d["rule"], d["account"]))
     return {"ok": True}
 
@@ -133,17 +134,17 @@ def sync(apply=True, only_account=None):
         ops = []
         with db() as c:
             mrules = load_rules(c, master["id"])
-            excl = set(c.execute("SELECT master_rule_id, account_id FROM unified.rule_exclude").fetchall())
+            incl = set(c.execute("SELECT master_rule_id, account_id FROM unified.rule_include").fetchall())
         for acc in [a for a in ACC.list() if not a["master"] and (not only_account or a["id"] == only_account)]:
             try:
-                ops += _sync_account(master, acc, mrules, excl, apply)
+                ops += _sync_account(master, acc, mrules, incl, apply)
             except Exception as e:  # noqa: BLE001 - one account must not stop the others
                 ops.append({"op": "error", "account": acc["email"], "rule": "", "detail": str(e)[:300]})
                 log("rules-error", str(e)[:500], acc["email"])
         return {"ops": ops, "applied": apply}
 
 
-def _sync_account(master, acc, mrules, excl, apply):
+def _sync_account(master, acc, mrules, incl, apply):
     ops = []
     with db() as c:
         trules = load_rules(c, acc["id"])
@@ -152,7 +153,7 @@ def _sync_account(master, acc, mrules, excl, apply):
             (acc["id"],)).fetchall()}
         mapped_targets = {t for t, _ in rmap.values()}
         for mid, r in mrules.items():
-            if (mid, acc["id"]) in excl:
+            if (mid, acc["id"]) not in incl:
                 continue
             actions = master_actions(master["id"], r)
             h = digest(r, actions)
@@ -180,13 +181,13 @@ def _sync_account(master, acc, mrules, excl, apply):
                           "account_id) DO UPDATE SET target_rule_id = EXCLUDED.target_rule_id, hash = EXCLUDED.hash, "
                           "synced_at = now()", (mid, acc["id"], target, h))
                 mapped_targets.add(target)
-        # copies whose master rule is gone or now excluded
+        # copies whose master rule is gone or is no longer ticked for this account
         for mid, (target, _) in rmap.items():
-            if mid in mrules and (mid, acc["id"]) not in excl:
+            if mid in mrules and (mid, acc["id"]) in incl:
                 continue
             name = trules.get(target, {}).get("name", target)
             ops.append({"op": "delete", "account": acc["email"], "rule": name,
-                        "detail": "master rule removed" if mid not in mrules else "excluded for this account"})
+                        "detail": "master rule removed" if mid not in mrules else "no longer shared with this account"})
             if apply:
                 c.execute('DELETE FROM "Rule" WHERE id = %s AND "emailAccountId" = %s', (target, acc["id"]))
                 c.execute("DELETE FROM unified.rule_map WHERE master_rule_id = %s AND account_id = %s", (mid, acc["id"]))

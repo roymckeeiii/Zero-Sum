@@ -224,7 +224,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS unified.rule_map (
   master_rule_id text NOT NULL, account_id text NOT NULL, target_rule_id text NOT NULL,
   hash text NOT NULL, synced_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (master_rule_id, account_id));
-CREATE TABLE IF NOT EXISTS unified.rule_exclude (
+CREATE TABLE IF NOT EXISTS unified.rule_include (
   master_rule_id text NOT NULL, account_id text NOT NULL, PRIMARY KEY (master_rule_id, account_id));
 CREATE TABLE IF NOT EXISTS unified.log (
   id bigserial PRIMARY KEY, at timestamptz NOT NULL DEFAULT now(), kind text NOT NULL, account text, msg text NOT NULL);
