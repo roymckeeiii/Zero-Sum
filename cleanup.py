@@ -528,6 +528,94 @@ def _plan_action(acc_id, addr, action, crit_extra, query_extra, lid):
     return n
 
 
+def _labels_for(action, lid):
+    """(add, remove) label ids that carry out a plan action on existing mail."""
+    return {"keep": ([], []), "archive": ([], ["INBOX"]), "quarantine": ([lid], ["INBOX"]),
+            "delete": (["TRASH"], [])}[action]
+
+
+def _ai_sort_ids(addr, rule, action, pairs):
+    """Classify (account, message id) pairs by the rule in batches and apply `action` to the ones not kept."""
+    import ai
+    from inbox import meta
+    kept = 0
+    for i in range(0, len(pairs), 40):
+        chunk = pairs[i:i + 40]
+        metas = []
+        for a, mid in chunk:
+            try:
+                metas.append((a, meta(a, mid)))
+            except Exception:  # noqa: BLE001 - deleted meanwhile
+                pass
+        verdicts = ai.classify(rule, [(m["subject"], m["snippet"]) for _, m in metas])
+        by_acc = {}
+        for (a, m), keep in zip(metas, verdicts):
+            if keep:
+                kept += 1
+            else:
+                by_acc.setdefault(a["id"], []).append(m["id"])
+        for acc_id, ids in by_acc.items():
+            lid = label_id(acc_id, QUARANTINE) if action == "quarantine" else None
+            add, rem = _labels_for(action, lid)
+            if add or rem:
+                _batch(acc_id, ids, add=add, remove=rem)
+        with db() as c:
+            c.execute("UPDATE unified.ai_sort SET done = done + %s, kept = kept + %s, updated_at = now() WHERE addr = %s",
+                      (len(chunk), sum(1 for (_, _m), k in zip(metas, verdicts) if k), addr))
+    return kept
+
+
+def _ai_sort_existing(addr, rule, action):
+    try:
+        pairs = []
+        for a in ACC.list():
+            q = f"from:{addr} -in:trash -in:spam" + (f" -label:{QUARANTINE}" if action == "quarantine" else "")
+            pairs += [(a, m["id"]) for m in gmail_list(a["id"], qs(q), "messages", MAX_BULK)]
+        with db() as c:
+            c.execute("UPDATE unified.ai_sort SET total = %s, done = 0, kept = 0, status = 'sorting' WHERE addr = %s",
+                      (len(pairs), addr))
+        kept = _ai_sort_ids(addr, rule, action, pairs)
+        with db() as c:
+            c.execute("UPDATE unified.ai_sort SET status = 'active', last_ts = now(), updated_at = now() WHERE addr = %s", (addr,))
+        log("ai-sort", f"{addr}: sorted {len(pairs)} existing, kept {kept}, rest {action}")
+    except Exception as e:  # noqa: BLE001
+        with db() as c:
+            c.execute("UPDATE unified.ai_sort SET status = %s, updated_at = now() WHERE addr = %s", (f"error: {e}"[:200], addr))
+        log("ai-sort-error", f"{addr}: {e}"[:500])
+
+
+def ai_sort_new():
+    """Every collector run: judge new inbox mail from AI-sorted senders by their rule."""
+    with db() as c:
+        rows = c.execute("SELECT addr, rule, action, extract(epoch from last_ts) FROM unified.ai_sort "
+                         "WHERE status = 'active'").fetchall()
+    for addr, rule, action, last in rows:
+        try:
+            since = int(last or 0) - 3600
+            pairs = []
+            for a in ACC.list():
+                pairs += [(a, m["id"]) for m in gmail_list(a["id"], qs(f"from:{addr} in:inbox after:{since}"), "messages", 500)]
+            if pairs:
+                kept = _ai_sort_ids(addr, rule, action, pairs)
+                log("ai-sort", f"{addr}: {len(pairs)} new, kept {kept}, rest {action}")
+            with db() as c:
+                c.execute("UPDATE unified.ai_sort SET last_ts = now() WHERE addr = %s", (addr,))
+        except Exception as e:  # noqa: BLE001
+            log("ai-sort-error", f"{addr}: {e}"[:500])
+
+
+def ai_sort_status(q=None):
+    with db() as c:
+        return {r[0]: {"rule": r[1], "action": r[2], "status": r[3], "done": r[4], "total": r[5], "kept": r[6]}
+                for r in c.execute("SELECT addr, rule, action, status, done, total, kept FROM unified.ai_sort").fetchall()}
+
+
+def stop_ai_sort(d):
+    with db() as c:
+        c.execute("DELETE FROM unified.ai_sort WHERE addr = %s", (str(d.get("addr") or "").strip().lower(),))
+    return {"ok": True}
+
+
 def apply_plan(d):
     """Apply a multi-group plan to a sender in every account that gets its mail:
     groups = [{"label", "words": [...], "action": keep|archive|quarantine|delete}] (first matching group wins, by subject),
@@ -544,6 +632,20 @@ def apply_plan(d):
     destructive = {g["action"] for g in groups} | {default}
     if destructive - {"keep"} and is_protected(addr):
         raise PermissionError(f"{addr} is protected: unprotect it first")
+    if d.get("mode") == "ai":  # AI sort: each email judged by the rule, now (background) and every collector run
+        rule = re.sub(r"\s+", " ", str(d.get("rule") or ""))[:400]
+        if not rule:
+            raise ValueError("write what to keep first")
+        with db() as c:
+            c.execute("INSERT INTO unified.ai_sort (addr, rule, action) VALUES (%s, %s, %s) ON CONFLICT (addr) DO UPDATE "
+                      "SET rule = EXCLUDED.rule, action = EXCLUDED.action, status = 'sorting', done = 0, total = 0, kept = 0",
+                      (addr, rule, default))
+            c.execute("UPDATE unified.ai_plan SET status = 'applied', updated_at = now() WHERE addr = %s", (addr,))
+        threading.Thread(target=_ai_sort_existing, args=(addr, rule, default), daemon=True).start()
+        log("ai-cleanup", f"apply {addr}: AI sort, rest {default}: {rule}")
+        return {"results": [{"email": "all accounts", "ok": True,
+                             "note": f"AI sort started: existing mail is being sorted in the background (rest: {default}); "
+                                     "new mail from this sender is sorted every 15 minutes"}]}
     with db() as c:
         acc_ids = [r[0] for r in c.execute("SELECT DISTINCT account_id FROM unified.msg WHERE from_addr = %s",
                                            (addr,)).fetchall()]

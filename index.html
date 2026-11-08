@@ -147,6 +147,10 @@ tr.peek-row td { background:var(--side); padding:8px 12px 12px; }
 .plan .g { display:grid; grid-template-columns:160px 1fr 150px 36px; gap:8px; align-items:center; }
 .plan .g input { height:34px; padding:0 10px; border:1px solid var(--line); border-radius:6px; background:var(--panel); color:var(--text); font:inherit; }
 .plan .g select { height:34px; }
+.plan .mode { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:10px 0 0; }
+.plan .mode button.on { background:var(--accent); color:var(--accent-t); border-color:var(--accent); }
+.plan label.rule { display:flex; flex-direction:column; gap:6px; color:var(--text); white-space:normal; align-items:stretch; }
+.plan textarea { font:inherit; padding:8px 10px; border:1px solid var(--line); border-radius:6px; background:var(--panel); color:var(--text); resize:vertical; }
 .plan details summary { cursor:pointer; color:var(--link); font-size:13px; margin:6px 0; }
 @media (max-width: 900px) { .plan .g { grid-template-columns:1fr 1fr; } }
 dialog#dlg { border:1px solid var(--line); border-radius:12px; padding:20px 22px; max-width:640px; width:calc(100% - 32px);

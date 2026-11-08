@@ -72,6 +72,22 @@ class KeepWords(unittest.TestCase):
         self.assertNotIn(")", cleanup.keep_query(["a) OR from:(x"])[len("subject:("):-1])  # no query injection
 
 
+class AiSort(unittest.TestCase):
+    def test_labels_for_actions(self):
+        self.assertEqual(cleanup._labels_for("keep", "L"), ([], []))
+        self.assertEqual(cleanup._labels_for("quarantine", "L"), (["L"], ["INBOX"]))
+        self.assertEqual(cleanup._labels_for("delete", None), (["TRASH"], []))
+
+    def test_classify_parses_kept_numbers(self):
+        import ai
+        old_key, old_ask = ai.KEY, ai._ask
+        try:
+            ai.KEY, ai._ask = "k", lambda prompt: {"keep": [1, "3", "x"]}
+            self.assertEqual(ai.classify("keep articles", [("a", ""), ("b", ""), ("c", "")]), [True, False, True])
+        finally:
+            ai.KEY, ai._ask = old_key, old_ask
+
+
 class Rules(unittest.TestCase):
     def test_digest_is_stable_and_sensitive(self):
         r = {f: None for f in rulesync.RULE_FIELDS} | {"name": "A"}
