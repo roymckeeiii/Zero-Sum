@@ -36,6 +36,14 @@ Subjects:
 
 
 def _subjects(addr, per_account=60):
+    """The sender's subject lines: from the locally collected history (all of it, no Gmail calls) when there is any,
+    else a fresh sample from Gmail."""
+    with db() as c:
+        rows = c.execute("SELECT subject FROM unified.msg WHERE from_addr = %s AND subject IS NOT NULL AND subject <> ''",
+                         (addr,)).fetchall()
+    if rows:
+        norm = collections.Counter(re.sub(r"\d+", "#", r[0].strip())[:120] for r in rows)
+        return norm.most_common(80), len(rows)
     q = urllib.parse.quote(f"from:{addr} -in:trash")
 
     def one(a):
@@ -125,7 +133,22 @@ def _clean_words(ws):
     return [w for w in out if w]
 
 
+DAILY_CAP = int(os.environ.get("AI_MAX_CALLS_PER_DAY", "400"))
+
+
+def _count_call():
+    """Count AI calls per UTC day; refuse past AI_MAX_CALLS_PER_DAY so background work can't run up a bill."""
+    import datetime
+    day = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+    with db() as c:
+        n = c.execute("INSERT INTO unified.settings (k, v) VALUES (%s, '1') ON CONFLICT (k) DO UPDATE "
+                      "SET v = (unified.settings.v::int + 1)::text RETURNING v::int", (f"ai_calls:{day}",)).fetchone()[0]
+    if n > DAILY_CAP:
+        raise PermissionError(f"daily AI limit reached ({DAILY_CAP} calls; AI_MAX_CALLS_PER_DAY); continuing tomorrow")
+
+
 def _ask(prompt):
+    _count_call()
     req = urllib.request.Request(f"{BASE}/chat/completions", method="POST", data=json.dumps({
         "model": MODEL, "max_tokens": 500, "temperature": 0,
         "messages": [{"role": "user", "content": prompt}]}).encode(),
@@ -258,3 +281,61 @@ def classify_preview(d):
     items = sender_recent({"addr": [str(d.get("addr") or "")], "n": ["20"]})["items"]
     verdicts = classify(d.get("rule"), [(it["subject"], it["snippet"]) for it in items])
     return {"verdicts": {it["id"]: v for it, v in zip(items, verdicts)}}
+
+
+# ---------------------------------------------------------------- background analyst: plan every sender over time
+PLANS_PER_RUN = int(os.environ.get("AI_PLANS_PER_RUN", "4"))
+MIN_EMAILS = int(os.environ.get("AI_MIN_EMAILS", "5"))
+
+
+def background_plan():
+    """Every collector run (when on): plan the biggest senders that have no plan yet, or whose mail grew by half since
+    their plan, from the local history. Paced by AI_PLANS_PER_RUN and the daily AI call cap."""
+    from core import setting
+    from cleanup import is_protected, protected_set
+    if not KEY or setting("ai_background", "1") != "1" or _running["busy"]:
+        return
+    prot = protected_set()
+    with db() as c:
+        rows = c.execute(
+            "SELECT m.from_addr, count(*) FROM unified.msg m "
+            "LEFT JOIN unified.ai_plan p ON p.addr = m.from_addr "
+            "WHERE m.subject IS NOT NULL AND (p.addr IS NULL OR (p.status = 'new' AND "
+            "  coalesce((p.plan->>'sampled')::int, 0) * 1.5 < (SELECT count(*) FROM unified.msg x WHERE x.from_addr = m.from_addr))) "
+            "AND NOT EXISTS (SELECT 1 FROM \"Newsletter\" nl WHERE lower(nl.email) = m.from_addr AND nl.status IS NOT NULL) "
+            "GROUP BY 1 HAVING count(*) >= %s ORDER BY 2 DESC LIMIT %s", (MIN_EMAILS, PLANS_PER_RUN * 3)).fetchall()
+    addrs = [a for a, _ in rows if not is_protected(a, prot)][:PLANS_PER_RUN]
+    if addrs:
+        _analyze(addrs)
+
+
+def progress(q=None):
+    """How far the slow, complete pass has got: mail collected vs each mailbox's total, senders analyzed vs all."""
+    from core import setting
+
+    def total(a):
+        try:
+            return gmail(a["id"], "/profile").get("messagesTotal", 0)
+        except Exception:  # noqa: BLE001
+            return 0
+    totals = dict(zip([a["id"] for a in ACC.list()], POOL.map(total, ACC.list())))
+    with db() as c:
+        coll = dict(c.execute("SELECT account_id, count(*) FROM unified.msg GROUP BY 1").fetchall())
+        with_subj = c.execute("SELECT count(*) FROM unified.msg WHERE subject IS NOT NULL").fetchone()[0]
+        senders = c.execute("SELECT count(*) FROM (SELECT from_addr FROM unified.msg GROUP BY 1 HAVING count(*) >= %s) s",
+                            (MIN_EMAILS,)).fetchone()[0]
+        planned = c.execute("SELECT count(*) FROM unified.ai_plan").fetchone()[0]
+        import datetime
+        calls = c.execute("SELECT v FROM unified.settings WHERE k = %s",
+                          (f"ai_calls:{datetime.datetime.utcnow():%Y-%m-%d}",)).fetchone()
+    return {"collected": sum(coll.values()), "mailboxTotal": sum(totals.values()), "withSubject": with_subj,
+            "senders": senders, "planned": planned, "background": setting("ai_background", "1") == "1",
+            "callsToday": int(calls[0]) if calls else 0, "callCap": DAILY_CAP,
+            "accounts": [{"email": a["email"], "collected": coll.get(a["id"], 0), "total": totals.get(a["id"], 0)}
+                         for a in ACC.list()]}
+
+
+def set_background(d):
+    from core import set_setting
+    set_setting("ai_background", "1" if d.get("on") else "0")
+    return {"ok": True}

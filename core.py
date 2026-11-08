@@ -241,6 +241,8 @@ CREATE TABLE IF NOT EXISTS unified.msg (
   from_addr text NOT NULL, from_name text, domain text NOT NULL, unread boolean NOT NULL, inbox boolean NOT NULL,
   unsub text, unsub_post boolean NOT NULL DEFAULT false, PRIMARY KEY (account_id, id));
 CREATE INDEX IF NOT EXISTS msg_from ON unified.msg (from_addr);
+ALTER TABLE unified.msg ADD COLUMN IF NOT EXISTS subject text;
+ALTER TABLE unified.msg ADD COLUMN IF NOT EXISTS snippet text;
 CREATE INDEX IF NOT EXISTS msg_ts ON unified.msg (ts);
 CREATE TABLE IF NOT EXISTS unified.ai_plan (
   addr text PRIMARY KEY, plan jsonb NOT NULL, status text NOT NULL DEFAULT 'new', created_at timestamptz NOT NULL DEFAULT now(),

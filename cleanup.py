@@ -35,18 +35,20 @@ def parse_unsub(value):
     return https or mailto
 
 
-def _store(acc_id, ids):
+def _store(acc_id, ids, refill=False):
     if not ids:
         return 0
     with db() as c:
         have = {r[0] for r in c.execute("SELECT id FROM unified.msg WHERE account_id = %s AND id = ANY(%s)",
                                         (acc_id, ids)).fetchall()}
     todo = [i for i in ids if i not in have]
+    if refill:  # mail collected before subjects were stored: fetch it again to fill subject + snippet
+        todo = list(ids)
 
     def fetch(mid):
         try:
             m = gmail(acc_id, f"/messages/{mid}?format=metadata&metadataHeaders=From&metadataHeaders=List-Unsubscribe"
-                              "&metadataHeaders=List-Unsubscribe-Post")
+                              "&metadataHeaders=List-Unsubscribe-Post&metadataHeaders=Subject")
         except Exception:  # noqa: BLE001 - deleted between list and get
             return None
         hs = m.get("payload", {}).get("headers", [])
@@ -55,12 +57,14 @@ def _store(acc_id, ids):
         lab = m.get("labelIds", [])
         return (acc_id, m["id"], m["threadId"], int(m.get("internalDate", 0)) / 1000, addr, name or None,
                 addr.rsplit("@", 1)[-1], "UNREAD" in lab, "INBOX" in lab, parse_unsub(header(hs, "list-unsubscribe")),
-                "one-click" in header(hs, "list-unsubscribe-post").lower())
+                "one-click" in header(hs, "list-unsubscribe-post").lower(), header(hs, "subject")[:300],
+                (m.get("snippet") or "")[:300])
     rows = [r for r in CPOOL.map(fetch, todo) if r]
     with db() as c:
         with c.cursor() as cur:
-            cur.executemany("INSERT INTO unified.msg VALUES (%s, %s, %s, to_timestamp(%s), %s, %s, %s, %s, %s, %s, %s) "
-                            "ON CONFLICT DO NOTHING", rows)
+            cur.executemany("INSERT INTO unified.msg (account_id, id, thread_id, ts, from_addr, from_name, domain, unread, inbox, "
+                            "unsub, unsub_post, subject, snippet) VALUES (%s, %s, %s, to_timestamp(%s), %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                            "ON CONFLICT (account_id, id) DO UPDATE SET subject = EXCLUDED.subject, snippet = EXCLUDED.snippet", rows)
     return len(rows)
 
 
@@ -81,6 +85,12 @@ def collect_account(acc):
         older = [m["id"] for m in gmail_list(a, qs(f"{SKIP} before:{before} newer_than:{BACKFILL_DAYS}d"), "messages", BACKFILL_STEP)]
         added += _store(a, older)
         done = len(older) < BACKFILL_STEP
+    # mail collected before subjects were stored: fill BACKFILL_STEP of them per run, newest first
+    with db() as c:
+        missing = [r[0] for r in c.execute("SELECT id FROM unified.msg WHERE account_id = %s AND subject IS NULL "
+                                           "ORDER BY ts DESC LIMIT %s", (a, BACKFILL_STEP)).fetchall()]
+    if missing:
+        _store(a, missing, refill=True)
     # read / inbox state can change after collection: refresh the last 30 days from two cheap id lists
     inbox = [m["id"] for m in gmail_list(a, qs("in:inbox newer_than:30d"), "messages", 10000)]
     unread = [m["id"] for m in gmail_list(a, qs("is:unread newer_than:30d"), "messages", 10000)]
@@ -541,8 +551,16 @@ def _ai_sort_ids(addr, rule, action, pairs):
     kept = 0
     for i in range(0, len(pairs), 40):
         chunk = pairs[i:i + 40]
+        with db() as c:  # local history first: no Gmail call for mail the collector already has
+            local = {(acc, mid): (sub, snip) for acc, mid, sub, snip in c.execute(
+                "SELECT account_id, id, subject, coalesce(snippet, '') FROM unified.msg WHERE id = ANY(%s) AND subject IS NOT NULL",
+                ([mid for _, mid in chunk],)).fetchall()}
         metas = []
         for a, mid in chunk:
+            if (a["id"], mid) in local:
+                sub, snip = local[(a["id"], mid)]
+                metas.append((a, {"id": mid, "subject": sub, "snippet": snip}))
+                continue
             try:
                 metas.append((a, meta(a, mid)))
             except Exception:  # noqa: BLE001 - deleted meanwhile
