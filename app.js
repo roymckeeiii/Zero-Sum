@@ -363,7 +363,25 @@ function classify(subject, plan) {  // first group whose words appear in the sub
     : { action: plan.default, text: `other → ${GACT[plan.default]}` };
 }
 let pollT;
+async function loadProgress() {
+  let g;
+  try { g = await api("/api/ai/progress"); } catch (e) { $("#ai-progress").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
+  const pct = (a, b) => (b ? Math.min(100, Math.round((100 * a) / b)) : 0);
+  $("#ai-progress").innerHTML = `<div class="ph" style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap">
+      <h3 style="margin:0">Working through your whole history</h3>
+      <label><input type="checkbox" id="ai-bg" ${g.background ? "checked" : ""}> Analyze senders in the background</label></div>
+    <p class="note">Zero Sum reads your mail a little at a time (every 15 minutes, within Gmail's limits) and plans senders as their
+      history comes in, biggest first. Nothing is changed until you apply a plan.</p>
+    <div class="prog-grid"><div>Mail history collected: <b>${fmt(g.collected)}</b> of ${fmt(g.mailboxTotal)} (${pct(g.collected, g.mailboxTotal)}%)
+      <div class="meter"><div style="width:${pct(g.collected, g.mailboxTotal)}%"></div></div></div>
+    <div>Senders analyzed: <b>${fmt(g.planned)}</b> of ${fmt(g.senders)} with ${"5+"} emails (${pct(g.planned, g.senders)}%)
+      <div class="meter"><div style="width:${pct(g.planned, g.senders)}%"></div></div></div></div>
+    <details><summary class="note">Per account · AI calls today: ${fmt(g.callsToday)} of ${fmt(g.callCap)}</summary>
+      ${g.accounts.map((a) => `<div class="note">${esc(a.email)}: ${fmt(a.collected)} of ${fmt(a.total)} (${pct(a.collected, a.total)}%)</div>`).join("")}</details>`;
+  $("#ai-bg").onchange = (e) => api("/api/ai/background", { on: e.target.checked }).catch((err) => alert(err.message));
+}
 async function loadPlans() {
+  loadProgress();
   let d;
   try { d = await api("/api/ai/plans"); S.sorting = await api("/api/ai/sorting"); } catch (e) { $("#ai-body").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
   S.plans = d.plans;

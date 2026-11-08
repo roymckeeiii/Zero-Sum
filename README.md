@@ -92,6 +92,14 @@ Write an AI rule once on your main account and share it with the accounts that n
 account. Labels are matched by name and created where missing. Nothing is shared unless you choose it, because every
 address gets different mail.
 
+### Slow and complete, not one big grab
+Because it runs on your own server, Zero Sum takes its time. Every 15 minutes it reads a little more of your history
+(going back years, gently enough to stay inside Gmail's limits), keeping each email's sender, subject and preview.
+A background analyst then plans your senders as their history comes in, biggest first, from **everything** they ever
+sent you, and re-plans a sender when lots of new mail arrives. AI sort judges emails from that stored text, so a full
+cleanup doesn't hammer Gmail. A progress panel shows how much of each mailbox has been read and how many senders are
+analyzed; a daily cap on AI calls (`AI_MAX_CALLS_PER_DAY`) keeps costs predictable.
+
 ## Why self-hosted
 
 - **Your mail stays on your server.** Zero Sum talks to Gmail directly from your machine; nothing goes to a third-party
@@ -236,6 +244,7 @@ All settings are environment variables; see [`.env.example`](.env.example).
 | `BACKFILL_DAYS`, `BACKFILL_STEP` | `3650`, `2000` | history the collector gathers, per run per account |
 | `MAX_BULK` | `200000` | most emails one bulk action touches per account |
 | `OPENROUTER_API_KEY`, `AI_MODEL`, `AI_BASE_URL` | empty, `anthropic/claude-haiku-5.5`, OpenRouter | AI suggest (off without a key) |
+| `AI_MAX_CALLS_PER_DAY`, `AI_PLANS_PER_RUN`, `AI_MIN_EMAILS` | `400`, `4`, `5` | background analyst pacing |
 | `GMAIL_UNITS_PER_SEC` | `50` | Gmail quota units per second per account |
 
 ## Security notes

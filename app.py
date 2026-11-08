@@ -39,6 +39,7 @@ GET = {
     "/api/sender/recent": cleanup.sender_recent,
     "/api/ai/plans": ai.plans,
     "/api/ai/sorting": cleanup.ai_sort_status,
+    "/api/ai/progress": ai.progress,
     "/api/rules/preview": lambda q: rulesync.sync(apply=False),
 }
 
@@ -63,6 +64,7 @@ POST = {
     "/api/ai/skip": ai.skip,
     "/api/ai/classify": ai.classify_preview,
     "/api/ai/stop-sort": cleanup.stop_ai_sort,
+    "/api/ai/background": ai.set_background,
     "/api/rules/sync": lambda d: rulesync.sync(apply=True),
     "/api/rules/include": rulesync.set_include,
     "/api/rules/auto": _auto,
@@ -178,6 +180,7 @@ if __name__ == "__main__":
         raise SystemExit("ALLOWED_EMAILS is empty: set it to the address(es) your auth proxy lets in")
     every(60 * int(os.environ.get("COLLECT_EVERY_MIN", "15")), cleanup.collect_all, 20)
     every(60 * int(os.environ.get("COLLECT_EVERY_MIN", "15")), cleanup.ai_sort_new, 120)
+    every(60 * int(os.environ.get("COLLECT_EVERY_MIN", "15")), ai.background_plan, 300)
     every(60 * int(os.environ.get("RULES_EVERY_MIN", "10")), auto_rules, 60)
     port = int(os.environ.get("PORT", "8080"))
     print(f"zero-sum on :{port}, allowed: {len(ALLOWED)} address(es)", flush=True)

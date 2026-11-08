@@ -147,6 +147,10 @@ tr.peek-row td { background:var(--side); padding:8px 12px 12px; }
 .plan .g { display:grid; grid-template-columns:160px 1fr 150px 36px; gap:8px; align-items:center; }
 .plan .g input { height:34px; padding:0 10px; border:1px solid var(--line); border-radius:6px; background:var(--panel); color:var(--text); font:inherit; }
 .plan .g select { height:34px; }
+.meter { height:8px; background:var(--hover); border-radius:9999px; overflow:hidden; margin:4px 0 10px; }
+.meter > div { height:100%; background:var(--bar); border-radius:9999px; }
+.prog-grid { display:grid; grid-template-columns:1fr 1fr; gap:6px 24px; }
+@media (max-width: 900px) { .prog-grid { grid-template-columns:1fr; } }
 .plan .mode { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:10px 0 0; }
 .plan .mode button.on { background:var(--accent); color:var(--accent-t); border-color:var(--accent); }
 .plan label.rule { display:flex; flex-direction:column; gap:6px; color:var(--text); white-space:normal; align-items:stretch; }
@@ -219,11 +223,12 @@ select.cleanup { padding:3px 6px; font-size:12px; }
     <div class="bar-row">
       <select id="ai-limit"><option value="10">Top 10 senders</option><option value="25" selected>Top 25 senders</option>
         <option value="50">Top 50 senders</option></select>
-      <button id="ai-run" class="primary">✨ Analyze top senders</button><span id="ai-status" class="note"></span>
+      <button id="ai-run" class="primary">✨ Analyze now</button><span id="ai-status" class="note"></span>
     </div>
-    <p class="note">The AI reads each sender's recent subject lines and splits their mail into groups: keep the orders and
+    <p class="note">The AI reads each sender's subject lines (its whole history, as collected) and splits their mail into groups: keep the orders and
       receipts, quarantine the promotions, and so on. Edit any group, preview the 20 most recent emails, then apply.
       Nothing changes until you apply a plan.</p>
+    <div id="ai-progress" class="card"></div>
     <div id="ai-result"></div><div id="ai-body"><div class="empty">Loading…</div></div>
   </div></section>
   <section class="view" id="v-quarantine"><div class="page">
