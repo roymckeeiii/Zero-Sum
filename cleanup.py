@@ -105,10 +105,26 @@ def collect_account(acc):
     return added
 
 
+def _widen_backfill():
+    """Back-fills marked done under an older, shorter BACKFILL_DAYS (e.g. 180 days) resume when the limit is raised or
+    removed (0 = all history): the stored horizon is compared with the current one."""
+    from core import set_setting, setting
+    now_h = BACKFILL_DAYS if BACKFILL_DAYS > 0 else 10 ** 6
+    old = setting("backfill_horizon")
+    if old is None or int(old) < now_h:
+        with db() as c:
+            c.execute("UPDATE unified.collect_state SET backfill_done = false")
+        set_setting("backfill_horizon", now_h)
+        print(f"[collect] history limit {old or 'unset'} -> {BACKFILL_DAYS or 'all'} days: back-fill resumed", flush=True)
+    elif int(old) > now_h:
+        set_setting("backfill_horizon", now_h)
+
+
 def collect_all():
     if not COLLECT_LOCK.acquire(blocking=False):
         return
     try:
+        _widen_backfill()
         for acc in ACC.list():
             try:
                 n = collect_account(acc)
