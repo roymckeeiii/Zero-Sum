@@ -168,7 +168,8 @@ def gmail(account_id, path, method="GET", body=None, retry=True):
             if e.code == 401 and retry:
                 return gmail(account_id, path, method, body, retry=False)
             detail = e.read()[:300].decode("utf-8", "replace")
-            limited = e.code == 429 or (e.code == 403 and "ratelimit" in detail.lower().replace(" ", ""))
+            low = detail.lower()
+            limited = e.code == 429 or (e.code == 403 and ("ratelimit" in low.replace(" ", "") or "quota exceeded" in low))
             if (limited or e.code in (500, 503)) and attempt < 5:  # quota is per minute: back off up to a minute
                 time.sleep(min(60, 4 * 2 ** attempt) if limited else 2 ** attempt)
                 continue

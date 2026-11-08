@@ -22,7 +22,8 @@ ALLOWED = {e.strip().lower() for e in os.environ.get("ALLOWED_EMAILS", "").split
 AUTH_HEADER = os.environ.get("AUTH_EMAIL_HEADER", "Cf-Access-Authenticated-User-Email")
 INBOX_ZERO_URL = os.environ.get("INBOX_ZERO_URL", "").rstrip("/")
 STATIC = {"/": ("index.html", "text/html; charset=utf-8"), "/app.js": ("app.js", "text/javascript; charset=utf-8")}
-CSP = ("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; "
+CSP = ("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+       "font-src https://fonts.gstatic.com; img-src 'self' data: https:; "
        "connect-src 'self'; frame-src 'self' about:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 
 GET = {
