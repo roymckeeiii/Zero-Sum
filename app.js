@@ -39,7 +39,7 @@ $("#tabs").onclick = (e) => {
   S.tab = b.dataset.tab;
   document.querySelectorAll("#tabs button").forEach((x) => x.classList.toggle("on", x === b));
   document.querySelectorAll(".view").forEach((v) => v.classList.toggle("on", v.id === `v-${S.tab}`));
-  if (!loaded[S.tab]) { loaded[S.tab] = true; ({ cleanup: loadSenders, quarantine: loadQuarantine, analytics: loadAnalytics, rules: loadRules })[S.tab]?.(); }
+  if (!loaded[S.tab]) { loaded[S.tab] = true; ({ cleanup: loadSenders, ai: loadPlans, quarantine: loadQuarantine, analytics: loadAnalytics, rules: loadRules })[S.tab]?.(); }
 };
 
 /* ------------------------------------------------------------------ inbox */
@@ -220,7 +220,8 @@ async function loadSenders() {
   S.senders = d.senders;
   $("#c-table").innerHTML = `<table><thead><tr><th>Sender</th><th class="num">Emails</th><th class="num">Read</th>
     <th class="num">In inbox</th><th>Accounts</th><th>Last</th><th>Apply to every account</th></tr></thead><tbody>` +
-    d.senders.map((s, i) => `<tr><td><b>${esc(s.name || s.addr)}</b><br><span class="note">${esc(s.addr)}</span></td>
+    d.senders.map((s, i) => `<tr data-row="${i}"><td class="who" data-peek="${i}" title="Show the 20 most recent emails">
+      <span class="caret">▸</span> <b>${esc(s.name || s.addr)}</b><br><span class="note">${esc(s.addr)}</span></td>
       <td class="num">${fmt(s.count)}</td><td class="num">${s.readPct}%</td><td class="num">${fmt(s.inbox)}</td>
       <td>${s.accounts.map((a) => `${acctChip(a.id, a.email)}${a.status ? `<span class="note">${STATUS[a.status] || a.status}</span> ` : ""}`).join("")}</td>
       <td class="note">${when(s.last)}</td>
@@ -278,7 +279,32 @@ async function runSender(s, a, b, ai) {
   } catch (err) { $("#c-result").innerHTML = `<div class="err">${esc(err.message)}</div>`; }
   loadSenders();
 }
+/* 20 most recent emails from a sender, as a list (shared by Cleanup and AI Cleanup) */
+const recentCache = {};
+async function recent(addr) {
+  if (!recentCache[addr]) recentCache[addr] = api(`/api/sender/recent?addr=${encodeURIComponent(addr)}&n=20`).then((d) => d.items);
+  return recentCache[addr];
+}
+function recentList(items, tag) {
+  if (!items.length) return `<div class="note">No mail found.</div>`;
+  return `<div class="peek">` + items.map((it) => {
+    const t = tag ? tag(it) : null;
+    return `<div class="pm">${acctChip(it.account, it.email)}<span class="s"><b>${esc(it.subject)}</b> <span class="note">${esc(it.snippet)}</span></span>
+      ${t ? `<span class="chip act-${t.action}">${esc(t.text)}</span>` : ""}<span class="note">${when(it.ts)}</span></div>`;
+  }).join("") + "</div>";
+}
+async function togglePeek(row, addr, cols) {
+  const next = row.nextElementSibling;
+  if (next && next.classList.contains("peek-row")) { next.remove(); row.querySelector(".caret").textContent = "▸"; return; }
+  row.querySelector(".caret").textContent = "▾";
+  const tr = document.createElement("tr"); tr.className = "peek-row";
+  tr.innerHTML = `<td colspan="${cols}"><div class="note">Loading the 20 most recent emails…</div></td>`;
+  row.after(tr);
+  try { tr.firstChild.innerHTML = recentList(await recent(addr)); } catch (err) { tr.firstChild.innerHTML = `<div class="err">${esc(err.message)}</div>`; }
+}
 $("#c-table").onclick = async (e) => {
+  const peek = e.target.closest("td[data-peek]");
+  if (peek) return togglePeek(peek.parentElement, S.senders[+peek.dataset.peek].addr, 7);
   const aiB = e.target.closest("button[data-ai]");
   if (aiB) {
     const s = S.senders[+aiB.dataset.i];
@@ -326,6 +352,102 @@ $("#c-protect-btn").onclick = async () => {
   loadSenders();
 };
 $("#c-collect").onclick = async () => { await api("/api/collect", {}).catch(() => {}); $("#c-status").textContent = "Collecting… refresh in a minute."; };
+
+/* ------------------------------------------------------------------ AI cleanup */
+const GACT = { keep: "Keep & star", archive: "Archive", quarantine: "Quarantine", delete: "Delete" };
+const gactSel = (v, attrs) => `<select ${attrs}>${Object.entries(GACT).map(([k, l]) => `<option value="${k}" ${k === v ? "selected" : ""}>${l}</option>`).join("")}</select>`;
+function classify(subject, plan) {  // first group whose words appear in the subject wins, else the default
+  const sub = subject.toLowerCase();
+  const gi = plan.groups.findIndex((g) => g.words.some((w) => w && sub.includes(w.toLowerCase())));
+  return gi >= 0 ? { action: plan.groups[gi].action, text: `${plan.groups[gi].label || "group " + (gi + 1)} → ${GACT[plan.groups[gi].action]}` }
+    : { action: plan.default, text: `other → ${GACT[plan.default]}` };
+}
+let pollT;
+async function loadPlans() {
+  let d;
+  try { d = await api("/api/ai/plans"); } catch (e) { $("#ai-body").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
+  S.plans = d.plans;
+  const r = d.running;
+  $("#ai-status").textContent = !d.ai ? "AI is not configured on this server." : r.busy ? `Analyzing senders… ${r.done}/${r.total}`
+    : `${d.plans.filter((p) => p.status === "new").length} plan(s) to review.` + (r.error ? ` Last error: ${r.error}` : "");
+  $("#ai-run").disabled = !d.ai || r.busy;
+  clearTimeout(pollT);
+  if (r.busy) pollT = setTimeout(loadPlans, 5000);
+  const open = new Set([...document.querySelectorAll("#ai-body .plan[data-open]")].map((x) => x.dataset.addr));
+  $("#ai-body").innerHTML = d.plans.length ? d.plans.map((p, i) => planCard(p, i)).join("")
+    : `<div class="empty">No plans yet. Click "Analyze top senders": the AI reads each sender's recent subjects and proposes
+       which emails to keep and which to clear. Nothing changes until you apply a plan.</div>`;
+  d.plans.forEach((p, i) => { if (open.has(p.addr)) showPreview(i); });
+}
+function planCard(p, i) {
+  const done = p.status !== "new";
+  const sampleCounts = {};
+  (p.subjects || []).forEach((x) => { const c = classify(x.subject, p); sampleCounts[c.text] = (sampleCounts[c.text] || 0) + x.count; });
+  return `<div class="card plan ${done ? "done" : ""}" data-i="${i}" data-addr="${esc(p.addr)}">
+    <div class="ph"><div><b>${esc(p.addr)}</b> <span class="note">· ${fmt(p.count)} emails · ${p.accounts.map((a) => acctChip(a.id, a.email)).join("")}</span>
+      ${done ? `<span class="chip">${esc(p.status)}</span>` : ""}<div class="note">${esc(p.reason || "")}</div></div>
+      <div class="grp">${done ? `<button data-pa="undo" data-i="${i}">Review again</button>` : `<button data-pa="skip" data-i="${i}">Skip</button>
+        <button data-pa="redo" data-i="${i}">Re-analyze</button><button data-pa="apply" data-i="${i}" class="primary">Apply plan</button>`}</div></div>
+    ${done ? "" : `<div class="groups">${p.groups.map((g, gi) => `<div class="g" data-gi="${gi}">
+        <input data-f="label" value="${esc(g.label)}" placeholder="Name" class="gl">
+        <input data-f="words" value="${esc(g.words.join(", "))}" placeholder="subject words, comma-separated" class="gw">
+        ${gactSel(g.action, 'data-f="action"')}<button data-pa="del-g" data-i="${i}" data-gi="${gi}" title="Remove group">×</button></div>`).join("")}
+      <div class="g"><span class="gl note">Everything else</span><span class="gw note">mail that matches no group above</span>
+        ${gactSel(p.default, 'data-f="default"')}<span></span></div>
+      <button data-pa="add-g" data-i="${i}">+ Add group</button>
+      <span class="note">In the sample of ${p.sampled}: ${Object.entries(sampleCounts).map(([k, n]) => `${esc(k)}: ${n}`).join(" · ")}</span></div>
+      <details data-i="${i}"><summary>Preview the 20 most recent emails and what each would get</summary><div class="pv"></div></details>`}</div>`;
+}
+function readCard(i) {  // editor state back into S.plans[i]
+  const card = document.querySelector(`#ai-body .plan[data-i="${i}"]`), p = S.plans[i];
+  if (!card || p.status !== "new") return p;
+  p.groups = [...card.querySelectorAll(".g[data-gi]")].map((g) => ({ label: g.querySelector('[data-f="label"]').value.trim(),
+    words: g.querySelector('[data-f="words"]').value.split(",").map((w) => w.trim()).filter(Boolean), action: g.querySelector('[data-f="action"]').value }));
+  p.default = card.querySelector('[data-f="default"]').value;
+  return p;
+}
+async function showPreview(i) {
+  const card = document.querySelector(`#ai-body .plan[data-i="${i}"]`);
+  const det = card?.querySelector("details");
+  if (!det) return;
+  det.open = true; card.dataset.open = "1";
+  const pv = det.querySelector(".pv"), p = readCard(i);
+  pv.innerHTML = `<div class="note">Loading…</div>`;
+  try { pv.innerHTML = recentList(await recent(p.addr), (it) => classify(it.subject, p)); } catch (e) { pv.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+}
+$("#ai-body").addEventListener("toggle", (e) => { const det = e.target; if (det.tagName === "DETAILS" && det.open) showPreview(+det.dataset.i);
+  else if (det.tagName === "DETAILS") delete det.closest(".plan").dataset.open; }, true);
+$("#ai-body").oninput = (e) => {  // live: re-tag the preview as the plan is edited
+  const card = e.target.closest(".plan"); if (!card) return;
+  const i = +card.dataset.i; readCard(i);
+  if (card.querySelector("details").open) showPreview(i);
+};
+$("#ai-body").onchange = $("#ai-body").oninput;
+$("#ai-body").onclick = async (e) => {
+  const b = e.target.closest("button[data-pa]"); if (!b) return;
+  const i = +b.dataset.i, p = readCard(i), a = b.dataset.pa;
+  if (a === "add-g") { p.groups.push({ label: "", words: [], action: "keep" }); return loadPlansRender(); }
+  if (a === "del-g") { p.groups.splice(+b.dataset.gi, 1); return loadPlansRender(); }
+  if (a === "skip" || a === "undo") { await api("/api/ai/skip", { addr: p.addr, undo: a === "undo" }).catch(() => {}); return loadPlans(); }
+  if (a === "redo") { await api("/api/ai/analyze", { addr: p.addr }).catch((err) => alert(err.message)); return loadPlans(); }
+  if (a === "apply") {
+    const lines = p.groups.map((g) => `• subject has ${g.words.join(" / ")} → ${GACT[g.action]}`).concat([`• everything else → ${GACT[p.default]}`]);
+    if (!confirm(`Apply this plan to ${p.addr} in ${p.accounts.length} account(s)? It sorts existing mail (every folder, every year) and adds Gmail filters for future mail:\n\n${lines.join("\n")}`)) return;
+    b.disabled = true; b.textContent = "Applying…";
+    try {
+      const r = await api("/api/ai/apply", { addr: p.addr, groups: p.groups, default: p.default });
+      $("#ai-result").innerHTML = `<div class="card"><b>Applied: ${esc(p.addr)}</b><ul>` + r.results.map((x) => `<li class="${x.ok ? "" : "err"}">${esc(x.email)}: ${esc(x.note)}</li>`).join("") + "</ul></div>";
+    } catch (err) { $("#ai-result").innerHTML = `<div class="err">${esc(err.message)}</div>`; }
+    loadPlans();
+  }
+};
+function loadPlansRender() { const open = new Set([...document.querySelectorAll("#ai-body .plan[data-open]")].map((x) => x.dataset.addr));
+  $("#ai-body").innerHTML = S.plans.map((p, i) => planCard(p, i)).join(""); S.plans.forEach((p, i) => { if (open.has(p.addr)) showPreview(i); }); }
+$("#ai-run").onclick = async () => {
+  try { const r = await api("/api/ai/analyze", { limit: +$("#ai-limit").value }); if (r.started === false) alert("An analysis is already running."); }
+  catch (err) { alert(err.message); }
+  loadPlans();
+};
 
 /* ------------------------------------------------------------------ quarantine */
 async function loadQuarantine() {

@@ -129,6 +129,26 @@ td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
 .qgroup .qm:last-child { border-bottom:0; }
 .qgroup .qm .s { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 #tabs .n { color:var(--muted); font-weight:400; }
+td.who { cursor:pointer; } td.who .caret { color:var(--muted); display:inline-block; width:12px; }
+tr.peek-row td { background:var(--side); padding:8px 12px 12px; }
+.peek { display:flex; flex-direction:column; border:1px solid var(--line); border-radius:var(--radius); background:var(--panel); }
+.peek .pm { display:grid; grid-template-columns:auto 1fr auto auto; gap:10px; align-items:center; padding:6px 10px;
+  border-bottom:1px solid var(--line); font-size:13px; }
+.peek .pm:last-child { border-bottom:0; }
+.peek .pm .s { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .peek .pm .s b { font-weight:500; }
+.chip.act-keep { background:var(--rule); color:var(--rule-t); } .chip.act-archive { background:var(--chip); }
+.chip.act-quarantine { background:#fef3c7; color:#92400e; border-color:#fde68a; }
+.chip.act-delete { background:#fee2e2; color:#991b1b; border-color:#fecaca; }
+@media (prefers-color-scheme: dark) { .chip.act-quarantine { background:#422006; color:#fcd34d; border-color:#713f12; }
+  .chip.act-delete { background:#450a0a; color:#fca5a5; border-color:#7f1d1d; } }
+.plan .ph { display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; align-items:flex-start; }
+.plan.done { opacity:.7; }
+.plan .groups { display:flex; flex-direction:column; gap:6px; margin:12px 0 8px; }
+.plan .g { display:grid; grid-template-columns:160px 1fr 150px 36px; gap:8px; align-items:center; }
+.plan .g input { height:34px; padding:0 10px; border:1px solid var(--line); border-radius:6px; background:var(--panel); color:var(--text); font:inherit; }
+.plan .g select { height:34px; }
+.plan details summary { cursor:pointer; color:var(--link); font-size:13px; margin:6px 0; }
+@media (max-width: 900px) { .plan .g { grid-template-columns:1fr 1fr; } }
 dialog#dlg { border:1px solid var(--line); border-radius:12px; padding:20px 22px; max-width:640px; width:calc(100% - 32px);
   background:var(--panel); color:var(--text); box-shadow:0 10px 40px rgba(15,23,42,.25); }
 dialog#dlg::backdrop { background:rgba(15,23,42,.45); }
@@ -163,6 +183,7 @@ select.cleanup { padding:3px 6px; font-size:12px; }
   <h1><span class="logo" aria-hidden="true">Σ</span>Zero Sum</h1>
   <nav class="tabs" id="tabs">
     <button data-tab="inbox" class="on">Inbox</button><button data-tab="cleanup">Cleanup</button>
+    <button data-tab="ai">✨ AI Cleanup</button>
     <button data-tab="quarantine">Quarantine <span id="q-count" class="n"></span></button>
     <button data-tab="analytics">Analytics</button><button data-tab="rules">Rules</button>
   </nav>
@@ -189,6 +210,17 @@ select.cleanup { padding:3px 6px; font-size:12px; }
     <div id="c-prot" class="note" style="margin:6px 0"></div>
     <div id="c-result"></div>
     <div class="wide" id="c-table"><div class="empty">Loading…</div></div>
+  </div></section>
+  <section class="view" id="v-ai"><div class="page">
+    <div class="bar-row">
+      <select id="ai-limit"><option value="10">Top 10 senders</option><option value="25" selected>Top 25 senders</option>
+        <option value="50">Top 50 senders</option></select>
+      <button id="ai-run" class="primary">✨ Analyze top senders</button><span id="ai-status" class="note"></span>
+    </div>
+    <p class="note">The AI reads each sender's recent subject lines and splits their mail into groups: keep the orders and
+      receipts, quarantine the promotions, and so on. Edit any group, preview the 20 most recent emails, then apply.
+      Nothing changes until you apply a plan.</p>
+    <div id="ai-result"></div><div id="ai-body"><div class="empty">Loading…</div></div>
   </div></section>
   <section class="view" id="v-quarantine"><div class="page">
     <div class="bar-row">

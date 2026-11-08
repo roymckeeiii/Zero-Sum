@@ -242,6 +242,9 @@ CREATE TABLE IF NOT EXISTS unified.msg (
   unsub text, unsub_post boolean NOT NULL DEFAULT false, PRIMARY KEY (account_id, id));
 CREATE INDEX IF NOT EXISTS msg_from ON unified.msg (from_addr);
 CREATE INDEX IF NOT EXISTS msg_ts ON unified.msg (ts);
+CREATE TABLE IF NOT EXISTS unified.ai_plan (
+  addr text PRIMARY KEY, plan jsonb NOT NULL, status text NOT NULL DEFAULT 'new', created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS unified.protected (
   key text PRIMARY KEY, created_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS unified.collect_state (
