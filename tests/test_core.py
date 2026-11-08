@@ -63,6 +63,15 @@ class Parsing(unittest.TestCase):
         self.assertFalse(cleanup.is_protected("b@x.com", prot))
 
 
+class KeepWords(unittest.TestCase):
+    def test_keep_query(self):
+        self.assertEqual(cleanup.keep_query(["gift", "surprise"]), "subject:(gift OR surprise)")
+        self.assertEqual(cleanup.keep_query(["order shipped"]), 'subject:("order shipped")')
+        self.assertIsNone(cleanup.keep_query([]))
+        self.assertIsNone(cleanup.keep_query(["   ", "()"]))
+        self.assertNotIn(")", cleanup.keep_query(["a) OR from:(x"])[len("subject:("):-1])  # no query injection
+
+
 class Rules(unittest.TestCase):
     def test_digest_is_stable_and_sensitive(self):
         r = {f: None for f in rulesync.RULE_FIELDS} | {"name": "A"}

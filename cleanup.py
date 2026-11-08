@@ -16,8 +16,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 from core import ACC, POOL, db, gmail, gmail_list, header, label_id, log, new_id
 
-BACKFILL_DAYS = int(os.environ.get("BACKFILL_DAYS", "180"))
-BACKFILL_STEP = int(os.environ.get("BACKFILL_STEP", "400"))
+BACKFILL_DAYS = int(os.environ.get("BACKFILL_DAYS", "3650"))  # ten years: old mail matters for cleanup
+BACKFILL_STEP = int(os.environ.get("BACKFILL_STEP", "2000"))
+MAX_BULK = int(os.environ.get("MAX_BULK", "200000"))  # most messages one bulk action touches per account
 SKIP = "-in:sent -in:drafts -in:chats"
 CPOOL = ThreadPoolExecutor(max_workers=8)
 COLLECT_LOCK = threading.Lock()
@@ -188,15 +189,27 @@ def protected_list(q=None):
 
 
 # ---------------------------------------------------------------- Gmail helpers
-def _filter(acc_id, addr, action, remove=False):
-    """Create (or with remove=True delete) the Gmail filter `from:addr` -> action."""
+def keep_query(words):
+    """Gmail search for 'subject contains any of these words/phrases', or None. Input is cleaned, not trusted."""
+    out = []
+    for w in (words or [])[:10]:
+        w = re.sub(r"[^\w\s'&$%!-]", " ", str(w), flags=re.U).strip()[:40]
+        if w:
+            out.append(f'"{w}"' if " " in w else w)
+    return f"subject:({' OR '.join(out)})" if out else None
+
+
+def _filter(acc_id, addr, action, remove=False, keep=None):
+    """Create (or with remove=True delete) the Gmail filter `from:addr` -> action. With `keep` (a keep_query), mail whose
+    subject matches is left out of the filter."""
+    crit = {"from": addr, **({"negatedQuery": keep} if keep else {})}
     if remove:
         for f in gmail(acc_id, "/settings/filters").get("filter", []):
             if (f.get("criteria") or {}).get("from", "").lower() == addr and f.get("action") == action:
                 gmail(acc_id, f"/settings/filters/{f['id']}", "DELETE")
         return
     try:
-        gmail(acc_id, "/settings/filters", "POST", {"criteria": {"from": addr}, "action": action})
+        gmail(acc_id, "/settings/filters", "POST", {"criteria": crit, "action": action})
     except RuntimeError as e:
         if "exists" not in str(e).lower():
             raise
@@ -204,7 +217,7 @@ def _filter(acc_id, addr, action, remove=False):
 
 def _modify_existing(acc_id, query, add=(), remove=()):
     """Apply label changes to every message matching `query` (batches of 1000). Returns the count."""
-    return _batch(acc_id, [m["id"] for m in gmail_list(acc_id, qs(query), "messages", 5000)], add, remove)
+    return _batch(acc_id, [m["id"] for m in gmail_list(acc_id, qs(query), "messages", MAX_BULK)], add, remove)
 
 
 def _batch(acc_id, ids, add=(), remove=()):
@@ -222,8 +235,8 @@ def _batch(acc_id, ids, add=(), remove=()):
     return len(ids)
 
 
-def _archive_existing(acc_id, addr):
-    n = _modify_existing(acc_id, f"from:{addr} in:inbox", remove=["INBOX"])
+def _archive_existing(acc_id, addr, keep=None):
+    n = _modify_existing(acc_id, f"from:{addr} in:inbox" + (f" -{keep}" if keep else ""), remove=["INBOX"])
     with db() as c:
         c.execute("UPDATE unified.msg SET inbox = false WHERE account_id = %s AND from_addr = %s", (acc_id, addr))
     return n
@@ -248,6 +261,7 @@ def _one_click(url):
 
 
 QUARANTINE = os.environ.get("QUARANTINE_LABEL", "Quarantine")
+SHOW = int(os.environ.get("QUARANTINE_SHOW", "600"))  # messages per account listed with details on the Quarantine tab
 TRASH_FILTER = {"addLabelIds": ["TRASH"]}
 ARCHIVE_FILTER = {"removeLabelIds": ["INBOX"]}
 STAR_FILTER = {"addLabelIds": ["STARRED"]}
@@ -270,6 +284,12 @@ def sender_action(d):
                 c.execute("INSERT INTO unified.protected (key) VALUES (%s) ON CONFLICT DO NOTHING", (addr,))
             else:
                 c.execute("DELETE FROM unified.protected WHERE key = %s", (addr,))
+        never_spam = {"removeLabelIds": ["SPAM"]}  # Gmail's "Never send it to Spam", for this address or domain
+        for acc in ACC.list():
+            try:
+                _filter(acc["id"], addr, never_spam, remove=(act == "unprotect"))
+            except Exception as e:  # noqa: BLE001 - protection in Zero Sum still applies
+                log("cleanup-error", f"{act} {addr}: never-spam filter: {e}"[:300], acc["email"])
         if act == "protect" and not addr.startswith("@"):  # also "kept" in Inbox Zero for every account that gets it
             with db() as c:
                 for (a,) in c.execute("SELECT DISTINCT account_id FROM unified.msg WHERE from_addr = %s", (addr,)).fetchall():
@@ -280,6 +300,8 @@ def sender_action(d):
         raise ValueError("bad sender address")
     if act in DESTRUCTIVE and is_protected(addr):
         raise PermissionError(f"{addr} is protected: unprotect it first")
+    kq = keep_query(d.get("keep")) if act in DESTRUCTIVE else None
+    nk = f" -{kq}" if kq else ""  # appended to every "which existing mail" query
     with db() as c:
         acc_ids = [r[0] for r in c.execute("SELECT DISTINCT account_id FROM unified.msg WHERE from_addr = %s",
                                            (addr,)).fetchall()]
@@ -303,40 +325,52 @@ def sender_action(d):
                 else:
                     note.append("no unsubscribe link" + ("" if act != "unsubscribe" else ": use Block or Quarantine"))
             if act == "unsub_delete":  # and clear it out: Trash now, future mail straight to Trash
-                _filter(a, addr, TRASH_FILTER)
-                note.append(f"{_modify_existing(a, f'from:{addr} -in:trash', add=['TRASH'])} moved to Trash, "
+                _filter(a, addr, TRASH_FILTER, keep=kq)
+                note.append(f"{_modify_existing(a, f'from:{addr} -in:trash{nk}', add=['TRASH'])} moved to Trash, "
                             "future mail goes to Trash")
-                _drop_rows(a, addr)
+                if not kq:
+                    _drop_rows(a, addr)
             if act in ("quarantine", "unsub_quarantine"):  # held for review on the Quarantine tab, now and in future
                 lid = label_id(a, QUARANTINE)
-                _filter(a, addr, {"addLabelIds": [lid], "removeLabelIds": ["INBOX"]})
-                n = _modify_existing(a, f"from:{addr} in:inbox", add=[lid], remove=["INBOX"])
+                _filter(a, addr, {"addLabelIds": [lid], "removeLabelIds": ["INBOX"]}, keep=kq)
+                n = _modify_existing(a, f"from:{addr} -in:trash -in:spam -label:{QUARANTINE}{nk}", add=[lid],
+                                     remove=["INBOX"])  # every folder, every year
                 note.append(f"filter added, {n} moved to {QUARANTINE}")
                 with db() as c:
                     c.execute("UPDATE unified.msg SET inbox = false WHERE account_id = %s AND from_addr = %s", (a, addr))
             if act in ("autoarchive", "unsub_archive"):
-                _filter(a, addr, ARCHIVE_FILTER)
-                note.append(f"filter added, {_archive_existing(a, addr)} archived")
+                _filter(a, addr, ARCHIVE_FILTER, keep=kq)
+                note.append(f"filter added, {_archive_existing(a, addr, kq)} archived")
             elif act == "archive":
-                note.append(f"{_archive_existing(a, addr)} archived")
+                note.append(f"{_archive_existing(a, addr, kq)} archived")
             elif act == "delete":
-                note.append(f"{_modify_existing(a, f'from:{addr} -in:trash', add=['TRASH'])} moved to Trash")
-                _drop_rows(a, addr)
+                note.append(f"{_modify_existing(a, f'from:{addr} -in:trash{nk}', add=['TRASH'])} moved to Trash")
+                if not kq:
+                    _drop_rows(a, addr)
             elif act == "block":
-                _filter(a, addr, TRASH_FILTER)
+                _filter(a, addr, TRASH_FILTER, keep=kq)
                 note.append(f"filter added (future mail goes to Trash), "
-                            f"{_modify_existing(a, f'from:{addr} -in:trash', add=['TRASH'])} moved to Trash")
-                _drop_rows(a, addr)
+                            f"{_modify_existing(a, f'from:{addr} -in:trash{nk}', add=['TRASH'])} moved to Trash")
+                if not kq:
+                    _drop_rows(a, addr)
             elif act == "spam":
-                note.append(f"{_modify_existing(a, f'from:{addr} -in:spam -in:trash', add=['SPAM'], remove=['INBOX'])} "
+                note.append(f"{_modify_existing(a, f'from:{addr} -in:spam -in:trash{nk}', add=['SPAM'], remove=['INBOX'])} "
                             "reported as spam")
-                _drop_rows(a, addr)
+                if not kq:
+                    _drop_rows(a, addr)
             elif act == "star":
                 _filter(a, addr, STAR_FILTER)
                 note.append(f"filter added, {_modify_existing(a, f'from:{addr} in:inbox -is:starred', add=['STARRED'])} starred")
             elif act == "unstar":
                 _filter(a, addr, STAR_FILTER, remove=True)
                 note.append(f"filter removed, {_modify_existing(a, f'from:{addr} is:starred', remove=['STARRED'])} unstarred")
+            if kq and act in DESTRUCTIVE:  # the kept ones: starred now and in future, so they stand out
+                try:
+                    gmail(a, "/settings/filters", "POST", {"criteria": {"from": addr, "query": kq}, "action": STAR_FILTER})
+                except RuntimeError as e:
+                    if "exists" not in str(e).lower():
+                        raise
+                note.append(f"{_modify_existing(a, f'from:{addr} {kq} -is:starred -in:trash', add=['STARRED'])} kept and starred")
             status = {"unsubscribe": "UNSUBSCRIBED", "unsub_archive": "UNSUBSCRIBED", "unsub_quarantine": "UNSUBSCRIBED",
                       "unsub_delete": "UNSUBSCRIBED", "autoarchive": "AUTO_ARCHIVED", "quarantine": "AUTO_ARCHIVED",
                       "block": "AUTO_ARCHIVED",
@@ -350,7 +384,7 @@ def sender_action(d):
             results.append({"email": em, "ok": True, "note": "; ".join(note) or act})
         except Exception as e:  # noqa: BLE001
             results.append({"email": em, "ok": False, "note": str(e)[:200]})
-    log("cleanup", f"{act} {addr}: " + "; ".join(f"{r['email']}: {r['note']}" for r in results))
+    log("cleanup", f"{act} {addr}{' keep ' + kq if kq else ''}: " + "; ".join(f"{r['email']}: {r['note']}" for r in results))
     return {"results": results, "manual": manual}
 
 
@@ -362,12 +396,16 @@ def _qlabel(acc_id):
 def quarantine_list(q=None):
     """Everything carrying the Quarantine label in every account, newest first, grouped by sender."""
     from inbox import meta
-    errors = []
+    errors, totals = [], {}
 
     def ids(a):
         try:
             lid = _qlabel(a["id"])
-            return [(a, m["id"]) for m in gmail_list(a["id"], f"/messages?labelIds={lid}", "messages", 2000)] if lid else []
+            if not lid:
+                return []
+            ids = [m["id"] for m in gmail_list(a["id"], f"/messages?labelIds={lid}", "messages", MAX_BULK)]
+            totals[a["id"]] = len(ids)
+            return [(a, i) for i in ids[:SHOW]]  # newest SHOW per account get details; actions use the full label
         except Exception as e:  # noqa: BLE001
             errors.append({"email": a["email"], "error": str(e)[:200]})
             return []
@@ -389,7 +427,7 @@ def quarantine_list(q=None):
     for g in senders:
         g["count"] = len(g["items"])
         g["accounts"] = [{"id": k, "email": v} for k, v in g["accounts"].items()]
-    return {"label": QUARANTINE, "total": len(items), "senders": senders, "errors": errors}
+    return {"label": QUARANTINE, "total": sum(totals.values()), "shown": len(items), "senders": senders, "errors": errors}
 
 
 QACTIONS = {"delete": "moved to Trash", "archive": "archived (label removed)", "release": "back in the inbox"}
@@ -420,7 +458,7 @@ def quarantine_action(d):
                 ids = chosen[a["id"]]
             else:
                 query = f"/messages?labelIds={lid}" + (f"&q={urllib.parse.quote('from:' + sender)}" if sender else "")
-                ids = [m["id"] for m in gmail_list(a["id"], query, "messages", 5000)]
+                ids = [m["id"] for m in gmail_list(a["id"], query, "messages", MAX_BULK)]
             if not ids:
                 continue
             add = {"delete": ["TRASH"], "archive": [], "release": ["INBOX"]}[act]

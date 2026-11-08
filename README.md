@@ -37,9 +37,18 @@ applies to *all* of them:
 - **Unsubscribe**: RFC 8058 one-click unsubscribe where the sender supports it
 - **Unsubscribe & archive**, **Unsubscribe & delete**, **Unsubscribe & quarantine**
 - **Auto-archive**, **Delete all**, **Block** (straight to Trash), **Report spam**, **Auto-star** the senders that matter
-- **Protect** important senders or whole domains (`@yourbank.com`) so they can never be bulk-deleted by accident
+- **Protect** important senders or whole domains (`@yourbank.com`): now and for all future mail, they can never be
+  bulk-deleted by accident, and Gmail will never send them to Spam
 
-Every action asks for confirmation first, showing how many emails and accounts it will touch.
+Every action asks for confirmation first, showing how many emails and accounts it will touch, and lets you **keep
+emails whose subject contains** certain words (say *gift*, *order*, *receipt*): those stay in your inbox and get
+starred, now and in future, while the rest is cleared. Actions reach back through **years of mail in every folder**,
+not just the inbox.
+
+### ✨ AI suggest
+Not sure what to do with a sender? Click **AI suggest**: it reads that sender's subject lines across all your accounts
+and proposes an action and the subjects worth keeping, with a live preview of what would be kept. Nothing happens until
+you confirm. Works with any OpenAI-compatible API (OpenRouter by default; set `OPENROUTER_API_KEY`).
 
 ### Quarantine: review first, then clear everything at once
 Not sure a sender is junk? **Quarantine** them. Their mail, now and in future, skips the inbox in every account and
@@ -195,7 +204,9 @@ All settings are environment variables; see [`.env.example`](.env.example).
 | `ADMIN_DATABASE_URL` | | only for `init-db` |
 | `PORT` | `8080` | inside the container |
 | `COLLECT_EVERY_MIN`, `RULES_EVERY_MIN` | `15`, `10` | background jobs |
-| `BACKFILL_DAYS`, `BACKFILL_STEP` | `180`, `400` | history the collector gathers, per run per account |
+| `BACKFILL_DAYS`, `BACKFILL_STEP` | `3650`, `2000` | history the collector gathers, per run per account |
+| `MAX_BULK` | `200000` | most emails one bulk action touches per account |
+| `OPENROUTER_API_KEY`, `AI_MODEL`, `AI_BASE_URL` | empty, `anthropic/claude-haiku-5.5`, OpenRouter | AI suggest (off without a key) |
 | `GMAIL_UNITS_PER_SEC` | `50` | Gmail quota units per second per account |
 
 ## Security notes

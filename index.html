@@ -129,6 +129,15 @@ td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
 .qgroup .qm:last-child { border-bottom:0; }
 .qgroup .qm .s { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 #tabs .n { color:var(--muted); font-weight:400; }
+dialog#dlg { border:1px solid var(--line); border-radius:12px; padding:20px 22px; max-width:640px; width:calc(100% - 32px);
+  background:var(--panel); color:var(--text); box-shadow:0 10px 40px rgba(15,23,42,.25); }
+dialog#dlg::backdrop { background:rgba(15,23,42,.45); }
+#dlg h3 { margin:0 0 8px; font-size:17px; } #dlg p { margin:6px 0; }
+#dlg label.keep { display:flex; flex-direction:column; align-items:stretch; gap:6px; margin:12px 0; color:var(--text); white-space:normal; }
+#dlg input { height:36px; padding:0 12px; border:1px solid var(--line); border-radius:6px; background:var(--panel); color:var(--text); font:inherit; }
+#dlg .dlg-buttons { display:flex; justify-content:flex-end; gap:8px; margin-top:14px; }
+#dlg ul.subjects { max-height:240px; overflow:auto; margin:6px 0; padding-left:18px; font-size:13px; color:var(--muted); }
+#dlg ul.subjects li.kept { color:var(--ok); font-weight:500; }
 select.cleanup { padding:3px 6px; font-size:12px; }
 .star { color:#c98500; }
 .chip.prot { background:var(--rule); color:var(--rule-t); }
@@ -170,7 +179,8 @@ select.cleanup { padding:3px 6px; font-size:12px; }
     <div class="bar-row">
       <input type="search" id="c-q" placeholder="Filter senders">
       <select id="c-days"><option value="30">Last 30 days</option><option value="90" selected>Last 90 days</option>
-        <option value="180">Last 180 days</option></select>
+        <option value="180">Last 180 days</option><option value="365">Last year</option>
+        <option value="1825">Last 5 years</option><option value="3650">Last 10 years</option></select>
       <label><input type="checkbox" id="c-handled"> Show handled</label>
       <input type="search" id="c-protect" placeholder="Protect name@x.com or @x.com"><button id="c-protect-btn">Protect</button>
       <span class="spacer"></span><button id="c-collect">Collect now</button>
@@ -210,6 +220,12 @@ select.cleanup { padding:3px 6px; font-size:12px; }
   </div></section>
 </main>
 <div id="tip" role="tooltip"></div>
+<dialog id="dlg"><form method="dialog">
+  <h3 id="dlg-title"></h3><p id="dlg-text"></p><div id="dlg-ai"></div>
+  <label id="dlg-keep-row" class="keep">Keep emails whose subject contains <span class="note">(optional, comma-separated; kept ones get starred)</span>
+    <input id="dlg-keep" type="text" placeholder="e.g. gift, surprise, order"></label>
+  <div class="dlg-buttons"><button value="cancel">Cancel</button><button id="dlg-ok" value="ok" class="primary">Confirm</button></div>
+</form></dialog>
 <script src="/app.js"></script>
 </body>
 </html>
