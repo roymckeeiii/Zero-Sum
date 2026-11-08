@@ -203,6 +203,7 @@ function confirmText(a, s) {  // every removal action asks first (Roy, 11-07)
   const n = `${s.addr} (${s.count} recent emails across ${s.accounts.length} account(s))`;
   if (CONFIRM[a]) return `${CONFIRM[a]} ${n}` + (a === "spam" ? " as spam?" : " to Trash?") +
     (["block", "unsub_delete"].includes(a) ? " Future mail from this sender will go straight to Trash." : "");
+  if (a === "protect") return `Protect ${s.addr}? Zero Sum will refuse to unsubscribe, archive, delete or block anything from it, now and in future, and Gmail will never send it to Spam (in every account).`;
   return { unsubscribe: `Unsubscribe from ${n}?`, unsub_archive: `Unsubscribe from ${n} and archive their mail? Future mail skips the inbox.`,
     unsub_quarantine: `Unsubscribe from ${n} and move their mail to Quarantine? Future mail goes there too.`,
     quarantine: `Move mail from ${n} to Quarantine? Future mail goes there too.`,
@@ -227,22 +228,45 @@ async function loadSenders() {
         <div class="grp"><button data-i="${i}" data-a="${s.protected ? "unprotect" : "protect"}" title="Protected senders are never archived, deleted or blocked in bulk">${s.protected ? "Unprotect" : "Protect"}</button>
           <button data-i="${i}" data-a="star" title="Star what is in the inbox, and future mail (Gmail filter)">Auto-star</button>
           <button data-i="${i}" data-a="unstar" title="Remove the auto-star filter and the stars">Un-star</button>
-          <button data-i="${i}" data-a="keep" title="Mark as wanted in Inbox Zero (hides it here)">Keep</button></div>
+          <button data-i="${i}" data-a="keep" title="Mark as wanted in Inbox Zero (hides it here)">Keep</button>
+          ${S.ai && !s.protected ? `<button data-i="${i}" data-ai="1" title="Let AI read this sender's subjects and suggest what to keep and what to clear">✨ AI suggest</button>` : ""}</div>
         <div class="grp"><select class="cleanup" data-i="${i}" ${s.protected ? "disabled title='Protected sender'" : ""}>
           <option value="">Clean up…</option>${MENU.map(([g, acts]) => `<optgroup label="${g}">${acts.map((a) =>
             `<option value="${a}" title="${esc(TIPS[a])}">${LABELS[a]}</option>`).join("")}</optgroup>`).join("")}</select></div></td></tr>`).join("") + "</tbody></table>";
   $("#c-prot").innerHTML = d.protected.length ? "Protected: " + d.protected.map((k) => `<span class="chip prot">${esc(k)}
     <button class="x" data-unprot="${esc(k)}" title="Unprotect">×</button></span>`).join("") : "";
 }
-$("#c-table").onclick = async (e) => {
-  const b = e.target.closest("button[data-a]");
-  if (!b) return;
-  const s = S.senders[+b.dataset.i], a = b.dataset.a;
-  const ask = confirmText(a, s);
-  if (ask && !confirm(ask)) return;
-  b.disabled = true; b.textContent = "…";
+/* confirmation dialog, with "keep emails whose subject contains" for actions that clear mail */
+const KEEPABLE = ["unsub_archive", "unsub_quarantine", "unsub_delete", "autoarchive", "quarantine", "archive", "delete", "block", "spam"];
+function askDialog(a, s, ai) {
+  const d = $("#dlg"), text = confirmText(a, s);
+  if (!text && !ai) return Promise.resolve({ keep: [] });
+  $("#dlg-title").textContent = `${LABELS[a] || a}: ${s.addr}`;
+  $("#dlg-text").textContent = text || "";
+  $("#dlg-keep-row").hidden = !KEEPABLE.includes(a);
+  $("#dlg-keep").value = ai ? ai.keep_words.join(", ") : "";
+  $("#dlg-ai").innerHTML = ai ? `<p><b>AI suggests: ${esc(LABELS[ai.action] || ai.action)}</b>${ai.keep_words.length ? `, keeping subjects with
+    <i>${ai.keep_words.map(esc).join(", ")}</i>` : ""}. ${esc(ai.reason)}</p><p class="note">From ${ai.sampled} recent emails (${esc(ai.model)}).
+    Green = kept, the rest gets the action:</p><ul class="subjects">` + ai.subjects.slice(0, 25).map((x) =>
+    `<li class="${x.kept ? "kept" : ""}">${x.count}× ${esc(x.subject)}</li>`).join("") + "</ul>" : "";
+  $("#dlg-ok").textContent = LABELS[a] || "Confirm";
+  $("#dlg-ok").className = ["unsub_delete", "delete", "block", "spam"].includes(a) ? "danger" : "primary";
+  const preview = () => {  // live: which sample subjects the typed keep words would keep
+    const w = $("#dlg-keep").value.split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
+    d.querySelectorAll(".subjects li").forEach((li) => li.classList.toggle("kept", w.some((x) => li.textContent.toLowerCase().includes(x))));
+  };
+  $("#dlg-keep").oninput = preview;
+  d.showModal();
+  return new Promise((res) => {
+    d.onclose = () => res(d.returnValue === "ok" ? { keep: $("#dlg-keep").value.split(",").map((x) => x.trim()).filter(Boolean) } : null);
+  });
+}
+async function runSender(s, a, b, ai) {
+  const ok = await askDialog(a, s, ai);
+  if (!ok) return;
+  if (b) { b.disabled = true; b.textContent = "…"; }
   try {
-    const r = await api("/api/sender", { addr: s.addr, action: b.dataset.a });
+    const r = await api("/api/sender", { addr: s.addr, action: a, keep: ok.keep });
     S.lastSender = s;
     const next = ["delete", "quarantine", "block", "archive", "unsubscribe"].filter((x) => x !== a)
       .map((x) => `<button data-next="${x}" class="${["delete", "block"].includes(x) ? "danger" : ""}">${LABELS[x]}</button>`).join(" ");
@@ -253,6 +277,23 @@ $("#c-table").onclick = async (e) => {
         r.manual.map((m) => `<li>${esc(m.email)}: <a href="${esc(m.url)}" target="_blank" rel="noopener noreferrer">${esc(m.url.slice(0, 80))}</a></li>`).join("") + "</ul>" : "") + "</div>";
   } catch (err) { $("#c-result").innerHTML = `<div class="err">${esc(err.message)}</div>`; }
   loadSenders();
+}
+$("#c-table").onclick = async (e) => {
+  const aiB = e.target.closest("button[data-ai]");
+  if (aiB) {
+    const s = S.senders[+aiB.dataset.i];
+    aiB.disabled = true; aiB.textContent = "✨ Thinking…";
+    try {
+      const sug = await api("/api/ai/suggest", { addr: s.addr });
+      if (sug.action === "keep") { $("#c-result").innerHTML = `<div class="card"><b>AI: keep ${esc(s.addr)}.</b> ${esc(sug.reason)}</div>`; }
+      else await runSender(s, sug.action, null, sug);
+    } catch (err) { $("#c-result").innerHTML = `<div class="err">${esc(err.message)}</div>`; }
+    aiB.disabled = false; aiB.textContent = "✨ AI suggest";
+    return;
+  }
+  const b = e.target.closest("button[data-a]");
+  if (!b) return;
+  await runSender(S.senders[+b.dataset.i], b.dataset.a, b);
 };
 $("#c-table").onchange = (e) => {  // the "Clean up…" menu runs the chosen action through the button handler
   const sel = e.target.closest("select.cleanup");
@@ -297,12 +338,13 @@ async function loadQuarantine() {
 function renderQuarantine() {
   const d = S.quar;
   $("#q-count").textContent = d.total || "";
-  $("#q-summary").textContent = d.total ? `${fmt(d.total)} emails from ${d.senders.length} senders held in "${d.label}" across your accounts.`
+  $("#q-summary").textContent = d.total ? `${fmt(d.total)} emails held in "${d.label}" across your accounts` +
+    (d.shown < d.total ? ` (newest ${fmt(d.shown)} listed below; sender and "all" buttons act on every one).` : ".")
     : `Nothing in "${d.label}". Use Clean up… > Quarantine on the Cleanup tab to hold a sender's mail here.`;
   $("#q-body").innerHTML = (d.errors || []).map((e) => `<div class="err">${esc(e.email)}: ${esc(e.error)}</div>`).join("") +
     d.senders.map((g, gi) => `<div class="qgroup"><div class="qh">
       <label><input type="checkbox" data-group="${gi}"></label>
-      <span class="who"><b>${esc(g.name || g.addr)}</b> <span class="note">${esc(g.addr)} · ${g.count} email(s)</span><br>
+      <span class="who"><b>${esc(g.name || g.addr)}</b> <span class="note">${esc(g.addr)} · ${g.count}${d.shown < d.total ? "+" : ""} email(s)</span><br>
         ${g.accounts.map((a) => acctChip(a.id, a.email)).join("")}</span>
       <button data-qa="release" data-g="${gi}" title="Back to the inbox, and stop quarantining this sender">Release sender</button>
       <button data-qa="archive" data-g="${gi}">Archive</button><button data-qa="delete" data-g="${gi}" class="danger">Delete</button></div>` +
@@ -345,7 +387,7 @@ $("#q-body").onclick = (e) => {
   const b = e.target.closest("button[data-qa]");
   if (!b) return;
   const g = S.quar.senders[+b.dataset.g], a = b.dataset.qa;
-  qact({ action: a, sender: g.addr }, `${QVERB[a]}: all ${g.count} quarantined email(s) from ${g.addr} in every account?` +
+  qact({ action: a, sender: g.addr }, `${QVERB[a]}: ALL quarantined email from ${g.addr} in every account?` +
     (a === "release" ? " New mail from them will reach the inbox again." : ""));
 };
 $("#q-refresh").onclick = loadQuarantine;
@@ -454,7 +496,7 @@ $("#r-matrix").onchange = async (e) => {
   loadRules();
 };
 
-api("/api/config").then((c) => { S.izUrl = c.inboxZeroUrl; if (c.inboxZeroUrl) { const a = $("#iz-link"); a.href = c.inboxZeroUrl; a.hidden = false; } }).catch(() => {});
+api("/api/config").then((c) => { S.izUrl = c.inboxZeroUrl; S.ai = !!c.ai; if (c.inboxZeroUrl) { const a = $("#iz-link"); a.href = c.inboxZeroUrl; a.hidden = false; } }).catch(() => {});
 loadAccounts().then(() => loadList());
 api("/api/quarantine").then((d) => { $("#q-count").textContent = d.total || ""; }).catch(() => {});
 setInterval(() => { if (!document.hidden && S.tab === "inbox") { loadAccounts(); loadList(true); } }, 120000);

@@ -14,7 +14,7 @@ RULES_EVERY_MIN (only when auto sync is on in the Rules tab).
 import json, os, sys, threading, time, traceback, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-import analytics, cleanup, core, inbox, rulesync
+import ai, analytics, cleanup, core, inbox, rulesync
 from core import init_schema, log, set_setting
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -27,7 +27,7 @@ CSP = ("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline' 
        "connect-src 'self'; frame-src 'self' about:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 
 GET = {
-    "/api/config": lambda q: {"inboxZeroUrl": INBOX_ZERO_URL, "master": core.MASTER or None},
+    "/api/config": lambda q: {"inboxZeroUrl": INBOX_ZERO_URL, "master": core.MASTER or None, "ai": bool(ai.KEY)},
     "/api/accounts": lambda q: inbox.accounts(),
     "/api/messages": inbox.messages,
     "/api/message": inbox.message,
@@ -54,6 +54,7 @@ POST = {
     "/api/action": inbox.action,
     "/api/sender": cleanup.sender_action,
     "/api/quarantine": cleanup.quarantine_action,
+    "/api/ai/suggest": ai.suggest,
     "/api/rules/sync": lambda d: rulesync.sync(apply=True),
     "/api/rules/include": rulesync.set_include,
     "/api/rules/auto": _auto,
