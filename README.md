@@ -45,6 +45,27 @@ emails whose subject contains** certain words (say *gift*, *order*, *receipt*): 
 starred, now and in future, while the rest is cleared. Actions reach back through **years of mail in every folder**,
 not just the inbox.
 
+### ✨ AI Cleanup: smart rules, not on/off
+Most senders mix mail you need with mail you don't. Applebee's sends your **order confirmations and receipts** and a
+flood of **promotions**; a store sends **shipping updates** and **daily deals**. Unsubscribe-or-keep is the wrong
+choice for them.
+
+The **AI Cleanup** page analyzes your top senders and proposes a plan for each: groups of emails by subject, each with
+its own action. For example:
+
+| Group | Subject words | Action |
+|---|---|---|
+| Orders | order, receipt, pickup | keep in the inbox and star |
+| Points | points, rewards | archive |
+| Everything else | | quarantine for review |
+
+Edit any group, then expand the card to **preview the 20 most recent emails** and the action each one would get, live
+as you edit. Apply a plan and it sorts existing mail (every folder, every year) and creates Gmail filters so future
+mail is sorted the same way, in every account. Nothing changes until you click Apply.
+
+Every sender on the Cleanup tab also expands to show its 20 most recent emails, so you always see what you're about
+to touch.
+
 ### ✨ AI suggest
 Not sure what to do with a sender? Click **AI suggest**: it reads that sender's subject lines across all your accounts
 and proposes an action and the subjects worth keeping, with a live preview of what would be kept. Nothing happens until
@@ -133,6 +154,7 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
 |---|---|
 | **Inbox** | The newest inbox mail from every account in one list. Read, archive, star, delete (to Trash, with undo), mark read/unread, search (Gmail syntax), filter by account, and see which Inbox Zero rule handled each email. Keys: `j`/`k` move, `e` archive, `s` star, `#` delete, `u` unread, `/` search. Replies happen in Gmail ("Reply in Gmail" opens the thread): Zero Sum never sends mail. |
 | **Cleanup** | Every sender across every account, with volume, read rate and which accounts get it, and one-click actions applied to every account that receives that sender: a **Clean up…** menu: **Unsubscribe** (only that: RFC 8058 one-click where offered, otherwise links to open), **Unsubscribe & archive**, **Unsubscribe & quarantine**, **Unsubscribe & delete** (Trash now and for anything that still arrives), **Quarantine**, **Auto-archive** (Gmail `from:` filter + Inbox Zero's sender status), **Archive**, **Delete all** (to Trash), **Block** (to Trash now and in future), **Spam** (report, which also trains Gmail), **Auto-star** / **Un-star** (star now and in future), **Keep**, and **Protect**. |
+| **AI Cleanup** | The AI analyzes your top senders and proposes per-sender plans: groups of emails by subject words, each with an action (keep & star, archive, quarantine, delete), plus an action for everything else. Edit, preview the 20 most recent emails with the action each would get, then apply: existing mail is sorted and Gmail filters handle future mail. |
 | **Quarantine** | Senders you send to quarantine (from Cleanup) skip the inbox and get a `Quarantine` label (`QUARANTINE_LABEL`), now and for future mail. This tab lists everything held, grouped by sender across all accounts: tick messages or senders, then **Archive** or **Delete** (to Trash), or **Archive all** / **Delete all**; **Release sender** puts their mail back in the inbox and removes the filter. |
 | **Analytics** | Mail per day, read rate, top senders and domains, what Inbox Zero's rules did and cleanup totals, merged with a per-account breakdown. |
 | **Rules** | Write rules in Inbox Zero on a *master* account and share chosen ones with chosen accounts (opt-in: tick a rule under an account). Label actions are matched by label name; preview, sync now, and optional automatic sync. Nothing is shared by default, since each address usually gets different mail. |

@@ -479,3 +479,97 @@ def quarantine_action(d):
     log("quarantine", f"{act} {sender or ('selected' if chosen else 'all')}: "
         + "; ".join(f"{r['email']}: {r['note']}" for r in results))
     return {"results": results}
+
+
+# ---------------------------------------------------------------- previews and multi-group plans
+def sender_recent(q):
+    """The newest N emails from a sender across every account and folder (Trash and Spam excluded), for previews."""
+    from inbox import meta
+    addr = (q.get("addr", [""])[0] or "").strip().lower()
+    n = max(1, min(int(q.get("n", ["20"])[0]), 50))
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+", addr):
+        raise ValueError("bad sender address")
+
+    def ids(a):
+        try:
+            return [(a, m["id"]) for m in gmail_list(a["id"], qs(f"from:{addr} -in:trash -in:spam"), "messages", n)]
+        except Exception:  # noqa: BLE001
+            return []
+
+    def safe(p):
+        try:
+            return meta(*p)
+        except Exception:  # noqa: BLE001
+            return None
+    pairs = [p for lst in POOL.map(ids, ACC.list()) for p in lst]
+    items = sorted((i for i in POOL.map(safe, pairs) if i), key=lambda i: -i["ts"])[:n]
+    return {"addr": addr, "items": items}
+
+
+PLAN_ACTIONS = ("keep", "archive", "quarantine", "delete")
+
+
+def _plan_action(acc_id, addr, action, crit_extra, query_extra, lid):
+    """One group of a plan: a Gmail filter for future mail + the same change on existing mail. Returns a note."""
+    if action == "keep":  # stays in the inbox, starred so it stands out
+        filt, q, add, rem = STAR_FILTER, f"-is:starred -in:trash -in:spam", ["STARRED"], []
+    elif action == "archive":
+        filt, q, add, rem = ARCHIVE_FILTER, "in:inbox", [], ["INBOX"]
+    elif action == "quarantine":
+        filt, q, add, rem = {"addLabelIds": [lid], "removeLabelIds": ["INBOX"]}, f"-in:trash -in:spam -label:{QUARANTINE}", [lid], ["INBOX"]
+    else:  # delete
+        filt, q, add, rem = TRASH_FILTER, "-in:trash", ["TRASH"], []
+    try:
+        gmail(acc_id, "/settings/filters", "POST", {"criteria": {"from": addr, **crit_extra}, "action": filt})
+    except RuntimeError as e:
+        if "exists" not in str(e).lower():
+            raise
+    n = _modify_existing(acc_id, f"from:{addr} {query_extra} {q}".strip(), add=add, remove=rem)
+    return n
+
+
+def apply_plan(d):
+    """Apply a multi-group plan to a sender in every account that gets its mail:
+    groups = [{"label", "words": [...], "action": keep|archive|quarantine|delete}] (first matching group wins, by subject),
+    default = action for everything that matches no group (keep = leave it alone)."""
+    addr = (d.get("addr") or "").strip().lower()
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+", addr):
+        raise ValueError("bad sender address")
+    groups = []
+    for g in (d.get("groups") or [])[:6]:
+        kq = keep_query(g.get("words"))
+        if kq and g.get("action") in PLAN_ACTIONS:
+            groups.append({"label": str(g.get("label") or "")[:40], "kq": kq, "action": g["action"]})
+    default = d.get("default") if d.get("default") in PLAN_ACTIONS else "keep"
+    destructive = {g["action"] for g in groups} | {default}
+    if destructive - {"keep"} and is_protected(addr):
+        raise PermissionError(f"{addr} is protected: unprotect it first")
+    with db() as c:
+        acc_ids = [r[0] for r in c.execute("SELECT DISTINCT account_id FROM unified.msg WHERE from_addr = %s",
+                                           (addr,)).fetchall()]
+    results = []
+    for a in acc_ids:
+        em = ACC.email(a)
+        try:
+            lid = label_id(a, QUARANTINE) if "quarantine" in destructive else None
+            notes, earlier = [], []  # a group only takes mail no earlier group matched
+            for g in groups:
+                excl = "".join(f" -{k}" for k in earlier)
+                crit = {"query": g["kq"], **({"negatedQuery": " OR ".join(earlier)} if earlier else {})}
+                n = _plan_action(a, addr, g["action"], crit, f"{g['kq']}{excl}", lid)
+                notes.append(f"{g['label'] or g['action']}: {n} {g['action']}")
+                earlier.append(g["kq"])
+            if default != "keep":
+                crit = {"negatedQuery": " OR ".join(earlier)} if earlier else {}
+                n = _plan_action(a, addr, default, crit, "".join(f" -{k}" for k in earlier), lid)
+                notes.append(f"everything else: {n} {default}")
+            results.append({"email": em, "ok": True, "note": "; ".join(notes) or "nothing to do"})
+        except Exception as e:  # noqa: BLE001
+            results.append({"email": em, "ok": False, "note": str(e)[:200]})
+    with db() as c:
+        status = {"keep": "APPROVED", "archive": "AUTO_ARCHIVED", "quarantine": "AUTO_ARCHIVED", "delete": "AUTO_ARCHIVED"}[default]
+        for a in acc_ids:
+            _newsletter(c, a, addr, status)
+        c.execute("UPDATE unified.ai_plan SET status = 'applied', updated_at = now() WHERE addr = %s", (addr,))
+    log("ai-cleanup", f"apply {addr}: " + "; ".join(f"{r['email']}: {r['note']}" for r in results))
+    return {"results": results}

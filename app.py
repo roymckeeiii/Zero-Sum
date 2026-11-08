@@ -36,6 +36,8 @@ GET = {
     "/api/rules": lambda q: rulesync.state(),
     "/api/protected": cleanup.protected_list,
     "/api/quarantine": cleanup.quarantine_list,
+    "/api/sender/recent": cleanup.sender_recent,
+    "/api/ai/plans": ai.plans,
     "/api/rules/preview": lambda q: rulesync.sync(apply=False),
 }
 
@@ -55,6 +57,9 @@ POST = {
     "/api/sender": cleanup.sender_action,
     "/api/quarantine": cleanup.quarantine_action,
     "/api/ai/suggest": ai.suggest,
+    "/api/ai/analyze": ai.analyze,
+    "/api/ai/apply": cleanup.apply_plan,
+    "/api/ai/skip": ai.skip,
     "/api/rules/sync": lambda d: rulesync.sync(apply=True),
     "/api/rules/include": rulesync.set_include,
     "/api/rules/auto": _auto,
