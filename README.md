@@ -42,7 +42,7 @@ applies to *all* of them:
 
 Every action asks for confirmation first, showing how many emails and accounts it will touch, and lets you **keep
 emails whose subject contains** certain words (say *gift*, *order*, *receipt*): those stay in your inbox and get
-starred, now and in future, while the rest is cleared. Actions reach back through **years of mail in every folder**,
+starred, now and in future, while the rest is cleared. Actions reach back through **your entire history in every folder**,
 not just the inbox.
 
 ### ✨ AI Cleanup: smart rules, not on/off
@@ -94,7 +94,7 @@ address gets different mail.
 
 ### Slow and complete, not one big grab
 Because it runs on your own server, Zero Sum takes its time. Every 15 minutes it reads a little more of your history
-(going back years, gently enough to stay inside Gmail's limits), keeping each email's sender, subject and preview.
+(all the way back to each account's very first email, gently enough to stay inside Gmail's limits), keeping each email's sender, subject and preview.
 A background analyst then plans your senders as their history comes in, biggest first, from **everything** they ever
 sent you, and re-plans a sender when lots of new mail arrives. AI sort judges emails from that stored text, so a full
 cleanup doesn't hammer Gmail. A progress panel shows how much of each mailbox has been read and how many senders are
@@ -193,7 +193,7 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
 - It uses its own database role (`grants.sql`): read access to a few account columns and to `ExecutedRule`; write
   access only to `Rule`, `Action`, `Newsletter` and its own `unified` schema.
 - A collector stores message metadata (sender, date, read/inbox state, unsubscribe header) every 15 minutes for the
-  Cleanup and Analytics tabs, back-filling the last 180 days gradually.
+  Cleanup and Analytics tabs, back-filling the whole history gradually (to each account's first email).
 - Rule sync records which copy belongs to which master rule (with a content hash), so it only ever updates or deletes
   its own copies. Automatic sync is off until you turn it on in the Rules tab.
 
@@ -241,7 +241,7 @@ All settings are environment variables; see [`.env.example`](.env.example).
 | `ADMIN_DATABASE_URL` | | only for `init-db` |
 | `PORT` | `8080` | inside the container |
 | `COLLECT_EVERY_MIN`, `RULES_EVERY_MIN` | `15`, `10` | background jobs |
-| `BACKFILL_DAYS`, `BACKFILL_STEP` | `3650`, `2000` | history the collector gathers, per run per account |
+| `BACKFILL_DAYS`, `BACKFILL_STEP` | `0` (all history), `2000` | how far back the collector reads (days; 0 = to the account's first email), and how much per run per account |
 | `MAX_BULK` | `200000` | most emails one bulk action touches per account |
 | `OPENROUTER_API_KEY`, `AI_MODEL`, `AI_BASE_URL` | empty, `anthropic/claude-haiku-5.5`, OpenRouter | AI suggest (off without a key) |
 | `AI_MAX_CALLS_PER_DAY`, `AI_PLANS_PER_RUN`, `AI_MIN_EMAILS` | `400`, `4`, `5` | background analyst pacing |

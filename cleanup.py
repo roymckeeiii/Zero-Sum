@@ -2,7 +2,7 @@
 feeds it and the analytics.
 
 Collector: every 15 minutes, per account, stores message metadata (sender, date, read/inbox state, List-Unsubscribe)
-in unified.msg: new mail since the last run, a backfill of the last BACKFILL_DAYS a few hundred messages at a time,
+in unified.msg: new mail since the last run, a backfill of the whole history (or the last BACKFILL_DAYS) a batch at a time,
 and a refresh of read/inbox state for the last 30 days. Sent mail, drafts and chats are skipped.
 
 Sender actions apply to every account that has mail from the sender (or the accounts given), and mirror what Inbox
@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from core import ACC, POOL, db, gmail, gmail_list, header, label_id, log, new_id
 
-BACKFILL_DAYS = int(os.environ.get("BACKFILL_DAYS", "3650"))  # ten years: old mail matters for cleanup
+BACKFILL_DAYS = int(os.environ.get("BACKFILL_DAYS", "0"))  # 0 = back to the account's first email: old mail matters
 BACKFILL_STEP = int(os.environ.get("BACKFILL_STEP", "2000"))
 MAX_BULK = int(os.environ.get("MAX_BULK", "200000"))  # most messages one bulk action touches per account
 SKIP = "-in:sent -in:drafts -in:chats"
@@ -82,7 +82,8 @@ def collect_account(acc):
     added = _store(a, ids)
     if not done:
         before = int(oldest) if oldest else int(time.time()) - 7 * 86400
-        older = [m["id"] for m in gmail_list(a, qs(f"{SKIP} before:{before} newer_than:{BACKFILL_DAYS}d"), "messages", BACKFILL_STEP)]
+        age = f" newer_than:{BACKFILL_DAYS}d" if BACKFILL_DAYS > 0 else ""
+        older = [m["id"] for m in gmail_list(a, qs(f"{SKIP} before:{before}{age}"), "messages", BACKFILL_STEP)]
         added += _store(a, older)
         done = len(older) < BACKFILL_STEP
     # mail collected before subjects were stored: fill BACKFILL_STEP of them per run, newest first
@@ -142,7 +143,7 @@ def collect_status():
 
 # ---------------------------------------------------------------- senders
 def senders(q):
-    days = max(7, min(int(q.get("days", ["90"])[0]), BACKFILL_DAYS))
+    days = max(7, min(int(q.get("days", ["90"])[0]), BACKFILL_DAYS or 36500))  # up to "all time"
     search = q.get("q", [""])[0].strip().lower()
     hide = q.get("hide", ["1"])[0] == "1"
     accs = {a["id"]: a["email"] for a in ACC.list()}
