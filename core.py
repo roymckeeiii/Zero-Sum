@@ -245,6 +245,9 @@ CREATE INDEX IF NOT EXISTS msg_ts ON unified.msg (ts);
 CREATE TABLE IF NOT EXISTS unified.ai_plan (
   addr text PRIMARY KEY, plan jsonb NOT NULL, status text NOT NULL DEFAULT 'new', created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS unified.ai_sort (
+  addr text PRIMARY KEY, rule text NOT NULL, action text NOT NULL, last_ts timestamptz, status text NOT NULL DEFAULT 'sorting',
+  done int NOT NULL DEFAULT 0, total int NOT NULL DEFAULT 0, kept int NOT NULL DEFAULT 0, updated_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS unified.protected (
   key text PRIMARY KEY, created_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS unified.collect_state (

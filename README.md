@@ -63,6 +63,13 @@ Edit any group, then expand the card to **preview the 20 most recent emails** an
 as you edit. Apply a plan and it sorts existing mail (every folder, every year) and creates Gmail filters so future
 mail is sorted the same way, in every account. Nothing changes until you click Apply.
 
+**When words aren't enough, the AI judges every email.** A travel site sends great articles *and* booking spam, and
+"10 hidden beaches in Portugal" vs "Book now and save on Bali" can't be split by a word list. For senders like this the
+plan switches to **AI sort**: you (or the AI) describe what to keep in plain English, for example *"keep travel articles,
+guides and trip ideas; sales, deals and booking promos are junk"*, and the AI reads each email's subject and preview to
+decide. Existing mail is sorted in the background; new mail from that sender is sorted every 15 minutes. The preview
+shows the AI's verdict on the 20 most recent emails before you apply anything.
+
 Every sender on the Cleanup tab also expands to show its 20 most recent emails, so you always see what you're about
 to touch.
 

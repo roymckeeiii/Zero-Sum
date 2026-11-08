@@ -365,8 +365,9 @@ function classify(subject, plan) {  // first group whose words appear in the sub
 let pollT;
 async function loadPlans() {
   let d;
-  try { d = await api("/api/ai/plans"); } catch (e) { $("#ai-body").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
+  try { d = await api("/api/ai/plans"); S.sorting = await api("/api/ai/sorting"); } catch (e) { $("#ai-body").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
   S.plans = d.plans;
+  if (Object.values(S.sorting).some((x) => x.status === "sorting")) { clearTimeout(S.sortT); S.sortT = setTimeout(loadPlans, 8000); }
   const r = d.running;
   $("#ai-status").textContent = !d.ai ? "AI is not configured on this server." : r.busy ? `Analyzing senders… ${r.done}/${r.total}`
     : `${d.plans.filter((p) => p.status === "new").length} plan(s) to review.` + (r.error ? ` Last error: ${r.error}` : "");
@@ -380,15 +381,26 @@ async function loadPlans() {
   d.plans.forEach((p, i) => { if (open.has(p.addr)) showPreview(i); });
 }
 function planCard(p, i) {
-  const done = p.status !== "new";
+  const done = p.status !== "new", ai = (p.mode || "words") === "ai", srt = (S.sorting || {})[p.addr];
   const sampleCounts = {};
   (p.subjects || []).forEach((x) => { const c = classify(x.subject, p); sampleCounts[c.text] = (sampleCounts[c.text] || 0) + x.count; });
   return `<div class="card plan ${done ? "done" : ""}" data-i="${i}" data-addr="${esc(p.addr)}">
     <div class="ph"><div><b>${esc(p.addr)}</b> <span class="note">· ${fmt(p.count)} emails · ${p.accounts.map((a) => acctChip(a.id, a.email)).join("")}</span>
-      ${done ? `<span class="chip">${esc(p.status)}</span>` : ""}<div class="note">${esc(p.reason || "")}</div></div>
+      ${done ? `<span class="chip">${esc(p.status)}</span>` : ""}<div class="note">${esc(p.reason || "")}</div>
+      ${srt ? `<div class="note">AI sort ${esc(srt.status)}: ${fmt(srt.done)}/${fmt(srt.total)} checked, ${fmt(srt.kept)} kept; the rest → ${GACT[srt.action]}.
+        Rule: <i>${esc(srt.rule)}</i> <button data-pa="stop" data-i="${i}">Stop AI sort</button></div>` : ""}</div>
       <div class="grp">${done ? `<button data-pa="undo" data-i="${i}">Review again</button>` : `<button data-pa="skip" data-i="${i}">Skip</button>
         <button data-pa="redo" data-i="${i}">Re-analyze</button><button data-pa="apply" data-i="${i}" class="primary">Apply plan</button>`}</div></div>
-    ${done ? "" : `<div class="groups">${p.groups.map((g, gi) => `<div class="g" data-gi="${gi}">
+    ${done ? "" : `<div class="mode"><button data-pa="mode-words" data-i="${i}" class="${ai ? "" : "on"}">Word groups</button><button
+        data-pa="mode-ai" data-i="${i}" class="${ai ? "on" : ""}">AI sorts each email</button>
+      <span class="note">${ai ? "For senders whose good and bad mail can't be told apart by words: the AI reads every email's subject and preview, now and as new mail arrives."
+        : "Gmail filters by subject words: instant and free."}</span></div>` +
+    (ai ? `<div class="groups"><label class="rule">Keep emails like this (plain English, edit freely)
+        <textarea data-f="rule" rows="2" placeholder="e.g. keep travel articles, guides and trip ideas; sales, deals and booking promos are junk">${esc(p.keep_rule || "")}</textarea></label>
+      <div class="g"><span class="gl note">Emails the rule doesn't keep</span><span class="gw note">judged one by one by the AI</span>
+        ${gactSel(p.default, 'data-f="default"')}<span></span></div></div>
+      <details data-i="${i}"><summary>Preview the 20 most recent emails, tagged by the AI with this rule</summary><div class="pv"></div></details>` :
+    `<div class="groups">${p.groups.map((g, gi) => `<div class="g" data-gi="${gi}">
         <input data-f="label" value="${esc(g.label)}" placeholder="Name" class="gl">
         <input data-f="words" value="${esc(g.words.join(", "))}" placeholder="subject words, comma-separated" class="gw">
         ${gactSel(g.action, 'data-f="action"')}<button data-pa="del-g" data-i="${i}" data-gi="${gi}" title="Remove group">×</button></div>`).join("")}
@@ -396,11 +408,13 @@ function planCard(p, i) {
         ${gactSel(p.default, 'data-f="default"')}<span></span></div>
       <button data-pa="add-g" data-i="${i}">+ Add group</button>
       <span class="note">In the sample of ${p.sampled}: ${Object.entries(sampleCounts).map(([k, n]) => `${esc(k)}: ${n}`).join(" · ")}</span></div>
-      <details data-i="${i}"><summary>Preview the 20 most recent emails and what each would get</summary><div class="pv"></div></details>`}</div>`;
+      <details data-i="${i}"><summary>Preview the 20 most recent emails and what each would get</summary><div class="pv"></div></details>`)}</div>`;
 }
 function readCard(i) {  // editor state back into S.plans[i]
   const card = document.querySelector(`#ai-body .plan[data-i="${i}"]`), p = S.plans[i];
   if (!card || p.status !== "new") return p;
+  const rule = card.querySelector('[data-f="rule"]');
+  if (rule) { if (rule.value !== p.keep_rule) p._verdicts = null; p.keep_rule = rule.value; }
   p.groups = [...card.querySelectorAll(".g[data-gi]")].map((g) => ({ label: g.querySelector('[data-f="label"]').value.trim(),
     words: g.querySelector('[data-f="words"]').value.split(",").map((w) => w.trim()).filter(Boolean), action: g.querySelector('[data-f="action"]').value }));
   p.default = card.querySelector('[data-f="default"]').value;
@@ -413,29 +427,51 @@ async function showPreview(i) {
   det.open = true; card.dataset.open = "1";
   const pv = det.querySelector(".pv"), p = readCard(i);
   pv.innerHTML = `<div class="note">Loading…</div>`;
-  try { pv.innerHTML = recentList(await recent(p.addr), (it) => classify(it.subject, p)); } catch (e) { pv.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+  try {
+    const items = await recent(p.addr);
+    if ((p.mode || "words") === "ai") {
+      const ck = `${p.addr}\n${p.keep_rule}`;  // one AI call per sender + rule, kept across re-renders
+      if (!p._verdicts) p._verdicts = (S.tagCache ||= {})[ck];
+      if (!p._verdicts) {
+        pv.innerHTML = `<div class="note">The AI is reading the 20 emails…</div>`;
+        p._verdicts = S.tagCache[ck] = (await api("/api/ai/classify", { addr: p.addr, rule: p.keep_rule })).verdicts;
+      }
+      pv.innerHTML = `<div class="note">Tagged with the rule above. Changed the rule? <a href="#" data-retag="${i}">Tag again</a></div>` +
+        recentList(items, (it) => p._verdicts[it.id] ? { action: "keep", text: "keep" } : { action: p.default, text: GACT[p.default] });
+    } else pv.innerHTML = recentList(items, (it) => classify(it.subject, p));
+  } catch (e) { pv.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
 }
 $("#ai-body").addEventListener("toggle", (e) => { const det = e.target; if (det.tagName === "DETAILS" && det.open) showPreview(+det.dataset.i);
   else if (det.tagName === "DETAILS") delete det.closest(".plan").dataset.open; }, true);
-$("#ai-body").oninput = (e) => {  // live: re-tag the preview as the plan is edited
+$("#ai-body").oninput = (e) => {  // live: re-tag the preview as the plan is edited (AI mode re-tags on request)
   const card = e.target.closest(".plan"); if (!card) return;
-  const i = +card.dataset.i; readCard(i);
-  if (card.querySelector("details").open) showPreview(i);
+  const i = +card.dataset.i, p = readCard(i);
+  if ((p.mode || "words") === "words" && card.querySelector("details")?.open) showPreview(i);
 };
 $("#ai-body").onchange = $("#ai-body").oninput;
 $("#ai-body").onclick = async (e) => {
+  const rt = e.target.closest("a[data-retag]");
+  if (rt) { e.preventDefault(); const p = readCard(+rt.dataset.retag); p._verdicts = null; delete (S.tagCache || {})[`${p.addr}\n${p.keep_rule}`];
+    return showPreview(+rt.dataset.retag); }
   const b = e.target.closest("button[data-pa]"); if (!b) return;
   const i = +b.dataset.i, p = readCard(i), a = b.dataset.pa;
+  if (a === "mode-words" || a === "mode-ai") { p.mode = a === "mode-ai" ? "ai" : "words"; return loadPlansRender(); }
+  if (a === "stop") { if (confirm(`Stop AI-sorting new mail from ${p.addr}? Mail already sorted stays where it is.`))
+    await api("/api/ai/stop-sort", { addr: p.addr }).catch((err) => alert(err.message)); return loadPlans(); }
   if (a === "add-g") { p.groups.push({ label: "", words: [], action: "keep" }); return loadPlansRender(); }
   if (a === "del-g") { p.groups.splice(+b.dataset.gi, 1); return loadPlansRender(); }
   if (a === "skip" || a === "undo") { await api("/api/ai/skip", { addr: p.addr, undo: a === "undo" }).catch(() => {}); return loadPlans(); }
   if (a === "redo") { await api("/api/ai/analyze", { addr: p.addr }).catch((err) => alert(err.message)); return loadPlans(); }
   if (a === "apply") {
-    const lines = p.groups.map((g) => `• subject has ${g.words.join(" / ")} → ${GACT[g.action]}`).concat([`• everything else → ${GACT[p.default]}`]);
-    if (!confirm(`Apply this plan to ${p.addr} in ${p.accounts.length} account(s)? It sorts existing mail (every folder, every year) and adds Gmail filters for future mail:\n\n${lines.join("\n")}`)) return;
+    const isAi = (p.mode || "words") === "ai";
+    if (isAi && !p.keep_rule.trim()) return alert("Write which emails to keep first.");
+    const lines = isAi ? [`• keep: ${p.keep_rule}`, `• everything else → ${GACT[p.default]}`]
+      : p.groups.map((g) => `• subject has ${g.words.join(" / ")} → ${GACT[g.action]}`).concat([`• everything else → ${GACT[p.default]}`]);
+    if (!confirm(isAi ? `AI-sort mail from ${p.addr} in ${p.accounts.length} account(s)? The AI judges every existing email (every folder, every year; runs in the background) and each new one every 15 minutes:\n\n${lines.join("\n")}`
+      : `Apply this plan to ${p.addr} in ${p.accounts.length} account(s)? It sorts existing mail (every folder, every year) and adds Gmail filters for future mail:\n\n${lines.join("\n")}`)) return;
     b.disabled = true; b.textContent = "Applying…";
     try {
-      const r = await api("/api/ai/apply", { addr: p.addr, groups: p.groups, default: p.default });
+      const r = await api("/api/ai/apply", { addr: p.addr, groups: p.groups, default: p.default, mode: p.mode || "words", rule: p.keep_rule || "" });
       $("#ai-result").innerHTML = `<div class="card"><b>Applied: ${esc(p.addr)}</b><ul>` + r.results.map((x) => `<li class="${x.ok ? "" : "err"}">${esc(x.email)}: ${esc(x.note)}</li>`).join("") + "</ul></div>";
     } catch (err) { $("#ai-result").innerHTML = `<div class="err">${esc(err.message)}</div>`; }
     loadPlans();
