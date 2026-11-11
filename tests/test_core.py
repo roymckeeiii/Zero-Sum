@@ -96,6 +96,54 @@ class Rules(unittest.TestCase):
         self.assertNotEqual(rulesync.digest(r, acts), rulesync.digest(r, [{"type": "LABEL", "label": "Other"}]))
 
 
+class FakeCursor:
+    """Records SQL; enough for rulesync._write_rule (no database)."""
+    def __init__(self):
+        self.calls = []
+
+    def execute(self, sql, params=None):
+        self.calls.append((sql, params))
+        return self
+
+
+class RulesV230(unittest.TestCase):
+    def test_copied_actions_carry_the_target_account_id(self):
+        r = {f: None for f in rulesync.RULE_FIELDS} | {"name": "A", "enabled": True}
+        acts = [{f: None for f in rulesync.ACTION_FIELDS} | {"type": "ARCHIVE"},
+                {f: None for f in rulesync.ACTION_FIELDS} | {"type": "STAR"}]
+        c = FakeCursor()
+        rulesync._write_rule(c, "rule-t", "acc-t", r, acts, insert=True)
+        inserts = [(s, p) for s, p in c.calls if s.startswith('INSERT INTO "Action"')]
+        self.assertEqual(len(inserts), 2)
+        for sql, params in inserts:
+            cols = sql.split("(", 1)[1].split(")", 1)[0].replace('"', "").split(", ")
+            self.assertIn("emailAccountId", cols)
+            vals = dict(zip(cols[:1] + cols[2:], [params[0], *params[1:]]))  # updatedAt is now(), not a param
+            self.assertEqual(vals["ruleId"], "rule-t")
+            self.assertEqual(vals["emailAccountId"], "acc-t")
+            self.assertEqual(sql.count("%s"), len(params))
+        self.assertEqual([p[-len(rulesync.ACTION_FIELDS)] for _, p in inserts], ["ARCHIVE", "STAR"])
+
+    def test_messaging_channel_actions_are_not_copied(self):
+        old = rulesync.labels
+        rulesync.labels = lambda acc: {"L1": "Receipts"}
+        try:
+            r = {"actions": [{"type": "LABEL", "label": None, "labelId": "L1"},
+                             {"type": "NOTIFY_MESSAGING_CHANNEL", "label": None, "labelId": None},
+                             {"type": "DRAFT_MESSAGING_CHANNEL", "label": None, "labelId": None},
+                             {"type": "STAR", "label": None, "labelId": None}]}
+            out = rulesync.master_actions("master", r)
+        finally:
+            rulesync.labels = old
+        self.assertEqual([a["type"] for a in out], ["LABEL", "STAR"])
+        self.assertEqual(out[0]["label"], "Receipts")
+        self.assertNotIn("labelId", out[0])
+
+    def test_supported_version_is_v2_30_0(self):
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self.assertEqual(open(os.path.join(here, "inbox-zero.version")).read().strip(), "v2.30.0")
+
+
 class Quota(unittest.TestCase):
     def test_costs(self):
         self.assertEqual(core._cost("GET", "/messages/x?format=metadata"), 5)
