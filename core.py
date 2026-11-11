@@ -1,6 +1,6 @@
 """Shared plumbing for Zero Sum: Inbox Zero DB access, token decryption, Google token refresh, Gmail API calls.
 
-Tokens: Inbox Zero stores Account.access_token / refresh_token encrypted by apps/web/utils/encryption.ts (v2.25.8):
+Tokens: Inbox Zero stores Account.access_token / refresh_token encrypted by apps/web/utils/encryption.ts (v2.25.8; v2.30 adds a "v1:" key-version prefix):
 AES-256-GCM, key = scrypt(EMAIL_ENCRYPT_SECRET, EMAIL_ENCRYPT_SALT, 32) with Node's defaults (N=16384, r=8, p=1),
 stored as hex IV(16) + tag(16) + ciphertext. Refreshed access tokens are kept in memory only: this app never writes
 the Account table, so it cannot break Inbox Zero's own logins.
