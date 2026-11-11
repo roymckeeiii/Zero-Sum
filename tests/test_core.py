@@ -97,21 +97,48 @@ class Rules(unittest.TestCase):
 
 
 class FakeCursor:
-    """Records SQL; enough for rulesync._write_rule (no database)."""
-    def __init__(self):
-        self.calls = []
+    """Records SQL; enough for rulesync._write_rule (no database). has_column: whether Action.emailAccountId exists."""
+    def __init__(self, has_column=True):
+        self.calls, self.has_column, self._last = [], has_column, ""
 
     def execute(self, sql, params=None):
         self.calls.append((sql, params))
+        self._last = sql
         return self
+
+    def fetchone(self):
+        return (1,) if "information_schema" in self._last and self.has_column else None
 
 
 class RulesV230(unittest.TestCase):
+    def setUp(self):
+        rulesync._ACTION_HAS_ACCOUNT = None
+        self.addCleanup(setattr, rulesync, "_ACTION_HAS_ACCOUNT", None)
+
+    def _write(self, has_column):
+        r = {f: None for f in rulesync.RULE_FIELDS} | {"name": "A", "enabled": True}
+        acts = [{f: None for f in rulesync.ACTION_FIELDS} | {"type": "ARCHIVE"}]
+        c = FakeCursor(has_column)
+        rulesync._write_rule(c, "rule-t", "acc-t", r, acts, insert=True)
+        return [(s, p) for s, p in c.calls if s.startswith('INSERT INTO "Action"')]
+
+    def test_old_schema_v2_25_8_inserts_without_email_account_id(self):
+        (sql, params), = self._write(has_column=False)
+        self.assertNotIn("emailAccountId", sql)
+        self.assertEqual(sql.count("%s"), len(params))
+        self.assertEqual(params[1], "rule-t")
+
+    def test_schema_check_runs_once_per_process(self):
+        c = FakeCursor(True)
+        self.assertTrue(rulesync.action_has_account(c))
+        self.assertTrue(rulesync.action_has_account(FakeCursor(False)))  # cached: no second query
+        self.assertEqual(sum("information_schema" in s for s, _ in c.calls), 1)
+
     def test_copied_actions_carry_the_target_account_id(self):
         r = {f: None for f in rulesync.RULE_FIELDS} | {"name": "A", "enabled": True}
         acts = [{f: None for f in rulesync.ACTION_FIELDS} | {"type": "ARCHIVE"},
                 {f: None for f in rulesync.ACTION_FIELDS} | {"type": "STAR"}]
-        c = FakeCursor()
+        c = FakeCursor(has_column=True)
         rulesync._write_rule(c, "rule-t", "acc-t", r, acts, insert=True)
         inserts = [(s, p) for s, p in c.calls if s.startswith('INSERT INTO "Action"')]
         self.assertEqual(len(inserts), 2)
@@ -138,10 +165,6 @@ class RulesV230(unittest.TestCase):
         self.assertEqual([a["type"] for a in out], ["LABEL", "STAR"])
         self.assertEqual(out[0]["label"], "Receipts")
         self.assertNotIn("labelId", out[0])
-
-    def test_supported_version_is_v2_30_0(self):
-        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        self.assertEqual(open(os.path.join(here, "inbox-zero.version")).read().strip(), "v2.30.0")
 
 
 class Quota(unittest.TestCase):

@@ -231,7 +231,7 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
 ## Requirements
 
 - Self-hosted Inbox Zero with Google accounts, run with its `docker-compose.yml` (its `db` service and
-  `inbox-zero-network`). Tested with Inbox Zero **v2.30.0**; Zero Sum writes some Inbox Zero tables directly, so check
+  `inbox-zero-network`). Tested with Inbox Zero **v2.25.8**; Zero Sum writes some Inbox Zero tables directly, so check
   [Upgrading Inbox Zero](#upgrading-inbox-zero) before upgrading.
 - An authenticating reverse proxy in front of it (Cloudflare Access, oauth2-proxy, ...). Zero Sum has **no login page**:
   it trusts the e-mail address in `AUTH_EMAIL_HEADER` and only lets in `ALLOWED_EMAILS`. Never expose its port directly.
