@@ -6,6 +6,11 @@
   same system type or name that existed before the first sync is adopted (overwritten with the master's version).
 - Gmail label ids differ per account: LABEL actions are matched by label name and the label is created when missing.
 - Learned sender patterns (Rule.groupId) and deprecated category filters are per-account history: not copied.
+- Actions that post to a messaging channel (Slack/Teams/Telegram: DRAFT_/NOTIFY_MESSAGING_CHANNEL, Inbox Zero
+  v2.30+) point at the master account's own channel, so they are not copied either.
+- Inbox Zero v2.30 ties every Action to its account (Action.emailAccountId, with a composite FK to Rule): copies are
+  written with the target account's id when the column exists, so the same code works on v2.25.8 and v2.30.
+  A rule whose only actions are messaging-channel ones is copied with no actions (its conditions still apply).
 - Opt-in: a master rule is copied only to the accounts ticked for it (unified.rule_include); untick and its copy
   there is deleted. Nothing is shared by default: each address usually gets different mail.
 """
@@ -20,7 +25,19 @@ RULE_FIELDS = ["name", "instructions", "automate", "runOnThreads", "body", "from
 ENUM = {"conditionalOperator": "LogicalOperator", "systemType": "SystemType", "type": "ActionType"}
 ACTION_FIELDS = ["type", "label", "subject", "content", "to", "cc", "bcc", "url", "delayInMinutes", "folderName",
                  "folderId"]
+# per-account action types (they reference the master's messaging channel): never copied
+SKIP_ACTION_TYPES = {"DRAFT_MESSAGING_CHANNEL", "NOTIFY_MESSAGING_CHANNEL"}
 LOCK = threading.Lock()
+_ACTION_HAS_ACCOUNT = None  # does "Action" have "emailAccountId" (Inbox Zero >= v2.30)? read once per process
+
+
+def action_has_account(c):
+    global _ACTION_HAS_ACCOUNT
+    if _ACTION_HAS_ACCOUNT is None:
+        _ACTION_HAS_ACCOUNT = c.execute(
+            "SELECT 1 FROM information_schema.columns WHERE table_name = 'Action' AND column_name = 'emailAccountId'"
+        ).fetchone() is not None
+    return _ACTION_HAS_ACCOUNT
 
 
 def q(col):
@@ -48,6 +65,8 @@ def master_actions(master_id, rule):
     lab = labels(master_id)
     out = []
     for a in rule["actions"]:
+        if a["type"] in SKIP_ACTION_TYPES:
+            continue
         a = dict(a)
         if a["type"] == "LABEL":
             a["label"] = lab.get(a["labelId"]) or a["label"]
@@ -121,8 +140,14 @@ def _write_rule(c, target_id, account_id, rule, actions, insert):
     acasts = ", ".join(f'%s::"{ENUM[f]}"' if f in ENUM else "%s" for f in ACTION_FIELDS)
     for a in actions:
         lid = label_id(account_id, a["label"]) if a["type"] == "LABEL" and a.get("label") else None
-        c.execute(f'INSERT INTO "Action" (id, "updatedAt", "ruleId", "labelId", {", ".join(q(f) for f in ACTION_FIELDS)}) '
-                  f"VALUES (%s, now(), %s, %s, {acasts})", [new_id(), target_id, lid, *[a[f] for f in ACTION_FIELDS]])
+        if action_has_account(c):
+            c.execute(f'INSERT INTO "Action" (id, "updatedAt", "ruleId", "emailAccountId", "labelId", '
+                      f'{", ".join(q(f) for f in ACTION_FIELDS)}) VALUES (%s, now(), %s, %s, %s, {acasts})',
+                      [new_id(), target_id, account_id, lid, *[a[f] for f in ACTION_FIELDS]])
+        else:  # Inbox Zero v2.25.8: no Action.emailAccountId
+            c.execute(f'INSERT INTO "Action" (id, "updatedAt", "ruleId", "labelId", '
+                      f'{", ".join(q(f) for f in ACTION_FIELDS)}) VALUES (%s, now(), %s, %s, {acasts})',
+                      [new_id(), target_id, lid, *[a[f] for f in ACTION_FIELDS]])
 
 
 def sync(apply=True, only_account=None):
