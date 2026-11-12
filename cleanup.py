@@ -206,7 +206,15 @@ def protected_set():
 def is_protected(addr, prot=None):
     """A sender is protected by its exact address or its domain ("@example.com")."""
     prot = protected_set() if prot is None else prot
-    return addr in prot or ("@" + addr.rsplit("@", 1)[-1]) in prot
+    if addr in prot:
+        return True
+    labels = addr.rsplit("@", 1)[-1].split(".")  # "@chase.com" also covers alerts.chase.com, never a bare TLD
+    return any("@" + ".".join(labels[i:]) in prot for i in range(max(1, len(labels) - 1)))
+
+
+def own_address(addr):
+    """True when addr is one of the linked accounts: `from:<me>` matches everything that account ever sent."""
+    return addr in {a["email"].lower() for a in ACC.list()}
 
 
 def protected_list(q=None):
@@ -219,8 +227,11 @@ def protected_list(q=None):
 def keep_query(words):
     """Gmail search for 'subject contains any of these words/phrases', or None. Input is cleaned, not trusted."""
     out = []
-    for w in (words or [])[:10]:
-        w = re.sub(r"[^\w\s'&$%!-]", " ", str(w), flags=re.U).strip()[:40]
+    words = [w for w in (words or []) if str(w).strip()]
+    if len(words) > 10:  # never drop one silently: a missing keep word means that mail gets the destructive action
+        raise ValueError("at most 10 keep words per group")
+    for w in words:
+        w = re.sub(r"[^\w\s'&$%!-]", " ", str(w), flags=re.U).strip().lstrip("-").strip()[:40]  # "-word" would negate
         if w:
             out.append(f'"{w}"' if " " in w else w)
     return f"subject:({' OR '.join(out)})" if out else None
@@ -244,6 +255,8 @@ def _filter(acc_id, addr, action, remove=False, keep=None):
 
 def _modify_existing(acc_id, query, add=(), remove=()):
     """Apply label changes to every message matching `query` (batches of 1000). Returns the count."""
+    if "in:sent" not in query:  # a sender action never reaches what the account itself sent, its drafts or chats
+        query = f"{query} {SKIP}"
     return _batch(acc_id, [m["id"] for m in gmail_list(acc_id, qs(query), "messages", MAX_BULK)], add, remove)
 
 
@@ -327,6 +340,8 @@ def sender_action(d):
         raise ValueError("bad sender address")
     if act in DESTRUCTIVE and is_protected(addr):
         raise PermissionError(f"{addr} is protected: unprotect it first")
+    if act in DESTRUCTIVE and own_address(addr):
+        raise PermissionError(f"{addr} is one of your own accounts: its mail is never cleaned up")
     kq = keep_query(d.get("keep")) if act in DESTRUCTIVE else None
     nk = f" -{kq}" if kq else ""  # appended to every "which existing mail" query
     with db() as c:
@@ -488,6 +503,8 @@ def quarantine_action(d):
                 ids = [m["id"] for m in gmail_list(a["id"], query, "messages", MAX_BULK)]
             if not ids:
                 continue
+            if act == "delete" and sender and is_protected(sender):
+                raise PermissionError(f"{sender} is protected: unprotect it first")
             add = {"delete": ["TRASH"], "archive": [], "release": ["INBOX"]}[act]
             n = _batch(a["id"], ids, add=add, remove=[lid])
             note = f"{n} {QACTIONS[act]}"
@@ -568,6 +585,12 @@ def _ai_sort_ids(addr, rule, action, pairs):
     kept = 0
     for i in range(0, len(pairs), 40):
         chunk = pairs[i:i + 40]
+        with db() as c:  # "Stop AI sort", a new rule or Protect takes effect before the next batch, not after the pass
+            row = c.execute("SELECT rule, action FROM unified.ai_sort WHERE addr = %s", (addr,)).fetchone()
+        if not row or tuple(row) != (rule, action):
+            raise RuntimeError("stopped: the AI sort was removed or changed")
+        if action != "keep" and is_protected(addr):
+            raise PermissionError(f"{addr} is protected: AI sort paused")
         with db() as c:  # local history first: no Gmail call for mail the collector already has
             local = {(acc, mid): (sub, snip) for acc, mid, sub, snip in c.execute(
                 "SELECT account_id, id, subject, coalesce(snippet, '') FROM unified.msg WHERE id = ANY(%s) AND subject IS NOT NULL",
@@ -604,7 +627,7 @@ def _ai_sort_existing(addr, rule, action):
     try:
         pairs = []
         for a in ACC.list():
-            q = f"from:{addr} -in:trash -in:spam" + (f" -label:{QUARANTINE}" if action == "quarantine" else "")
+            q = f"from:{addr} -in:trash -in:spam {SKIP}" + (f" -label:{QUARANTINE}" if action == "quarantine" else "")
             pairs += [(a, m["id"]) for m in gmail_list(a["id"], qs(q), "messages", MAX_BULK)]
         with db() as c:
             c.execute("UPDATE unified.ai_sort SET total = %s, done = 0, kept = 0, status = 'sorting' WHERE addr = %s",
@@ -626,6 +649,8 @@ def ai_sort_new():
                          "WHERE status = 'active'").fetchall()
     for addr, rule, action, last in rows:
         try:
+            if action != "keep" and (is_protected(addr) or own_address(addr)):
+                continue  # protected after the sort was set up: leave its mail alone
             since = int(last or 0) - 3600
             pairs = []
             for a in ACC.list():
@@ -659,14 +684,20 @@ def apply_plan(d):
     if not re.fullmatch(r"[^@\s]+@[^@\s]+", addr):
         raise ValueError("bad sender address")
     groups = []
-    for g in (d.get("groups") or [])[:6]:
+    raw_groups = [g for g in (d.get("groups") or []) if any(str(w).strip() for w in (g.get("words") or []))]
+    if len(raw_groups) > 6:  # refused, not cut: a dropped "keep" group would hand its mail to the default action
+        raise ValueError("at most 6 groups in a plan")
+    for g in raw_groups:
         kq = keep_query(g.get("words"))
-        if kq and g.get("action") in PLAN_ACTIONS:
-            groups.append({"label": str(g.get("label") or "")[:40], "kq": kq, "action": g["action"]})
+        if not kq or g.get("action") not in PLAN_ACTIONS:
+            raise ValueError(f"group {str(g.get('label') or '?')[:40]!r} has no usable words or a bad action")
+        groups.append({"label": str(g.get("label") or "")[:40], "kq": kq, "action": g["action"]})
     default = d.get("default") if d.get("default") in PLAN_ACTIONS else "keep"
     destructive = {g["action"] for g in groups} | {default}
     if destructive - {"keep"} and is_protected(addr):
         raise PermissionError(f"{addr} is protected: unprotect it first")
+    if destructive - {"keep"} and own_address(addr):
+        raise PermissionError(f"{addr} is one of your own accounts: its mail is never cleaned up")
     if d.get("mode") == "ai":  # AI sort: each email judged by the rule, now (background) and every collector run
         rule = re.sub(r"\s+", " ", str(d.get("rule") or ""))[:400]
         if not rule:

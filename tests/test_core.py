@@ -82,10 +82,44 @@ class AiSort(unittest.TestCase):
         import ai
         old_key, old_ask = ai.KEY, ai._ask
         try:
-            ai.KEY, ai._ask = "k", lambda prompt: {"keep": [1, "3", "x"]}
+            ai.KEY, ai._ask = "k", lambda prompt: {"keep": [1, "3"], "drop": [2]}
             self.assertEqual(ai.classify("keep articles", [("a", ""), ("b", ""), ("c", "")]), [True, False, True])
         finally:
             ai.KEY, ai._ask = old_key, old_ask
+
+    def test_classify_refuses_an_answer_that_is_not_a_full_verdict(self):
+        # The mail not kept gets trashed, so a malformed answer must never read as "keep none".
+        import ai
+        old_key, old_ask = ai.KEY, ai._ask
+        try:
+            ai.KEY = "k"
+            for bad in ({}, {"keep": []}, {"keep": "all", "drop": []}, {"keep": None, "drop": [1, 2, 3]},
+                        {"keep": [1], "drop": [2]}, {"keep": [1, 2], "drop": [2, 3]}, {"keep": [1, 2, 3, 4], "drop": []},
+                        {"keep": [1, "x"], "drop": [2, 3]}, [1, 2, 3]):
+                ai._ask = lambda prompt, bad=bad: bad
+                with self.assertRaises(ValueError, msg=repr(bad)):
+                    ai.classify("keep articles", [("a", ""), ("b", ""), ("c", "")])
+            ai._ask = lambda prompt: {"keep": [], "drop": [1, 2, 3]}  # an explicit "drop all" is still a valid verdict
+            self.assertEqual(ai.classify("r", [("a", ""), ("b", ""), ("c", "")]), [False, False, False])
+        finally:
+            ai.KEY, ai._ask = old_key, old_ask
+
+
+class Guards(unittest.TestCase):
+    def test_domain_protection_covers_subdomains(self):
+        prot = {"@chase.com", "one@x.org"}
+        self.assertTrue(cleanup.is_protected("alerts@chase.com", prot))
+        self.assertTrue(cleanup.is_protected("no-reply@alerts.mail.chase.com", prot))
+        self.assertFalse(cleanup.is_protected("a@notchase.com", prot))
+        self.assertFalse(cleanup.is_protected("a@chase.com.evil.net", prot))
+        self.assertFalse(cleanup.is_protected("a@other.com", {"@com"}))  # a bare TLD protects nothing
+        self.assertTrue(cleanup.is_protected("one@x.org", prot))
+        self.assertFalse(cleanup.is_protected("two@x.org", prot))
+
+    def test_keep_words_are_refused_not_truncated(self):
+        with self.assertRaises(ValueError):
+            cleanup.keep_query([f"w{i}" for i in range(11)])
+        self.assertEqual(cleanup.keep_query(["-order", " receipt "]), "subject:(order OR receipt)")
 
 
 class Rules(unittest.TestCase):
