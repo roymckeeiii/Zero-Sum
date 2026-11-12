@@ -147,3 +147,107 @@ class Quota(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FakeDb:
+    """Stands in for core.db(): records inserts, answers every SELECT with no rows."""
+    def __init__(self):
+        self.rows = []
+
+    def __call__(self):
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params=None):
+        return type("R", (), {"fetchall": staticmethod(lambda: []), "fetchone": staticmethod(lambda: None)})()
+
+    def cursor(self):
+        return self
+
+    def executemany(self, sql, rows):
+        self.rows += list(rows)
+
+
+class Cleared(unittest.TestCase):
+    def test_sender_matches_addresses_and_domains(self):
+        self.assertTrue(cleanup.sender_matches("Deals@Shop.com", "deals@shop.com"))
+        self.assertFalse(cleanup.sender_matches("other@shop.com", "deals@shop.com"))
+        self.assertTrue(cleanup.sender_matches("deals@mail.shop.com", "@shop.com"))
+        self.assertFalse(cleanup.sender_matches("deals@notshop.com", "@shop.com"))
+        self.assertFalse(cleanup.sender_matches("", "@shop.com"))
+
+    def test_protecting_removes_only_this_senders_trash_filters(self):
+        filters = [{"id": "1", "criteria": {"from": "deals@shop.com"}, "action": {"addLabelIds": ["TRASH"]}},
+                   {"id": "2", "criteria": {"from": "deals@shop.com"}, "action": {"addLabelIds": ["STARRED"]}},
+                   {"id": "3", "criteria": {"from": "x@other.com"}, "action": {"addLabelIds": ["TRASH"]}},
+                   {"id": "4", "criteria": {"from": "news@mail.shop.com", "negatedQuery": "subject:(order)"},
+                    "action": {"addLabelIds": ["TRASH"]}}]
+        deleted = []
+
+        def gmail(acc, path, method="GET", body=None):
+            if method == "DELETE":
+                deleted.append(path.rsplit("/", 1)[-1])
+            return {"filter": filters}
+        old = cleanup.gmail
+        cleanup.gmail = gmail
+        try:
+            self.assertEqual(cleanup.remove_trash_filters("a", "deals@shop.com"), 1)
+            self.assertEqual(deleted, ["1"])
+            del deleted[:]
+            self.assertEqual(cleanup.remove_trash_filters("a", "@shop.com"), 2)   # the domain and its subdomains
+            self.assertEqual(deleted, ["1", "4"])
+        finally:
+            cleanup.gmail = old
+
+
+class Collector(unittest.TestCase):
+    def run_store(self, answers):
+        """_store with Gmail answering each message id from `answers` (a dict, or an exception to raise)."""
+        def gmail(acc, path, method="GET", body=None):
+            mid = path.split("/messages/")[1].split("?")[0]
+            a = answers[mid]
+            if isinstance(a, Exception):
+                raise a
+            return a
+        fake, old = FakeDb(), (cleanup.gmail, cleanup.db)
+        cleanup.gmail, cleanup.db = gmail, fake
+        try:
+            return cleanup._store("acc", list(answers)), fake
+        finally:
+            cleanup.gmail, cleanup.db = old
+
+    MSG = {"id": "m1", "threadId": "t", "internalDate": "1000", "labelIds": ["INBOX"], "snippet": "s",
+           "payload": {"headers": [{"name": "From", "value": "A <a@x.com>"}, {"name": "Subject", "value": "hi"}]}}
+
+    def test_a_deleted_message_is_skipped(self):
+        n, fake = self.run_store({"m1": self.MSG, "gone": RuntimeError("Gmail GET /messages/gone: 404 Not Found")})
+        self.assertEqual((n, len(fake.rows)), (1, 1))
+
+    def test_a_quota_error_is_not_treated_as_deleted(self):
+        # The fetched message is still stored, but the run fails, so the collector's newest/oldest marks stay where
+        # they were and the unread id is listed again next time.
+        with self.assertRaises(RuntimeError) as e:
+            self.run_store({"m1": self.MSG, "m2": RuntimeError("Gmail GET /messages/m2: 429 Quota exceeded")})
+        self.assertIn("could not be read", str(e.exception))
+
+    def test_new_mail_pass_is_not_capped_at_2000(self):
+        seen = []
+        old = (cleanup.gmail_list, cleanup._store, cleanup.db)
+        fake = FakeDb()
+        fake.execute = lambda sql, params=None: type("R", (), {
+            "fetchall": staticmethod(lambda: []),
+            "fetchone": staticmethod(lambda: (1700000000, 1600000000, True) if "collect_state" in sql and "SELECT" in sql else None)})()
+        cleanup.gmail_list = lambda acc, path, key, limit: seen.append((path, limit)) or []
+        cleanup._store, cleanup.db = (lambda *a, **k: 0), fake
+        try:
+            cleanup.collect_account({"id": "acc"})
+        finally:
+            cleanup.gmail_list, cleanup._store, cleanup.db = old
+        new_pass = [limit for path, limit in seen if "after%3A" in path]
+        self.assertEqual(new_pass, [cleanup.NEW_MAIL_MAX])
+        self.assertGreaterEqual(cleanup.NEW_MAIL_MAX, 100000)

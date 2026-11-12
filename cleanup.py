@@ -20,6 +20,7 @@ BACKFILL_DAYS = int(os.environ.get("BACKFILL_DAYS", "0"))  # 0 = back to the acc
 BACKFILL_STEP = int(os.environ.get("BACKFILL_STEP", "2000"))
 MAX_BULK = int(os.environ.get("MAX_BULK", "200000"))  # most messages one bulk action touches per account
 SKIP = "-in:sent -in:drafts -in:chats"
+NEW_MAIL_MAX = 100000  # new-mail pass: bounded by its `after:` date, not by a count
 CPOOL = ThreadPoolExecutor(max_workers=8)
 COLLECT_LOCK = threading.Lock()
 
@@ -49,8 +50,10 @@ def _store(acc_id, ids, refill=False):
         try:
             m = gmail(acc_id, f"/messages/{mid}?format=metadata&metadataHeaders=From&metadataHeaders=List-Unsubscribe"
                               "&metadataHeaders=List-Unsubscribe-Post&metadataHeaders=Subject")
-        except Exception:  # noqa: BLE001 - deleted between list and get
-            return None
+        except Exception as e:  # noqa: BLE001
+            if ": 404 " in str(e):  # deleted between list and get: nothing to store
+                return None
+            return e  # quota, 5xx, timeout: not "gone". Reported below so the collector does not move past it.
         hs = m.get("payload", {}).get("headers", [])
         name, addr = email.utils.parseaddr(header(hs, "from"))
         addr = (addr or "unknown").lower()
@@ -59,12 +62,15 @@ def _store(acc_id, ids, refill=False):
                 addr.rsplit("@", 1)[-1], "UNREAD" in lab, "INBOX" in lab, parse_unsub(header(hs, "list-unsubscribe")),
                 "one-click" in header(hs, "list-unsubscribe-post").lower(), header(hs, "subject")[:300],
                 (m.get("snippet") or "")[:300])
-    rows = [r for r in CPOOL.map(fetch, todo) if r]
+    got = [r for r in CPOOL.map(fetch, todo) if r]
+    rows, failed = [r for r in got if isinstance(r, tuple)], [r for r in got if not isinstance(r, tuple)]
     with db() as c:
         with c.cursor() as cur:
             cur.executemany("INSERT INTO unified.msg (account_id, id, thread_id, ts, from_addr, from_name, domain, unread, inbox, "
                             "unsub, unsub_post, subject, snippet) VALUES (%s, %s, %s, to_timestamp(%s), %s, %s, %s, %s, %s, %s, %s, %s, %s) "
                             "ON CONFLICT (account_id, id) DO UPDATE SET subject = EXCLUDED.subject, snippet = EXCLUDED.snippet", rows)
+    if failed:  # what was fetched is kept; the run stops here so newest/oldest stay put and the next run lists these again
+        raise RuntimeError(f"{len(failed)} of {len(todo)} messages could not be read ({str(failed[0])[:160]})")
     return len(rows)
 
 
@@ -75,10 +81,11 @@ def collect_account(acc):
                        "FROM unified.collect_state WHERE account_id = %s", (a,)).fetchone()
     newest, oldest, done = (st or (None, None, False))
     if newest is None:
-        ids = [m["id"] for m in gmail_list(a, qs(f"{SKIP} newer_than:7d"), "messages", 2000)]
-    else:
+        ids = [m["id"] for m in gmail_list(a, qs(f"{SKIP} newer_than:7d"), "messages", NEW_MAIL_MAX)]
+    else:  # everything since the last run: the list is newest first, so a cap of 2000 dropped the older part of a
+        # long gap (downtime, a burst) for good, since back-fill only ever reads before `oldest`
         ids = [m["id"] for m in gmail_list(a, qs(f"{SKIP} after:{int(newest) - 3600}"),
-                                           "messages", 2000)]
+                                           "messages", NEW_MAIL_MAX)]
     added = _store(a, ids)
     if not done:
         before = int(oldest) if oldest else int(time.time()) - 7 * 86400
@@ -253,6 +260,38 @@ def _filter(acc_id, addr, action, remove=False, keep=None):
             raise
 
 
+def sender_matches(frm, key):
+    """Does a filter's `from` value fall under `key`: an address, or a domain ("@example.com", subdomains included)?"""
+    frm, key = (frm or "").strip().lower(), (key or "").strip().lower()
+    if not frm or not key:
+        return False
+    if key.startswith("@"):
+        dom = frm.rsplit("@", 1)[-1]
+        return dom == key[1:] or dom.endswith("." + key[1:])
+    return frm == key
+
+
+def remove_trash_filters(acc_id, key):
+    """Delete the account's Gmail filters that send this sender's (or domain's) mail straight to Trash. Block,
+    Unsubscribe & delete and a plan's delete groups create them; without this they outlived Protect, Keep, Reset and
+    a re-applied plan, and kept trashing new mail from a sender the app showed as protected. Returns how many."""
+    n = 0
+    for f in gmail(acc_id, "/settings/filters").get("filter", []):
+        if "TRASH" in ((f.get("action") or {}).get("addLabelIds") or []) \
+                and sender_matches((f.get("criteria") or {}).get("from"), key):
+            gmail(acc_id, f"/settings/filters/{f['id']}", "DELETE")
+            n += 1
+    return n
+
+
+def stop_automation(key):
+    """Drop the AI sorts covered by `key` (an address or "@domain"); a running pass stops before its next batch."""
+    with db() as c:
+        for (addr,) in c.execute("SELECT addr FROM unified.ai_sort").fetchall():
+            if sender_matches(addr, key):
+                c.execute("DELETE FROM unified.ai_sort WHERE addr = %s", (addr,))
+
+
 def _modify_existing(acc_id, query, add=(), remove=()):
     """Apply label changes to every message matching `query` (batches of 1000). Returns the count."""
     if "in:sent" not in query:  # a sender action never reaches what the account itself sent, its drafts or chats
@@ -325,11 +364,18 @@ def sender_action(d):
             else:
                 c.execute("DELETE FROM unified.protected WHERE key = %s", (addr,))
         never_spam = {"removeLabelIds": ["SPAM"]}  # Gmail's "Never send it to Spam", for this address or domain
+        cleared = 0
+        if act == "protect":
+            stop_automation(addr)
         for acc in ACC.list():
             try:
                 _filter(acc["id"], addr, never_spam, remove=(act == "unprotect"))
+                if act == "protect":  # what was set up before the protection must stop deleting its mail
+                    cleared += remove_trash_filters(acc["id"], addr)
             except Exception as e:  # noqa: BLE001 - protection in Zero Sum still applies
-                log("cleanup-error", f"{act} {addr}: never-spam filter: {e}"[:300], acc["email"])
+                log("cleanup-error", f"{act} {addr}: filters: {e}"[:300], acc["email"])
+        if cleared:
+            log("cleanup", f"protect {addr}: removed {cleared} send-to-Trash filter(s)")
         if act == "protect" and not addr.startswith("@"):  # also "kept" in Inbox Zero for every account that gets it
             with db() as c:
                 for (a,) in c.execute("SELECT DISTINCT account_id FROM unified.msg WHERE from_addr = %s", (addr,)).fetchall():
@@ -343,6 +389,8 @@ def sender_action(d):
     if act in DESTRUCTIVE and own_address(addr):
         raise PermissionError(f"{addr} is one of your own accounts: its mail is never cleaned up")
     kq = keep_query(d.get("keep")) if act in DESTRUCTIVE else None
+    if act in ("keep", "reset"):
+        stop_automation(addr)
     nk = f" -{kq}" if kq else ""  # appended to every "which existing mail" query
     with db() as c:
         acc_ids = [r[0] for r in c.execute("SELECT DISTINCT account_id FROM unified.msg WHERE from_addr = %s",
@@ -400,6 +448,10 @@ def sender_action(d):
                             "reported as spam")
                 if not kq:
                     _drop_rows(a, addr)
+            elif act in ("keep", "reset"):  # back to normal delivery: no filter may keep trashing this sender
+                n = remove_trash_filters(a, addr)
+                if n:
+                    note.append(f"{n} send-to-Trash filter(s) removed")
             elif act == "star":
                 _filter(a, addr, STAR_FILTER)
                 note.append(f"filter added, {_modify_existing(a, f'from:{addr} in:inbox -is:starred', add=['STARRED'])} starred")
@@ -702,6 +754,11 @@ def apply_plan(d):
         rule = re.sub(r"\s+", " ", str(d.get("rule") or ""))[:400]
         if not rule:
             raise ValueError("write what to keep first")
+        for acc in ACC.list():  # an older Trash filter would delete new mail before the AI ever judged it
+            try:
+                remove_trash_filters(acc["id"], addr)
+            except Exception as e:  # noqa: BLE001
+                log("cleanup-error", f"apply {addr}: old filters: {e}"[:300], acc["email"])
         with db() as c:
             c.execute("INSERT INTO unified.ai_sort (addr, rule, action) VALUES (%s, %s, %s) ON CONFLICT (addr) DO UPDATE "
                       "SET rule = EXCLUDED.rule, action = EXCLUDED.action, status = 'sorting', done = 0, total = 0, kept = 0",
@@ -712,6 +769,7 @@ def apply_plan(d):
         return {"results": [{"email": "all accounts", "ok": True,
                              "note": f"AI sort started: existing mail is being sorted in the background (rest: {default}); "
                                      "new mail from this sender is sorted every 15 minutes"}]}
+    stop_automation(addr)  # a word plan replaces an earlier AI sort
     with db() as c:
         acc_ids = [r[0] for r in c.execute("SELECT DISTINCT account_id FROM unified.msg WHERE from_addr = %s",
                                            (addr,)).fetchall()]
@@ -720,6 +778,7 @@ def apply_plan(d):
         em = ACC.email(a)
         try:
             lid = label_id(a, QUARANTINE) if "quarantine" in destructive else None
+            remove_trash_filters(a, addr)  # a re-applied plan replaces the old one's delete filters, it doesn't add to them
             notes, earlier = [], []  # a group only takes mail no earlier group matched
             for g in groups:
                 excl = "".join(f" -{k}" for k in earlier)
