@@ -375,6 +375,20 @@ $("#c-prot").onclick = async (e) => {
   await api("/api/sender", { addr: x.dataset.unprot, action: "unprotect" }).catch((err) => alert(err.message));
   loadSenders();
 };
+$("#c-protect-many").onclick = async () => {
+  const d = $("#dlg-protect");
+  $("#dlg-protect-text").value = "";
+  d.showModal();
+  const ok = await new Promise((res) => { d.onclose = () => res(d.returnValue === "ok"); });
+  const text = $("#dlg-protect-text").value;
+  if (!ok || !text.trim()) return;
+  try {
+    const r = await api("/api/protect/bulk", { text });
+    $("#c-result").innerHTML = `<div class="card">${fmt(r.protected)} sender(s) protected. Gmail "never spam" filters are being added in the background.` +
+      (r.rejected.length ? `<br><span class="note">Not read as an address or domain: ${r.rejected.map(esc).join(", ")}</span>` : "") + "</div>";
+  } catch (err) { $("#c-result").innerHTML = `<div class="err">${esc(err.message)}</div>`; }
+  loadSenders();
+};
 $("#c-protect-btn").onclick = async () => {
   const v = $("#c-protect").value.trim().toLowerCase();
   if (!v) return;

@@ -377,3 +377,30 @@ class AccessToken(unittest.TestCase):
 
     def test_off_unless_both_settings_are_present(self):
         self.assertFalse(self.access.ENABLED)   # the test environment sets neither: the header mode is unchanged
+
+
+class BulkProtect(unittest.TestCase):
+    def test_a_pasted_keep_list_becomes_protect_keys(self):
+        text = ("Sender (address or domain),Notes,Added\n"
+                "pleasantview.org,Nursing home (see portal.example.com),2026-11-06\n"
+                "docusign.net,DocuSign — consents,2026-11-06\n"
+                "Jane.Doe@Law-Firm.com , lawyer\n"
+                "@sofi.com; cursor.com  databricks.com\n"
+                "\n  not-a-domain  \n"
+                "docusign.net\n")
+        keys, rejected = cleanup.parse_protect_keys(text)
+        self.assertEqual(keys, ["@pleasantview.org", "@docusign.net", "jane.doe@law-firm.com", "@sofi.com",
+                                "@cursor.com", "@databricks.com"])
+        self.assertNotIn("@portal.example.com", keys)     # notes are not read, so nothing in them gets protected
+        self.assertEqual(rejected, ["sender", "(address", "or", "domain)", "not-a-domain"])
+        for k in keys:
+            self.assertTrue(cleanup.is_protected(k.lstrip("@") if "@" in k[1:] else "x" + k, set(keys)), k)
+
+    def test_nothing_usable_is_an_error_not_a_silent_success(self):
+        old = cleanup.db
+        cleanup.db = FakeDb()
+        try:
+            with self.assertRaises(ValueError):
+                cleanup.protect_many({"text": "hello there\n\n"})
+        finally:
+            cleanup.db = old

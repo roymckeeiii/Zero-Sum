@@ -211,7 +211,7 @@ select.cleanup { padding:3px 6px; font-size:12px; }
         <option value="180">Last 180 days</option><option value="365">Last year</option>
         <option value="1825">Last 5 years</option><option value="3650">Last 10 years</option><option value="36500">All time</option></select>
       <label><input type="checkbox" id="c-handled"> Show handled</label>
-      <input type="search" id="c-protect" placeholder="Protect name@x.com or @x.com"><button id="c-protect-btn">Protect</button>
+      <input type="search" id="c-protect" placeholder="Protect name@x.com or @x.com"><button id="c-protect-btn">Protect</button><button id="c-protect-many" title="Paste a list of senders to protect">Protect many…</button>
       <span class="spacer"></span><button id="c-collect">Collect now</button>
     </div>
     <div id="c-status" class="note"></div>
@@ -267,6 +267,12 @@ select.cleanup { padding:3px 6px; font-size:12px; }
   <label id="dlg-keep-row" class="keep">Keep emails whose subject contains <span class="note">(optional, comma-separated; kept ones get starred)</span>
     <input id="dlg-keep" type="text" placeholder="e.g. gift, surprise, order"></label>
   <div class="dlg-buttons"><button value="cancel">Cancel</button><button id="dlg-ok" value="ok" class="primary">Confirm</button></div>
+</form></dialog>
+<dialog id="dlg-protect"><form method="dialog">
+  <h3>Protect many senders</h3>
+  <p>One per line: an address (name@example.com) or a domain (example.com). A CSV keep-list can be pasted as it is; only its first column is read.</p>
+  <textarea id="dlg-protect-text" rows="12" style="width:100%" placeholder="example.com&#10;name@example.org"></textarea>
+  <div class="dlg-buttons"><button value="cancel">Cancel</button><button value="ok" class="primary">Protect</button></div>
 </form></dialog>
 <script src="/app.js"></script>
 </body>
