@@ -107,14 +107,10 @@ class FakeCursor:
         return self
 
     def fetchone(self):
-        return (1,) if "information_schema" in self._last and self.has_column else None
+        return (1,) if "pg_attribute" in self._last and self.has_column else None
 
 
 class RulesV230(unittest.TestCase):
-    def setUp(self):
-        rulesync._ACTION_HAS_ACCOUNT = None
-        self.addCleanup(setattr, rulesync, "_ACTION_HAS_ACCOUNT", None)
-
     def _write(self, has_column):
         r = {f: None for f in rulesync.RULE_FIELDS} | {"name": "A", "enabled": True}
         acts = [{f: None for f in rulesync.ACTION_FIELDS} | {"type": "ARCHIVE"}]
@@ -128,11 +124,32 @@ class RulesV230(unittest.TestCase):
         self.assertEqual(sql.count("%s"), len(params))
         self.assertEqual(params[1], "rule-t")
 
-    def test_schema_check_runs_once_per_process(self):
+    def test_schema_check_is_not_cached_across_an_upgrade(self):
+        # same process, Inbox Zero upgraded v2.25.8 -> v2.30 between two syncs: the second sync must see the column
+        self.assertFalse(rulesync.action_has_account(FakeCursor(False)))
+        self.assertTrue(rulesync.action_has_account(FakeCursor(True)))
+        self.assertFalse(rulesync.action_has_account(FakeCursor(False)))  # and a downgrade/rollback too
+        (sql_old, _), = self._write(has_column=False)
+        (sql_new, _), = self._write(has_column=True)
+        self.assertNotIn("emailAccountId", sql_old)
+        self.assertIn("emailAccountId", sql_new)
+
+    def test_schema_check_targets_the_resolved_action_table_only(self):
+        # a same-named "Action" table in another schema (or a dropped column) must not decide it
         c = FakeCursor(True)
-        self.assertTrue(rulesync.action_has_account(c))
-        self.assertTrue(rulesync.action_has_account(FakeCursor(False)))  # cached: no second query
-        self.assertEqual(sum("information_schema" in s for s, _ in c.calls), 1)
+        rulesync.action_has_account(c)
+        (sql, _), = [x for x in c.calls if "pg_attribute" in x[0]]
+        self.assertIn("to_regclass('\"Action\"')", sql)
+        self.assertIn("NOT attisdropped", sql)
+        self.assertNotIn("information_schema", sql)
+
+    def test_explicit_flag_skips_the_schema_query(self):
+        r = {f: None for f in rulesync.RULE_FIELDS} | {"name": "A", "enabled": True}
+        acts = [{f: None for f in rulesync.ACTION_FIELDS} | {"type": "ARCHIVE"}] * 2
+        c = FakeCursor(has_column=True)
+        rulesync._write_rule(c, "rule-t", "acc-t", r, acts, insert=True, has_account=False)
+        self.assertFalse(any("pg_attribute" in s for s, _ in c.calls))
+        self.assertTrue(all("emailAccountId" not in s for s, _ in c.calls if s.startswith('INSERT INTO "Action"')))
 
     def test_copied_actions_carry_the_target_account_id(self):
         r = {f: None for f in rulesync.RULE_FIELDS} | {"name": "A", "enabled": True}

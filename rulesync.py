@@ -28,16 +28,18 @@ ACTION_FIELDS = ["type", "label", "subject", "content", "to", "cc", "bcc", "url"
 # per-account action types (they reference the master's messaging channel): never copied
 SKIP_ACTION_TYPES = {"DRAFT_MESSAGING_CHANNEL", "NOTIFY_MESSAGING_CHANNEL"}
 LOCK = threading.Lock()
-_ACTION_HAS_ACCOUNT = None  # does "Action" have "emailAccountId" (Inbox Zero >= v2.30)? read once per process
 
 
 def action_has_account(c):
-    global _ACTION_HAS_ACCOUNT
-    if _ACTION_HAS_ACCOUNT is None:
-        _ACTION_HAS_ACCOUNT = c.execute(
-            "SELECT 1 FROM information_schema.columns WHERE table_name = 'Action' AND column_name = 'emailAccountId'"
-        ).fetchone() is not None
-    return _ACTION_HAS_ACCOUNT
+    """Does the "Action" table this connection writes to have "emailAccountId" (Inbox Zero >= v2.30)?
+
+    Checked on the exact table the unqualified name "Action" resolves to (to_regclass follows search_path), so a
+    same-named table in another schema (a backup, a second app) can't answer for it. Not cached: sync() asks once
+    per account pass, so an Inbox Zero upgrade is picked up on the next sync without restarting Zero Sum."""
+    return c.execute(
+        "SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('\"Action\"') "
+        "AND attname = 'emailAccountId' AND attnum > 0 AND NOT attisdropped"
+    ).fetchone() is not None
 
 
 def q(col):
@@ -125,7 +127,7 @@ def set_include(d):
     return {"ok": True}
 
 
-def _write_rule(c, target_id, account_id, rule, actions, insert):
+def _write_rule(c, target_id, account_id, rule, actions, insert, has_account=None):
     cols = RULE_FIELDS
     vals = [rule[f] for f in cols]
     casts = [f'%s::"{ENUM[f]}"' if f in ENUM else "%s" for f in cols]
@@ -138,9 +140,11 @@ def _write_rule(c, target_id, account_id, rule, actions, insert):
                   [*vals, target_id, account_id])
     c.execute('DELETE FROM "Action" WHERE "ruleId" = %s', (target_id,))
     acasts = ", ".join(f'%s::"{ENUM[f]}"' if f in ENUM else "%s" for f in ACTION_FIELDS)
+    if has_account is None:
+        has_account = action_has_account(c)
     for a in actions:
         lid = label_id(account_id, a["label"]) if a["type"] == "LABEL" and a.get("label") else None
-        if action_has_account(c):
+        if has_account:
             c.execute(f'INSERT INTO "Action" (id, "updatedAt", "ruleId", "emailAccountId", "labelId", '
                       f'{", ".join(q(f) for f in ACTION_FIELDS)}) VALUES (%s, now(), %s, %s, %s, {acasts})',
                       [new_id(), target_id, account_id, lid, *[a[f] for f in ACTION_FIELDS]])
@@ -177,6 +181,7 @@ def _sync_account(master, acc, mrules, incl, apply):
             "SELECT master_rule_id, target_rule_id, hash FROM unified.rule_map WHERE account_id = %s",
             (acc["id"],)).fetchall()}
         mapped_targets = {t for t, _ in rmap.values()}
+        has_account = action_has_account(c) if apply else None  # once per account pass, never per process
         for mid, r in mrules.items():
             if (mid, acc["id"]) not in incl:
                 continue
@@ -201,7 +206,7 @@ def _sync_account(master, acc, mrules, incl, apply):
             ops.append({"op": op, "account": acc["email"], "rule": r["name"],
                         "detail": ", ".join(a["type"] + (f" {a['label']}" if a.get("label") else "") for a in actions)})
             if apply:
-                _write_rule(c, target, acc["id"], r, actions, insert=(op == "create"))
+                _write_rule(c, target, acc["id"], r, actions, insert=(op == "create"), has_account=has_account)
                 c.execute("INSERT INTO unified.rule_map VALUES (%s, %s, %s, %s, now()) ON CONFLICT (master_rule_id, "
                           "account_id) DO UPDATE SET target_rule_id = EXCLUDED.target_rule_id, hash = EXCLUDED.hash, "
                           "synced_at = now()", (mid, acc["id"], target, h))
