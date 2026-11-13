@@ -58,7 +58,7 @@ async function loadAccounts() {
   if (!S.accounts.length) $("#accounts").innerHTML += `<div class="err">No linked accounts yet: add them in Inbox Zero.</div>`;
   $("#q").value = S.q || ""; $("#unread").checked = !!S.unreadOnly;
   $("#scope").value = S.scope || "inbox"; $("#label").value = S.label || ""; $("#label").hidden = S.scope !== "label";
-  $("#scope").onchange = (e) => { S.scope = e.target.value; $("#label").hidden = S.scope !== "label"; if (S.scope !== "label" || S.label) loadList(); };
+  $("#scope").onchange = (e) => { S.scope = e.target.value; S.limit = 30; $("#label").hidden = S.scope !== "label"; if (S.scope !== "label" || S.label) loadList(); };
   $("#label").oninput = (e) => { S.label = e.target.value.trim(); clearTimeout(t); t = setTimeout(() => S.label && loadList(), 400); };
   let t;
   $("#q").oninput = (e) => { S.q = e.target.value; clearTimeout(t); t = setTimeout(() => loadList(), 400); };
@@ -79,7 +79,8 @@ async function loadList(keepSel, page) {
   if (page) {  // append, newest first, without repeating a message already shown
     const seen = new Set(S.items.map((i) => `${i.account}/${i.id}`));
     d.items = [...S.items, ...d.items.filter((i) => !seen.has(`${i.account}/${i.id}`))].sort((a, b) => b.ts - a.ts);
-    d.errors = [...(S.errors || []), ...d.errors];
+    const errs = new Map([...(S.errors || []), ...d.errors].map((x) => [x.email, x]));  // one warning per account
+    d.errors = [...errs.values()];
   }
   S.items = d.items; S.errors = d.errors; S.next = d.next || "";
   S.more = scope === "inbox" ? d.items.length >= S.limit : !!S.next;

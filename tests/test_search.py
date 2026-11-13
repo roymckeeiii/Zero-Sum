@@ -116,7 +116,7 @@ class Search(unittest.TestCase):
         msgs = {"A": [(f"a{i:02d}", 1000 - i, ["SENT"]) for i in range(25)],
                 "B": [(f"b{i:02d}", 500 - i, ["Label_1"]) for i in range(12)]}
         fake = FakeGmail(msgs)
-        d1 = self.run_search(fake, scope="all", limit=20)  # 20 split over 2 accounts, at least 10 each
+        d1 = self.run_search(fake, scope="all", limit=20)  # 20 split over 2 accounts: 10 each
         self.assertEqual(len(fake.calls), 2)  # one list call per account per page
         self.assertTrue(all(q["maxResults"] == ["10"] for _, q in fake.calls))
         self.assertEqual(len(d1["items"]), 20)
@@ -135,6 +135,47 @@ class Search(unittest.TestCase):
         ids = [i["id"] for d in (d1, d2, d3) for i in d["items"]]
         self.assertEqual(len(ids), len(set(ids)))
         self.assertEqual(len(ids), 37)
+
+    def test_many_accounts_page_cap_and_every_message_exactly_once(self):
+        global ACCOUNTS
+        saved = ACCOUNTS
+        self.addCleanup(lambda: globals().__setitem__("ACCOUNTS", saved))
+        ACCOUNTS = [{"id": f"K{k}", "email": f"k{k}@x.com", "master": k == 0} for k in range(7)]
+        msgs = {f"K{k}": [(f"k{k}-{i:02d}", 10000 - 37 * i - k, ["SENT" if i % 2 else "Label_1"]) for i in range(9 + k)]
+                for k in range(7)}
+        total = sum(len(v) for v in msgs.values())
+        fake, seen, page, pages = FakeGmail(msgs), [], "", 0
+        while True:
+            fake.calls.clear()
+            d = self.run_search(fake, scope="all", limit=30, **({"page": page} if page else {}))
+            pages += 1
+            self.assertLessEqual(len(d["items"]), 30)
+            per = {int(q["maxResults"][0]) for _, q in fake.calls}
+            self.assertEqual(per, {30 // len(fake.calls)})  # 30 split over the accounts still searched (4 for 7)
+            self.assertLessEqual(sum(int(q["maxResults"][0]) for _, q in fake.calls), 30)
+            self.assertLessEqual(len(fake.calls), 7)  # one list call per account per page
+            seen += [i["id"] for i in d["items"]]
+            page = d["next"]
+            if not page:
+                break
+        self.assertEqual(len(seen), total)
+        self.assertEqual(sorted(seen), sorted(r[0] for v in msgs.values() for r in v))  # each exactly once
+        self.assertGreater(pages, 1)
+
+    def test_search_page_is_capped_even_after_inbox_load_more(self):
+        msgs = {"A": [(f"a{i:03d}", 1000 - i, ["SENT"]) for i in range(120)], "B": []}
+        fake = FakeGmail(msgs)
+        d = self.run_search(fake, scope="sent", limit=200)  # the inbox's Load more can leave limit at 200
+        self.assertEqual(len(d["items"]), 25)  # 50 // 2 accounts
+        self.assertTrue(all(q["maxResults"] == ["25"] for _, q in fake.calls))
+
+    def test_label_scope_with_unread_end_to_end(self):
+        fake = FakeGmail({"A": [("a1", 300, ["Label_1"])], "B": [("b1", 200, ["Label_1"])]})
+        d = self.run_search(fake, scope="label", label="Receipts 2026", q="from:shop", unread=1)
+        self.assertEqual(len(d["items"]), 2)
+        self.assertTrue(all(q["q"] == ["from:shop label:receipts-2026 is:unread"] for _, q in fake.calls))
+        with self.assertRaises(ValueError):  # app.py turns ValueError into a 400
+            self.run_search(fake, scope="label", label="")
 
     def test_bad_page_token_is_refused(self):
         for bad in ("!!!", inbox.encode_page({"A": "1"})[:-3] + "xyz", "WzFd"):  # WzFd = base64 of a JSON list

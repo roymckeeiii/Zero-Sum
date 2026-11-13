@@ -4,10 +4,12 @@ Search (RFC-001853): /api/messages takes scope=inbox (default, today's behaviour
 but Spam/Trash: Inbox, Sent, archived, labels), sent, spamtrash, or label (with label=<name>). Scopes other than
 inbox drop the INBOX label filter and add the scope's Gmail search term to the user's query, which passes through
 unchanged (from:, to:, has:attachment, before:, older_than: ...). Every account is searched in parallel; results
-merge newest first. Paging: one messages.list call per account per page (page size = limit split across the
-accounts, at least 10 each); `next` carries each account's nextPageToken, so "load more" continues every account
-where it stopped. An account that fails shows in `errors` and the others still answer."""
-import base64, binascii, email.utils, json, math, re, time, urllib.parse
+merge newest first. Paging: a search page is capped at SEARCH_PAGE_MAX results; each account gets
+limit // accounts of them (at least 1), so a page is at most `limit` messages, from one messages.list call per
+account plus one metadata get per message. Every fetched message is returned (nothing is cut after the fetch), and
+`next` carries each account's nextPageToken, so "load more" continues every account where it stopped. An account
+that fails shows in `errors` and the others still answer."""
+import base64, binascii, email.utils, json, re, time, urllib.parse
 
 from core import ACC, POOL, db, gmail, header, labels
 
@@ -15,6 +17,7 @@ _meta = {}  # (account id, message id) -> (time, item)
 
 
 SCOPES = ("inbox", "all", "sent", "spamtrash", "label")
+SEARCH_PAGE_MAX = 50  # results per search page, all accounts together
 
 
 def folder_of(label_ids):
@@ -124,7 +127,11 @@ def messages(q):
     accs = [a for a in ACC.list() if not only or a["id"] == only]
     if page is not None:  # "load more": only the accounts that still had results, from where each stopped
         accs = [a for a in accs if a["id"] in page]
-    per = limit if scope == "inbox" and page is None else max(10, math.ceil(limit / max(1, len(accs))))
+    if scope == "inbox" and page is None:
+        per = limit  # unchanged inbox paging: the UI asks for a bigger limit
+    else:
+        limit = min(limit, SEARCH_PAGE_MAX)
+        per = max(1, limit // max(1, len(accs)))  # per-account pages add up to at most `limit`
     errors, nxt = [], {}
 
     def ids(a):
