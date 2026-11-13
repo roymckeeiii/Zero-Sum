@@ -1,6 +1,6 @@
 """Unit tests that need no database or Gmail: token decryption (checked against Inbox Zero's Node implementation when
 node is available), message parsing, unsubscribe headers, rule hashing and the Gmail rate limiter."""
-import base64, os, shutil, subprocess, sys, time, unittest
+import base64, json, os, shutil, subprocess, sys, time, unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("EMAIL_ENCRYPT_SECRET", "test-secret")
@@ -327,3 +327,53 @@ class Undo(unittest.TestCase):
                                                                  "removeLabelIds": ["TRASH"]}))
         self.assertFalse([s for s, _ in self.sql if "INSERT INTO unified.action_log" in s])
         self.assertTrue([s for s, _ in self.sql if "SET undone_at" in s])
+
+
+class AccessToken(unittest.TestCase):
+    """access.py: the signed Cloudflare Access token, not the plain email header, says who is signed in."""
+
+    @classmethod
+    def setUpClass(cls):
+        import access, json as _json
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import padding, rsa
+        cls.access = access
+        cls.key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        cls.other = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        b64 = lambda b: base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+
+        def token(payload, key=None, alg="RS256", kid="k1"):
+            head = b64(_json.dumps({"alg": alg, "kid": kid}).encode())
+            body = b64(_json.dumps(payload).encode())
+            sig = (key or cls.key).sign(f"{head}.{body}".encode(), padding.PKCS1v15(), hashes.SHA256())
+            return f"{head}.{body}.{b64(sig) if alg != 'none' else ''}"
+        cls.token = staticmethod(token)
+        cls.lookup = staticmethod(lambda kid: cls.key.public_key() if kid == "k1" else None)
+
+    def check(self, tok):
+        return self.access.email_from(tok, team="t.cloudflareaccess.com", aud="AUD1", now=1000, key_lookup=self.lookup)
+
+    def good(self, **over):
+        return {"aud": ["AUD1"], "iss": "https://t.cloudflareaccess.com", "exp": 2000, "email": "Roy@Example.com", **over}
+
+    def test_a_valid_token_gives_its_email(self):
+        self.assertEqual(self.check(self.token(self.good())), "roy@example.com")
+        self.assertEqual(self.check(self.token(self.good(aud="AUD1"))), "roy@example.com")
+
+    def test_everything_else_is_not_signed_in(self):
+        bad = [self.token(self.good(), key=self.other),            # signed by someone else
+               self.token(self.good(aud=["OTHER-APP"])),           # a token for another Access application
+               self.token(self.good(iss="https://evil.cloudflareaccess.com")),
+               self.token(self.good(exp=900)),                     # expired
+               self.token(self.good(nbf=5000)),                    # not valid yet
+               self.token(self.good(email="")), self.token({k: v for k, v in self.good().items() if k != "exp"}),
+               self.token(self.good(), alg="none"), self.token(self.good(), kid="unknown"),
+               "", None, "not.a.token", "a.b"]
+        head, body, sig = self.token(self.good()).split(".")
+        forged = base64.urlsafe_b64encode(json.dumps(self.good(email="attacker@x.com")).encode()).rstrip(b"=").decode()
+        bad.append(f"{head}.{forged}.{sig}")                       # payload swapped under a real signature
+        for tok in bad:
+            self.assertIsNone(self.check(tok), str(tok)[:40])
+
+    def test_off_unless_both_settings_are_present(self):
+        self.assertFalse(self.access.ENABLED)   # the test environment sets neither: the header mode is unchanged

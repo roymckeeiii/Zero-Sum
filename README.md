@@ -271,6 +271,7 @@ All settings are environment variables; see [`.env.example`](.env.example).
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | required | Inbox Zero's Google OAuth client |
 | `ALLOWED_EMAILS` | required | comma-separated addresses allowed in |
 | `AUTH_EMAIL_HEADER` | `Cf-Access-Authenticated-User-Email` | header your proxy sets (oauth2-proxy: `X-Forwarded-Email`) |
+| `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD` | unset | behind Cloudflare Access: your team domain (`<team>.cloudflareaccess.com`) and the Access application's AUD tag. With both set, Zero Sum verifies the signed `Cf-Access-Jwt-Assertion` token and takes the user from it; the plain e-mail header is ignored. Recommended: without it, anything that can reach the port can claim to be you. |
 | `MASTER_EMAIL` | empty (rule sync off) | account whose rules are copied to the others |
 | `INBOX_ZERO_URL` | empty | your Inbox Zero address, for links |
 | `ADMIN_DATABASE_URL` | | only for `init-db` |
