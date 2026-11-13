@@ -279,6 +279,36 @@ async function runSender(s, a, b, ai) {
   } catch (err) { $("#c-result").innerHTML = `<div class="err">${esc(err.message)}</div>`; }
   loadSenders();
 }
+/* Undo: every bulk change is recorded with the messages it touched (cleanup.py _record) */
+function undoWhat(a) {
+  if (a.add.includes("TRASH")) return "moved to Trash";
+  if (a.add.includes("SPAM")) return "reported as spam";
+  if (a.add.includes("STARRED")) return "starred";
+  if (a.remove.includes("STARRED")) return "unstarred";
+  if (a.add.includes("INBOX")) return "returned to the inbox";
+  if (a.add.length) return "moved to Quarantine";
+  return a.remove.includes("INBOX") ? "archived" : "changed";
+}
+async function loadUndo() {
+  let d;
+  try { d = await api("/api/undo"); } catch (e) { $("#c-undo").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
+  $("#c-undo").innerHTML = d.actions.length ? `<p>Each line is one bulk change of the last ${d.days} days. Undo puts those
+    messages back where they were. It does not remove filters: use Keep or Reset on the sender for that.</p><ul class="ops">` +
+    d.actions.map((a) => `<li><span class="note">${esc(a.at.slice(0, 16).replace("T", " "))}</span> ${esc(a.email)}:
+      <b>${fmt(a.count)}</b> ${undoWhat(a)}${a.note ? ` (${esc(a.note)})` : ""}
+      ${a.undone ? `<span class="note">undone</span>` : `<button data-undo="${Number(a.id)}">Undo</button>`}</li>`).join("") + "</ul>"
+    : "No bulk changes recorded yet.";
+}
+$("#c-undo").onclick = async (e) => {
+  const id = e.target.dataset && e.target.dataset.undo;
+  if (!id || !confirm("Put these messages back where they were?")) return;
+  e.target.disabled = true;
+  try { const r = await api("/api/undo", { id: Number(id) }); $("#c-result").innerHTML = `<div class="card">${fmt(r.restored)} messages restored.</div>`; }
+  catch (err) { $("#c-result").innerHTML = `<div class="err">${esc(err.message)}</div>`; }
+  loadUndo(); loadSenders();
+};
+$("#c-undo-box").ontoggle = () => { if ($("#c-undo-box").open) loadUndo(); };
+
 /* 20 most recent emails from a sender, as a list (shared by Cleanup and AI Cleanup) */
 const recentCache = {};
 async function recent(addr) {

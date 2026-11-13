@@ -252,6 +252,9 @@ CREATE TABLE IF NOT EXISTS unified.ai_sort (
   done int NOT NULL DEFAULT 0, total int NOT NULL DEFAULT 0, kept int NOT NULL DEFAULT 0, updated_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS unified.protected (
   key text PRIMARY KEY, created_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS unified.action_log (
+  id bigserial PRIMARY KEY, at timestamptz NOT NULL DEFAULT now(), account_id text NOT NULL, note text NOT NULL DEFAULT '',
+  add_labels text[] NOT NULL, remove_labels text[] NOT NULL, ids text[] NOT NULL, undone_at timestamptz);
 CREATE TABLE IF NOT EXISTS unified.collect_state (
   account_id text PRIMARY KEY, newest timestamptz, oldest timestamptz, backfill_done boolean NOT NULL DEFAULT false,
   updated_at timestamptz NOT NULL DEFAULT now(), error text);

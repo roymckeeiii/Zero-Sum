@@ -202,6 +202,9 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
 
 - Deleting moves mail to **Trash**; Gmail empties Trash after 30 days, so mistakes can be undone until then. (Permanent
   deletion would need the full `https://mail.google.com/` scope, which Inbox Zero does not request.)
+- Every bulk change (delete, block, archive, quarantine, spam, a plan, an AI sort) is recorded with the exact messages
+  it touched before Gmail is called. **Cleanup > Undo a bulk action** lists the last 28 days and puts a change's
+  messages back where they were. Undo does not remove filters: use Keep or Reset on the sender for that.
 - Every Clean up action and every plan asks for confirmation, with the number of emails and accounts affected.
 - **Protected** senders (an address, or a whole domain like `@yourbank.com`) can't be unsubscribed, archived, deleted,
   blocked, quarantined or marked as spam, by hand or by a plan: the buttons are disabled and the server refuses. The

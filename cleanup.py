@@ -272,6 +272,40 @@ def _filter(acc_id, addr, action, remove=False, keep=None):
             raise
 
 
+def undo_list(q=None):
+    """Bulk changes of the last UNDO_DAYS days, newest first, for the Undo list."""
+    with db() as c:
+        rows = c.execute("SELECT id, at, account_id, note, add_labels, remove_labels, cardinality(ids), undone_at "
+                         "FROM unified.action_log ORDER BY id DESC LIMIT 60").fetchall()
+    names = {a["id"]: a["email"] for a in ACC.list()}
+    return {"days": UNDO_DAYS, "actions": [
+        {"id": i, "at": at.isoformat(), "email": names.get(acc, acc), "note": note, "add": add, "remove": rem,
+         "count": n, "undone": undone.isoformat() if undone else None}
+        for i, at, acc, note, add, rem, n, undone in rows]}
+
+
+def undo_action(d):
+    """Put the messages of one recorded bulk change back as they were: its added labels come off (out of Trash,
+    Spam or Quarantine), its removed labels go back on (INBOX). Filters are not touched: Keep or Reset removes those."""
+    with db() as c:
+        row = c.execute("SELECT account_id, add_labels, remove_labels, ids, undone_at FROM unified.action_log "
+                        "WHERE id = %s", (int(d.get("id") or 0),)).fetchone()
+    if not row:
+        raise ValueError("no such action (older than %d days?)" % UNDO_DAYS)
+    acc, add, rem, ids, undone = row
+    if undone:
+        raise ValueError("already undone")
+    n = _batch(acc, list(ids), add=list(rem), remove=list(add), record=False)
+    with db() as c:
+        c.execute("UPDATE unified.action_log SET undone_at = now() WHERE id = %s", (int(d["id"]),))
+    try:  # Delete/Block dropped these messages from the local history: read them back so the sender shows up again
+        _store(acc, list(ids)[:5000])
+    except Exception as e:  # noqa: BLE001 - the mail itself is restored; the collector fills the rest
+        log("cleanup-error", f"undo #{int(d['id'])}: history not refreshed: {e}"[:300], ACC.email(acc))
+    log("cleanup", f"undo #{int(d['id'])}: {n} messages restored", ACC.email(acc))
+    return {"ok": True, "restored": n}
+
+
 def sender_matches(frm, key):
     """Does a filter's `from` value fall under `key`: an address, or a domain ("@example.com", subdomains included)?"""
     frm, key = (frm or "").strip().lower(), (key or "").strip().lower()
@@ -311,18 +345,42 @@ def _modify_existing(acc_id, query, add=(), remove=()):
     return _batch(acc_id, [m["id"] for m in gmail_list(acc_id, qs(query), "messages", MAX_BULK)], add, remove)
 
 
-def _batch(acc_id, ids, add=(), remove=()):
+_ACTION = threading.local()   # .note: what the person asked for ("block deals@shop.com"), for the undo list
+UNDO_DAYS = 28               # Gmail empties Trash after 30 days: past that an undo could not bring mail back
+
+
+def _record(acc_id, ids, add, remove):
+    """Write down which messages a bulk change is about to touch, before it happens. A wrong Delete or Block used to
+    leave only a count in the log: nothing said which mail had moved, so the only way back was searching Trash by hand."""
+    with db() as c:
+        c.execute("INSERT INTO unified.action_log (account_id, note, add_labels, remove_labels, ids) "
+                  "VALUES (%s, %s, %s, %s, %s)",
+                  (acc_id, str(getattr(_ACTION, "note", "") or "")[:300], list(add), list(remove), list(ids)))
+        c.execute("DELETE FROM unified.action_log WHERE at < now() - make_interval(days => %s)", (UNDO_DAYS,))
+
+
+def _batch(acc_id, ids, add=(), remove=(), record=True):
     """Apply label changes to these message ids (batches of 1000). Returns the count."""
+    if ids and record and (add or remove):
+        _record(acc_id, ids, add, remove)
     for i in range(0, len(ids), 1000):
         chunk = ids[i:i + 1000]
         try:
             gmail(acc_id, "/messages/batchModify", "POST",
                   {"ids": chunk, "addLabelIds": list(add), "removeLabelIds": list(remove)})
         except RuntimeError:
-            if "TRASH" not in add:
+            if "TRASH" in add:
+                for mid in chunk:  # some accounts refuse TRASH in batchModify: trash one by one
+                    gmail(acc_id, f"/messages/{mid}/trash", "POST")
+            elif "TRASH" in remove:  # the same accounts, on an undo: out of Trash one by one, then the other labels
+                for mid in chunk:
+                    gmail(acc_id, f"/messages/{mid}/untrash", "POST")
+                rest_add, rest_rem = list(add), [x for x in remove if x != "TRASH"]
+                if rest_add or rest_rem:
+                    gmail(acc_id, "/messages/batchModify", "POST",
+                          {"ids": chunk, "addLabelIds": rest_add, "removeLabelIds": rest_rem})
+            else:
                 raise
-            for mid in chunk:  # some accounts refuse TRASH in batchModify: trash one by one
-                gmail(acc_id, f"/messages/{mid}/trash", "POST")
     return len(ids)
 
 
@@ -401,6 +459,7 @@ def sender_action(d):
     if act in DESTRUCTIVE and own_address(addr):
         raise PermissionError(f"{addr} is one of your own accounts: its mail is never cleaned up")
     kq = keep_query(d.get("keep")) if act in DESTRUCTIVE else None
+    _ACTION.note = f"{act} {addr}"
     if act in ("keep", "reset"):
         stop_automation(addr)
     nk = f" -{kq}" if kq else ""  # appended to every "which existing mail" query
@@ -552,6 +611,7 @@ def quarantine_action(d):
             chosen.setdefault(it.get("account"), []).append(it["id"])
     if not (chosen or sender or d.get("all")):
         raise ValueError("choose messages, a sender, or all")
+    _ACTION.note = f"quarantine {act}" + (f" {sender}" if sender else " (all)" if d.get("all") else " (chosen)")
     results = []
     for a in ACC.list():
         if chosen and a["id"] not in chosen:
@@ -702,6 +762,7 @@ def _ai_sort_ids(addr, rule, action, pairs, token=None):
 
 
 def _ai_sort_existing(addr, rule, action, token=None):
+    _ACTION.note = f"AI sort {addr}"
     try:
         pairs = []
         for a in ACC.list():
@@ -754,6 +815,7 @@ def ai_sort_new():
         try:
             if action != "keep" and (is_protected(addr) or own_address(addr)):
                 continue  # protected after the sort was set up: leave its mail alone
+            _ACTION.note = f"AI sort {addr} (new mail)"
             since = int(last or 0) - 3600
             pairs = []
             for a in ACC.list():
@@ -796,6 +858,7 @@ def apply_plan(d):
             raise ValueError(f"group {str(g.get('label') or '?')[:40]!r} has no usable words or a bad action")
         groups.append({"label": str(g.get("label") or "")[:40], "kq": kq, "action": g["action"]})
     default = d.get("default") if d.get("default") in PLAN_ACTIONS else "keep"
+    _ACTION.note = f"plan for {addr}"
     destructive = {g["action"] for g in groups} | {default}
     if destructive - {"keep"} and is_protected(addr):
         raise PermissionError(f"{addr} is protected: unprotect it first")

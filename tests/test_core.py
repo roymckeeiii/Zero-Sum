@@ -287,3 +287,43 @@ class SortPasses(unittest.TestCase):
         finally:
             cleanup._SORT_RUNS.pop("a@x.com", None)
             cleanup.db, cleanup.is_protected, cleanup._batch = old
+
+
+class Undo(unittest.TestCase):
+    """Every bulk change is written down, with the messages it touches, before it happens; undo reverses exactly it."""
+
+    def setUp(self):
+        self.calls, self.sql = [], []
+        fake = FakeDb()
+        fake.execute = lambda sql, params=None: (self.sql.append((sql, params)) or type("R", (), {
+            "fetchall": staticmethod(lambda: []),
+            "fetchone": staticmethod(lambda: ("acc", ["TRASH"], ["INBOX"], ["m1", "m2"], None))})())
+        self.old = (cleanup.db, cleanup.gmail, cleanup._store, cleanup.log)
+        self.old_acc, cleanup.ACC = cleanup.ACC, type("A", (), {"email": staticmethod(lambda a: "me@x.com")})()
+        cleanup.db = fake
+        cleanup.gmail = lambda acc, path, method="GET", body=None: self.calls.append((path, body)) or {}
+        cleanup._store, cleanup.log = (lambda *a, **k: 0), (lambda *a, **k: None)
+
+    def tearDown(self):
+        cleanup.db, cleanup.gmail, cleanup._store, cleanup.log = self.old
+        cleanup.ACC = self.old_acc
+
+    def test_a_bulk_change_is_recorded_before_gmail_is_called(self):
+        cleanup._ACTION.note = "block deals@shop.com"
+        order = []
+        cleanup.gmail = lambda *a, **k: order.append("gmail") or {}
+        real = cleanup.db.execute
+        cleanup.db.execute = lambda sql, params=None: (order.append("db") if "INSERT INTO unified.action_log" in sql else None) or real(sql, params)
+        self.assertEqual(cleanup._batch("acc", ["m1", "m2"], add=["TRASH"]), 2)
+        self.assertEqual(order[:2], ["db", "gmail"])
+        ins = [p for s, p in self.sql if "INSERT INTO unified.action_log" in s][0]
+        self.assertEqual(ins, ("acc", "block deals@shop.com", ["TRASH"], [], ["m1", "m2"]))
+
+    def test_undo_reverses_the_labels_and_is_not_recorded_again(self):
+        r = cleanup.undo_action({"id": 7})
+        self.assertEqual(r, {"ok": True, "restored": 2})
+        path, body = self.calls[0]
+        self.assertEqual((path, body), ("/messages/batchModify", {"ids": ["m1", "m2"], "addLabelIds": ["INBOX"],
+                                                                 "removeLabelIds": ["TRASH"]}))
+        self.assertFalse([s for s, _ in self.sql if "INSERT INTO unified.action_log" in s])
+        self.assertTrue([s for s, _ in self.sql if "SET undone_at" in s])
