@@ -14,7 +14,7 @@ RULES_EVERY_MIN (only when auto sync is on in the Rules tab).
 import json, os, sys, threading, time, traceback, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-import ai, analytics, cleanup, core, inbox, rulesync
+import access, ai, analytics, cleanup, core, inbox, rulesync
 from core import init_schema, log, set_setting
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -36,6 +36,7 @@ GET = {
     "/api/rules": lambda q: rulesync.state(),
     "/api/protected": cleanup.protected_list,
     "/api/quarantine": cleanup.quarantine_list,
+    "/api/undo": cleanup.undo_list,
     "/api/sender/recent": cleanup.sender_recent,
     "/api/ai/plans": ai.plans,
     "/api/ai/sorting": cleanup.ai_sort_status,
@@ -58,6 +59,7 @@ POST = {
     "/api/action": inbox.action,
     "/api/sender": cleanup.sender_action,
     "/api/quarantine": cleanup.quarantine_action,
+    "/api/undo": cleanup.undo_action,
     "/api/ai/suggest": ai.suggest,
     "/api/ai/analyze": ai.analyze,
     "/api/ai/apply": cleanup.apply_plan,
@@ -90,7 +92,11 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(b)
 
     def allowed(self):
-        if (self.headers.get(AUTH_HEADER) or "").lower() in ALLOWED:
+        if access.ENABLED:   # the signed Access token decides; the plain email header is not trusted
+            user = access.email_from(self.headers.get("Cf-Access-Jwt-Assertion"))
+        else:
+            user = (self.headers.get(AUTH_HEADER) or "").lower()
+        if user and user in ALLOWED:
             return True
         self.send(403, {"error": "not allowed"})
         return False
@@ -183,5 +189,8 @@ if __name__ == "__main__":
     every(60 * int(os.environ.get("COLLECT_EVERY_MIN", "15")), ai.background_plan, 300)
     every(60 * int(os.environ.get("RULES_EVERY_MIN", "10")), auto_rules, 60)
     port = int(os.environ.get("PORT", "8080"))
-    print(f"zero-sum on :{port}, allowed: {len(ALLOWED)} address(es)", flush=True)
+    print(f"zero-sum on :{port}, allowed: {len(ALLOWED)} address(es); sign-in: "
+          + (f"Cloudflare Access token ({access.TEAM})" if access.ENABLED else
+             f"the {AUTH_HEADER} header as sent (set CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD to verify the Access token)"),
+          flush=True)
     ThreadingHTTPServer(("0.0.0.0", port), H).serve_forever()
