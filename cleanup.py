@@ -224,6 +224,67 @@ def own_address(addr):
     return addr in {a["email"].lower() for a in ACC.list()}
 
 
+PROTECT_KEY = re.compile(r"[^@\s,;]*@[^@\s,;]+\.[^@\s,;]+")
+
+
+def parse_protect_keys(text):
+    """A pasted list of senders -> (keys, rejected). One or more per line, separated by spaces or semicolons; on a
+    CSV line only the first column counts (so a keep-list export with notes and dates pastes as it is). An address
+    stays an address, "@example.com" a domain, and a bare "example.com" becomes "@example.com"."""
+    keys, rejected = [], []
+    for line in str(text or "").splitlines():
+        first = line.split(",", 1)[0]
+        for tok in re.split(r"[\s;]+", first.strip()):
+            tok = tok.strip().strip('"\'<>').lower()
+            if not tok:
+                continue
+            key = tok if "@" in tok else "@" + tok
+            if PROTECT_KEY.fullmatch(key) and len(key) <= 254:
+                if key not in keys:
+                    keys.append(key)
+            elif tok not in rejected:
+                rejected.append(tok[:60])
+    return keys, rejected
+
+
+def _protect_in_gmail(keys):
+    """For a bulk protect: per account, one read of its filters, then drop send-to-Trash filters for these senders and
+    add "never send to Spam" for each. Runs in the background; the protection itself is already in the database."""
+    never_spam = {"removeLabelIds": ["SPAM"]}
+    for acc in ACC.list():
+        done = cleared = 0
+        try:
+            for f in gmail(acc["id"], "/settings/filters").get("filter", []):
+                frm = (f.get("criteria") or {}).get("from")
+                if "TRASH" in ((f.get("action") or {}).get("addLabelIds") or []) and any(sender_matches(frm, k) for k in keys):
+                    gmail(acc["id"], f"/settings/filters/{f['id']}", "DELETE")
+                    cleared += 1
+            for k in keys:
+                _filter(acc["id"], k, never_spam)
+                done += 1
+            log("cleanup", f"bulk protect: {done} never-spam filter(s), {cleared} send-to-Trash filter(s) removed", acc["email"])
+        except Exception as e:  # noqa: BLE001 - protection in Zero Sum still applies
+            log("cleanup-error", f"bulk protect stopped after {done} of {len(keys)}: {e}"[:300], acc["email"])
+
+
+def protect_many(d):
+    """Protect a pasted list of senders at once (e.g. a keep-list carried over from another tool). They are protected
+    here immediately, so no cleanup action can touch them; the Gmail filters follow in the background."""
+    keys, rejected = parse_protect_keys(d.get("text"))
+    if not keys:
+        raise ValueError("no addresses or domains found" + (f" (could not read: {', '.join(rejected[:5])})" if rejected else ""))
+    if len(keys) > 2000:
+        raise ValueError("at most 2000 senders at a time")
+    with db() as c:
+        with c.cursor() as cur:
+            cur.executemany("INSERT INTO unified.protected (key) VALUES (%s) ON CONFLICT DO NOTHING", [(k,) for k in keys])
+    for k in keys:
+        stop_automation(k)
+    threading.Thread(target=_protect_in_gmail, args=(keys,), daemon=True).start()
+    log("cleanup", f"bulk protect: {len(keys)} sender(s)")
+    return {"ok": True, "protected": len(keys), "rejected": rejected[:50]}
+
+
 def protected_list(q=None):
     with db() as c:
         return [{"key": k, "at": a.isoformat()} for k, a in c.execute(

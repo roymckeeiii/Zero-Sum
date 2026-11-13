@@ -60,6 +60,7 @@ POST = {
     "/api/sender": cleanup.sender_action,
     "/api/quarantine": cleanup.quarantine_action,
     "/api/undo": cleanup.undo_action,
+    "/api/protect/bulk": cleanup.protect_many,
     "/api/ai/suggest": ai.suggest,
     "/api/ai/analyze": ai.analyze,
     "/api/ai/apply": cleanup.apply_plan,
