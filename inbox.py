@@ -68,18 +68,24 @@ def decode_page(page):
     return d
 
 
+def recipients(to_header):
+    """Display form of a To header: names (or addresses), comma-separated, at most 3 then "+N"."""
+    people = [n or a for n, a in email.utils.getaddresses([to_header or ""]) if n or a]
+    return ", ".join(people[:3]) + (f" +{len(people) - 3}" if len(people) > 3 else "")
+
+
 def meta(account, mid):
     k = (account["id"], mid)
     t, item = _meta.get(k, (0, None))
     if item and time.time() - t < 120:
         return item
-    m = gmail(account["id"], f"/messages/{mid}?format=metadata&metadataHeaders=From&metadataHeaders=Subject")
+    m = gmail(account["id"], f"/messages/{mid}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject")
     hs = m.get("payload", {}).get("headers", [])
     name, addr = email.utils.parseaddr(header(hs, "from"))
     lab = labels(account["id"])
     ids = m.get("labelIds", [])
     item = {"account": account["id"], "email": account["email"], "id": m["id"], "threadId": m["threadId"],
-            "from": name or addr, "fromAddr": addr, "subject": header(hs, "subject") or "(no subject)",
+            "from": name or addr, "fromAddr": addr, "to": recipients(header(hs, "to")), "subject": header(hs, "subject") or "(no subject)",
             "snippet": m.get("snippet", ""), "ts": int(m.get("internalDate", 0)) // 1000,
             "unread": "UNREAD" in ids, "starred": "STARRED" in ids, "folder": folder_of(ids),
             "labels": sorted(lab[x] for x in ids if x in lab)}

@@ -45,7 +45,8 @@ class FakeGmail:
         mid = base.rsplit("/", 1)[1]
         r = next(r for r in self.messages[acc] if r[0] == mid)
         return {"id": r[0], "threadId": "t" + r[0], "internalDate": str(r[1] * 1000), "labelIds": r[2], "snippet": "",
-                "payload": {"headers": [{"name": "From", "value": "x@y.com"}, {"name": "Subject", "value": mid}]}}
+                "payload": {"headers": [{"name": "From", "value": "x@y.com"}, {"name": "Subject", "value": mid},
+                                        {"name": "To", "value": f"Pat Doe <pat@z.com>, ops@z.com, {mid}@z.com"}]}}
 
 
 class Search(unittest.TestCase):
@@ -176,6 +177,13 @@ class Search(unittest.TestCase):
         self.assertTrue(all(q["q"] == ["from:shop label:receipts-2026 is:unread"] for _, q in fake.calls))
         with self.assertRaises(ValueError):  # app.py turns ValueError into a 400
             self.run_search(fake, scope="label", label="")
+
+    def test_results_carry_recipients_for_sent_mail(self):
+        fake = FakeGmail({"A": [("a1", 300, ["SENT"])], "B": []})
+        (it,) = self.run_search(fake, scope="sent")["items"]
+        self.assertEqual((it["folder"], it["to"]), ("Sent", "Pat Doe, ops@z.com, a1@z.com"))
+        self.assertEqual(inbox.recipients("a@x.com, b@x.com, C <c@x.com>, d@x.com, e@x.com"), "a@x.com, b@x.com, C +2")
+        self.assertEqual(inbox.recipients(""), "")
 
     def test_bad_page_token_is_refused(self):
         for bad in ("!!!", inbox.encode_page({"A": "1"})[:-3] + "xyz", "WzFd"):  # WzFd = base64 of a JSON list

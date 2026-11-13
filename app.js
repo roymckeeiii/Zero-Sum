@@ -57,7 +57,7 @@ async function loadAccounts() {
       <button id="refresh">Refresh (r)</button></div>`;
   if (!S.accounts.length) $("#accounts").innerHTML += `<div class="err">No linked accounts yet: add them in Inbox Zero.</div>`;
   $("#q").value = S.q || ""; $("#unread").checked = !!S.unreadOnly;
-  $("#scope").value = S.scope || "inbox"; $("#label").value = S.label || ""; $("#label").hidden = S.scope !== "label";
+  $("#scope").value = scopeOf(); $("#label").value = S.label || ""; $("#label").hidden = S.scope !== "label";
   $("#scope").onchange = (e) => { S.scope = e.target.value; S.limit = 30; $("#label").hidden = S.scope !== "label"; if (S.scope !== "label" || S.label) loadList(); };
   $("#label").oninput = (e) => { S.label = e.target.value.trim(); clearTimeout(t); t = setTimeout(() => S.label && loadList(), 400); };
   let t;
@@ -66,9 +66,12 @@ async function loadAccounts() {
   $("#refresh").onclick = () => { loadAccounts(); loadList(true); };
 }
 
+// The list view is the inbox; typing a search searches All mail unless a scope was picked (RFC-001853 spec item 1).
+const scopeOf = () => S.scope || (S.q ? "all" : "inbox");
 // scope "inbox" keeps the original paging (a bigger limit); every other scope pages with per-account tokens (`next`)
 async function loadList(keepSel, page) {
-  const scope = S.scope || "inbox";
+  const scope = scopeOf();
+  if ($("#scope")) $("#scope").value = scope;
   const p = new URLSearchParams({ limit: S.limit, account: S.account, q: S.q || "", unread: S.unreadOnly ? "1" : "0", scope });
   if (scope === "label") p.set("label", S.label || "");
   if (page) p.set("page", page);
@@ -93,13 +96,13 @@ function row(it, i) {
     it.labels.map((l) => `<span class="chip">${esc(l)}</span>`).join("");
   return `<div class="row ${it.unread ? "unread" : ""} ${i === S.sel ? "sel" : ""}" data-i="${i}">
     <span class="dot" style="background:${slotOf(it.account)}"></span>
-    <span class="from" title="${esc(it.fromAddr)}">${it.starred ? '<span class="star" title="Starred">★</span> ' : ""}${it.protected ? '<span class="chip prot" title="Protected sender">protected</span>' : ""}${esc(it.from)}</span><span class="when">${when(it.ts)}</span>
+    <span class="from" title="${esc(it.folder === "Sent" && it.to ? `To: ${it.to}` : it.fromAddr)}">${it.starred ? '<span class="star" title="Starred">★</span> ' : ""}${it.protected ? '<span class="chip prot" title="Protected sender">protected</span>' : ""}${it.folder === "Sent" && it.to ? `To: ${esc(it.to)}` : esc(it.from)}</span><span class="when">${when(it.ts)}</span>
     <span class="acts"><button data-act="archive" title="Archive (e)">Archive</button>
       <button data-act="${it.starred ? "unstar" : "star"}" title="Star (s)">${it.starred ? "Unstar" : "Star"}</button>
       <button data-act="${it.unread ? "read" : "unread"}">${it.unread ? "Read" : "Unread"}</button>
       <button data-act="delete" title="Move to Trash (#)">Delete</button></span>
     <span class="subj">${esc(it.subject)}</span><span class="snip">${esc(it.snippet)}</span>
-    <span class="chips">${S.account ? "" : acctChip(it.account, it.email)}${(S.scope || "inbox") !== "inbox" && it.folder ? `<span class="chip folder" title="Folder">${esc(it.folder)}</span>` : ""}${chips}</span></div>`;
+    <span class="chips">${S.account ? "" : acctChip(it.account, it.email)}${scopeOf() !== "inbox" && it.folder ? `<span class="chip folder" title="Folder">${esc(it.folder)}</span>` : ""}${chips}</span></div>`;
 }
 
 function redraw() {
@@ -108,7 +111,7 @@ function redraw() {
     (S.more ? `<button id="more">Load more</button>` : "");
   const more = $("#more");
   if (more) more.onclick = () => {
-    if ((S.scope || "inbox") === "inbox") { S.limit = Math.min(S.limit * 2, 200); loadList(true); } else loadList(true, S.next);
+    if (scopeOf() === "inbox") { S.limit = Math.min(S.limit * 2, 200); loadList(true); } else loadList(true, S.next);
   };
 }
 
