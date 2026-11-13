@@ -244,6 +244,18 @@ def keep_query(words):
     return f"subject:({' OR '.join(out)})" if out else None
 
 
+def subject_has(words, subject):
+    """Does the subject contain one of the words or phrases as whole words? This is what the applied Gmail search
+    `subject:(word)` matches, so the previews use it too. A plain substring test showed "Reorder now" as kept by
+    "order" (green in the preview), and Gmail then gave it the destructive action."""
+    sub = str(subject or "").lower()
+    for w in words or []:
+        w = re.sub(r"\s+", " ", str(w).strip().lower())
+        if w and re.search(r"(?<![^\W_])" + re.escape(w).replace(r"\ ", r"\s+") + r"(?![^\W_])", sub, flags=re.U):
+            return True
+    return False
+
+
 def _filter(acc_id, addr, action, remove=False, keep=None):
     """Create (or with remove=True delete) the Gmail filter `from:addr` -> action. With `keep` (a keep_query), mail whose
     subject matches is left out of the filter."""
@@ -630,7 +642,19 @@ def _labels_for(action, lid):
             "delete": (["TRASH"], [])}[action]
 
 
-def _ai_sort_ids(addr, rule, action, pairs):
+_SORT_RUNS, _SORT_LOCK = {}, threading.Lock()   # addr -> the background pass that owns it (this process)
+
+
+def start_ai_sort(addr, rule, action):
+    """Start the background pass over a sender's existing mail. A pass already running for the sender stops at its
+    next batch: there is never more than one, however often the plan is re-applied."""
+    token = object()
+    with _SORT_LOCK:
+        _SORT_RUNS[addr] = token
+    threading.Thread(target=_ai_sort_existing, args=(addr, rule, action, token), daemon=True).start()
+
+
+def _ai_sort_ids(addr, rule, action, pairs, token=None):
     """Classify (account, message id) pairs by the rule in batches and apply `action` to the ones not kept."""
     import ai
     from inbox import meta
@@ -641,6 +665,8 @@ def _ai_sort_ids(addr, rule, action, pairs):
             row = c.execute("SELECT rule, action FROM unified.ai_sort WHERE addr = %s", (addr,)).fetchone()
         if not row or tuple(row) != (rule, action):
             raise RuntimeError("stopped: the AI sort was removed or changed")
+        if token is not None and _SORT_RUNS.get(addr) is not token:
+            raise RuntimeError("stopped: a newer pass took over")
         if action != "keep" and is_protected(addr):
             raise PermissionError(f"{addr} is protected: AI sort paused")
         with db() as c:  # local history first: no Gmail call for mail the collector already has
@@ -675,7 +701,7 @@ def _ai_sort_ids(addr, rule, action, pairs):
     return kept
 
 
-def _ai_sort_existing(addr, rule, action):
+def _ai_sort_existing(addr, rule, action, token=None):
     try:
         pairs = []
         for a in ACC.list():
@@ -684,18 +710,43 @@ def _ai_sort_existing(addr, rule, action):
         with db() as c:
             c.execute("UPDATE unified.ai_sort SET total = %s, done = 0, kept = 0, status = 'sorting' WHERE addr = %s",
                       (len(pairs), addr))
-        kept = _ai_sort_ids(addr, rule, action, pairs)
+        kept = _ai_sort_ids(addr, rule, action, pairs, token)
         with db() as c:
             c.execute("UPDATE unified.ai_sort SET status = 'active', last_ts = now(), updated_at = now() WHERE addr = %s", (addr,))
         log("ai-sort", f"{addr}: sorted {len(pairs)} existing, kept {kept}, rest {action}")
     except Exception as e:  # noqa: BLE001
-        with db() as c:
-            c.execute("UPDATE unified.ai_sort SET status = %s, updated_at = now() WHERE addr = %s", (f"error: {e}"[:200], addr))
+        if "a newer pass took over" not in str(e):   # the newer pass owns the row's status now
+            with db() as c:
+                c.execute("UPDATE unified.ai_sort SET status = %s, updated_at = now() WHERE addr = %s", (f"error: {e}"[:200], addr))
         log("ai-sort-error", f"{addr}: {e}"[:500])
+    finally:
+        with _SORT_LOCK:
+            if token is not None and _SORT_RUNS.get(addr) is token:
+                del _SORT_RUNS[addr]
+
+
+def resume_ai_sorts():
+    """Pick up passes that died: the container restarted mid-pass (status still 'sorting', no pass running here), or
+    the daily AI limit stopped one (retried from the next UTC day). Before, such a sender stayed half-sorted and its
+    new mail was never sorted either, because only 'active' sorts are served."""
+    with db() as c:
+        rows = c.execute("SELECT addr, rule, action FROM unified.ai_sort WHERE "
+                         "(status = 'sorting' AND updated_at < now() - interval '10 minutes') OR "
+                         "(status LIKE 'error: daily AI limit%%' AND updated_at::date < (now() AT TIME ZONE 'utc')::date)"
+                         ).fetchall()
+    for addr, rule, action in rows:
+        if addr in _SORT_RUNS or (action != "keep" and (is_protected(addr) or own_address(addr))):
+            continue
+        log("ai-sort", f"{addr}: resuming the interrupted sort")
+        start_ai_sort(addr, rule, action)
 
 
 def ai_sort_new():
     """Every collector run: judge new inbox mail from AI-sorted senders by their rule."""
+    try:
+        resume_ai_sorts()
+    except Exception as e:  # noqa: BLE001
+        log("ai-sort-error", f"resume: {e}"[:500])
     with db() as c:
         rows = c.execute("SELECT addr, rule, action, extract(epoch from last_ts) FROM unified.ai_sort "
                          "WHERE status = 'active'").fetchall()
@@ -764,7 +815,7 @@ def apply_plan(d):
                       "SET rule = EXCLUDED.rule, action = EXCLUDED.action, status = 'sorting', done = 0, total = 0, kept = 0",
                       (addr, rule, default))
             c.execute("UPDATE unified.ai_plan SET status = 'applied', updated_at = now() WHERE addr = %s", (addr,))
-        threading.Thread(target=_ai_sort_existing, args=(addr, rule, default), daemon=True).start()
+        start_ai_sort(addr, rule, default)
         log("ai-cleanup", f"apply {addr}: AI sort, rest {default}: {rule}")
         return {"results": [{"email": "all accounts", "ok": True,
                              "note": f"AI sort started: existing mail is being sorted in the background (rest: {default}); "

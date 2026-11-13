@@ -89,7 +89,8 @@ def suggest(d):
     words = [re.sub(r"[^\w\s'&$%!-]", " ", str(w), flags=re.U).strip()[:40] for w in (ans.get("keep_words") or [])][:6]
     words = [w for w in words if w] if action not in ("keep", "protect") else []
     reason = re.sub(r"\s+", " ", str(ans.get("reason") or ""))[:300]
-    kept = [{"subject": s, "count": n, "kept": any(w.lower() in s.lower() for w in words)} for s, n in subjects]
+    from cleanup import subject_has
+    kept = [{"subject": s, "count": n, "kept": subject_has(words, s)} for s, n in subjects]
     return {"addr": addr, "action": action, "keep_words": words, "reason": reason, "model": MODEL,
             "sampled": sampled, "subjects": kept}
 

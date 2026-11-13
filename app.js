@@ -254,7 +254,7 @@ function askDialog(a, s, ai) {
   $("#dlg-ok").className = ["unsub_delete", "delete", "block", "spam"].includes(a) ? "danger" : "primary";
   const preview = () => {  // live: which sample subjects the typed keep words would keep
     const w = $("#dlg-keep").value.split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
-    d.querySelectorAll(".subjects li").forEach((li) => li.classList.toggle("kept", w.some((x) => li.textContent.toLowerCase().includes(x))));
+    d.querySelectorAll(".subjects li").forEach((li) => li.classList.toggle("kept", subjectHas(w, li.textContent)));
   };
   $("#dlg-keep").oninput = preview;
   d.showModal();
@@ -353,12 +353,23 @@ $("#c-protect-btn").onclick = async () => {
 };
 $("#c-collect").onclick = async () => { await api("/api/collect", {}).catch(() => {}); $("#c-status").textContent = "Collecting… refresh in a minute."; };
 
+/* Whole-word match, as the applied Gmail search subject:(word) does (cleanup.py subject_has): a substring test showed
+   "Reorder now" as kept by "order", and Gmail then gave it the destructive action. */
+function subjectHas(words, subject) {
+  const sub = String(subject || "").toLowerCase();
+  return (words || []).some((w) => {
+    w = String(w || "").trim().toLowerCase().replace(/\s+/g, " ");
+    if (!w) return false;
+    const body = w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "\\s+");
+    return new RegExp(`(?<![\\p{L}\\p{N}])${body}(?![\\p{L}\\p{N}])`, "u").test(sub);
+  });
+}
+
 /* ------------------------------------------------------------------ AI cleanup */
 const GACT = { keep: "Keep & star", archive: "Archive", quarantine: "Quarantine", delete: "Delete" };
 const gactSel = (v, attrs) => `<select ${attrs}>${Object.entries(GACT).map(([k, l]) => `<option value="${k}" ${k === v ? "selected" : ""}>${l}</option>`).join("")}</select>`;
 function classify(subject, plan) {  // first group whose words appear in the subject wins, else the default
-  const sub = subject.toLowerCase();
-  const gi = plan.groups.findIndex((g) => g.words.some((w) => w && sub.includes(w.toLowerCase())));
+  const gi = plan.groups.findIndex((g) => subjectHas(g.words, subject));
   return gi >= 0 ? { action: plan.groups[gi].action, text: `${plan.groups[gi].label || "group " + (gi + 1)} → ${GACT[plan.groups[gi].action]}` }
     : { action: plan.default, text: `other → ${GACT[plan.default]}` };
 }

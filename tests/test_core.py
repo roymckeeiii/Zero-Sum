@@ -251,3 +251,39 @@ class Collector(unittest.TestCase):
         new_pass = [limit for path, limit in seen if "after%3A" in path]
         self.assertEqual(new_pass, [cleanup.NEW_MAIL_MAX])
         self.assertGreaterEqual(cleanup.NEW_MAIL_MAX, 100000)
+
+
+class Previews(unittest.TestCase):
+    def test_preview_matches_whole_words_like_the_gmail_search(self):
+        for words, subject, expect in ((["order"], "Your order shipped", True), (["order"], "Reorder now", False),
+                                       (["order"], "Orders update", False), (["free shipping"], "Get FREE  Shipping", True),
+                                       (["50%"], "Save 50% now", True), (["order"], "pre-order: go", True),
+                                       ([""], "anything", False), (["café"], "Le Café ouvre", True)):
+            self.assertEqual(cleanup.subject_has(words, subject), expect, (words, subject))
+
+    def test_the_browser_preview_uses_the_same_rule(self):
+        js = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app.js"), encoding="utf-8").read()
+        self.assertIn("function subjectHas(", js)
+        self.assertNotIn("toLowerCase().includes(x)", js)       # the old substring previews are gone
+        self.assertNotIn("sub.includes(w.toLowerCase())", js)
+
+
+class SortPasses(unittest.TestCase):
+    def test_a_newer_pass_stops_the_older_one_before_it_touches_mail(self):
+        fake = FakeDb()
+        fake.execute = lambda sql, params=None: type("R", (), {
+            "fetchall": staticmethod(lambda: []), "fetchone": staticmethod(lambda: ("keep news", "delete"))})()
+        old = (cleanup.db, cleanup.is_protected, cleanup._batch)
+        touched = []
+        cleanup.db, cleanup.is_protected = fake, (lambda addr, prot=None: False)
+        cleanup._batch = lambda *a, **k: touched.append(a)
+        mine, newer = object(), object()
+        cleanup._SORT_RUNS["a@x.com"] = newer
+        try:
+            with self.assertRaises(RuntimeError) as e:
+                cleanup._ai_sort_ids("a@x.com", "keep news", "delete", [({"id": "acc"}, "m1")], mine)
+            self.assertIn("newer pass", str(e.exception))
+            self.assertEqual(touched, [])
+        finally:
+            cleanup._SORT_RUNS.pop("a@x.com", None)
+            cleanup.db, cleanup.is_protected, cleanup._batch = old
