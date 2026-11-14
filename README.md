@@ -224,8 +224,14 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
   writes Inbox Zero's account table.
 - It calls the Gmail API directly, rate-limited per account (`GMAIL_UNITS_PER_SEC`, well under Google's per-user quota,
   which Inbox Zero shares).
-- It uses its own database role (`grants.sql`): read access to a few account columns and to `ExecutedRule`; write
-  access only to `Rule`, `Action`, `Newsletter` and its own `unified` schema.
+- It uses its own database role (`grants.sql`): read access to a few columns of `Account`, `EmailAccount` and
+  `ExecutedRule`; write access only to `Rule`, `Action`, `Newsletter` and its own `unified` schema.
+- The Inbox Zero tables, columns and enums it depends on are declared once, in `izdb.py`. `grants.sql` grants exactly
+  that list, the upstream check below compares exactly that list, and at start-up the app checks the live database
+  against it and logs each missing table, column or enum by name.
+- Health: `GET /healthz` says the process is up. `GET /healthz?deep=1` also connects to the database and checks the
+  schema contract, and answers 503 on a database failure or a schema mismatch: point an updater's roll-back check at
+  that one.
 - A collector stores message metadata (sender, subject, preview, date, read/inbox state, unsubscribe header) every 15
   minutes, back-filling the whole history gradually (to each account's first email, `BACKFILL_STEP` per account per run).
   The Cleanup, Analytics and AI features read from this local copy.
@@ -326,8 +332,8 @@ python3 tools/check_upstream.py              # supported version vs Inbox Zero's
 python3 tools/check_upstream.py v2.25.8 v2.30.0
 ```
 
-It compares only what Zero Sum depends on (the Prisma models and enums it uses, `utils/encryption.ts`, the
-environment variable names and the docker-compose services/endpoints). Exit 0 = nothing relevant changed: bump
+It compares only what Zero Sum depends on (the columns and enum values declared in `izdb.py`, not whole Prisma
+models, plus `utils/encryption.ts`, the environment variable names and the docker-compose services/endpoints). Exit 0 = nothing relevant changed: bump
 `inbox-zero.version`. Exit 1 = adapt Zero Sum first; the diff shows what changed.
 
 ## Development

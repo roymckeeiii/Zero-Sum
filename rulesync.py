@@ -14,14 +14,10 @@
 import hashlib, json, threading
 
 from core import ACC, MASTER, db, label_id, labels, log, new_id, setting
+from izdb import ACTION_FIELDS, ENUM, RULE_FIELDS  # the upstream columns this copies: declared in izdb.py
 
 MASTER_HINT = bool(MASTER)
 
-RULE_FIELDS = ["name", "instructions", "automate", "runOnThreads", "body", "from", "subject", "to", "enabled",
-               "conditionalOperator", "systemType", "promptText"]
-ENUM = {"conditionalOperator": "LogicalOperator", "systemType": "SystemType", "type": "ActionType"}
-ACTION_FIELDS = ["type", "label", "subject", "content", "to", "cc", "bcc", "url", "delayInMinutes", "folderName",
-                 "folderId"]
 LOCK = threading.Lock()
 
 

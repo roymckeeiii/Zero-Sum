@@ -19,7 +19,7 @@ RULES_EVERY_MIN (only when auto sync is on in the Rules tab).
 import json, os, sys, threading, time, traceback, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-import access, ai, analytics, cleanup, core, inbox, rulesync
+import access, ai, analytics, cleanup, core, inbox, izdb, rulesync
 from core import init_schema, log, set_setting
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -83,6 +83,43 @@ POST = {
 }
 
 
+_deep = {"at": 0.0, "result": None, "lock": threading.Lock()}
+
+
+def deep_health():
+    """(status, body) for /healthz?deep=1: 200 only when the database answers and has every Inbox Zero table, column
+    and enum this app depends on (izdb.py). Needs no sign-in, so the answer is cached for 30 seconds and says only
+    how many problems there are; what they are is in the log."""
+    with _deep["lock"]:
+        if _deep["result"] is None or time.time() - _deep["at"] > 30:
+            try:
+                found = izdb.check()
+                for p in found:
+                    print(f"[schema] {p}", flush=True)
+                res = (200, {"ok": True}) if not found else (503, {"ok": False, "error": "schema", "problems": len(found)})
+            except Exception as e:  # noqa: BLE001
+                print(f"[health] database check failed: {repr(e)[:300]}", flush=True)
+                res = (503, {"ok": False, "error": "database"})
+            _deep.update(at=time.time(), result=res)
+        return _deep["result"]
+
+
+def check_upstream_schema():
+    """At start: say exactly which upstream tables, columns or enums are missing. The app keeps serving (most of it
+    still works, and plain /healthz stays up); /healthz?deep=1 is what fails, and what an updater should poll."""
+    try:
+        found = izdb.check()
+    except Exception as e:  # noqa: BLE001
+        log("schema-error", f"could not check the Inbox Zero schema: {e}"[:500])
+        return None
+    for p in found:
+        log("schema-error", f"Inbox Zero schema mismatch: {p}")
+    if found:
+        log("schema-error", f"{len(found)} thing(s) Zero Sum depends on are missing in the Inbox Zero database: is this "
+                            "Inbox Zero version supported (inbox-zero.version), and was init-db run again after upgrading?")
+    return found
+
+
 class H(BaseHTTPRequestHandler):
     server_version = "zero-sum"
 
@@ -125,7 +162,9 @@ class H(BaseHTTPRequestHandler):
 
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
-        if u.path == "/healthz":
+        if u.path == "/healthz":   # plain: the process is up. ?deep=1: the database and the upstream schema too
+            if urllib.parse.parse_qs(u.query).get("deep", ["0"])[0] == "1":
+                return self.send(*deep_health())
             return self.send(200, {"ok": True})
         if not self.allowed():
             return
@@ -226,6 +265,7 @@ if __name__ == "__main__":
     init_schema()
     if not ALLOWED:
         raise SystemExit("ALLOWED_EMAILS is empty: set it to the address(es) your auth proxy lets in")
+    check_upstream_schema()
     every(60 * int(os.environ.get("COLLECT_EVERY_MIN", "15")), cleanup.collect_all, 20)
     every(60 * int(os.environ.get("COLLECT_EVERY_MIN", "15")), cleanup.ai_sort_new, 120)
     every(60 * int(os.environ.get("COLLECT_EVERY_MIN", "15")), ai.background_plan, 300)
