@@ -3,8 +3,10 @@
 - Rules are authored in Inbox Zero itself on the master account (MASTER_EMAIL); this only copies them.
 - unified.rule_map records which target rule is the copy of which master rule, with a content hash: a copy is only
   rewritten when the master changed, and only copies made here are ever updated or deleted. A target rule with the
-  same system type or name that existed before the first sync is adopted (overwritten with the master's version).
+  same system type or name that existed before the first sync is adopted (overwritten with the master's version);
+  what it was before is saved first, whole, in unified.rule_backup.
 - Gmail label ids differ per account: LABEL actions are matched by label name and the label is created when missing.
+  Labels are looked up (a Gmail call) before the database transaction on Inbox Zero's tables is opened, never inside.
 - Learned sender patterns (Rule.groupId) and deprecated category filters are per-account history: not copied.
 - Opt-in: a master rule is copied only to the accounts ticked for it (unified.rule_include); untick and its copy
   there is deleted. Nothing is shared by default: each address usually gets different mail.
@@ -106,7 +108,18 @@ def set_include(d):
     return {"ok": True}
 
 
-def _write_rule(c, target_id, account_id, rule, actions, insert):
+def _backup_rule(c, target_id, account_id, reason):
+    """Save a target rule and its actions, every column as it is now, before it is overwritten."""
+    c.execute('INSERT INTO unified.rule_backup (account_id, rule_id, reason, rule, actions) '
+              'SELECT r."emailAccountId", r.id, %s, to_jsonb(r), '
+              '(SELECT coalesce(jsonb_agg(to_jsonb(a) ORDER BY a."createdAt", a.id), \'[]\'::jsonb) FROM "Action" a '
+              'WHERE a."ruleId" = r.id) FROM "Rule" r WHERE r.id = %s AND r."emailAccountId" = %s',
+              (reason, target_id, account_id))
+
+
+def _write_rule(c, target_id, account_id, rule, actions, insert, lids):
+    """Write one copy. `lids` maps label names to this account's Gmail label ids, resolved by the caller beforehand:
+    no Gmail call happens while the transaction is open."""
     cols = RULE_FIELDS
     vals = [rule[f] for f in cols]
     casts = [f'%s::"{ENUM[f]}"' if f in ENUM else "%s" for f in cols]
@@ -120,7 +133,7 @@ def _write_rule(c, target_id, account_id, rule, actions, insert):
     c.execute('DELETE FROM "Action" WHERE "ruleId" = %s', (target_id,))
     acasts = ", ".join(f'%s::"{ENUM[f]}"' if f in ENUM else "%s" for f in ACTION_FIELDS)
     for a in actions:
-        lid = label_id(account_id, a["label"]) if a["type"] == "LABEL" and a.get("label") else None
+        lid = lids[a["label"]] if a["type"] == "LABEL" and a.get("label") else None
         c.execute(f'INSERT INTO "Action" (id, "updatedAt", "ruleId", "labelId", {", ".join(q(f) for f in ACTION_FIELDS)}) '
                   f"VALUES (%s, now(), %s, %s, {acasts})", [new_id(), target_id, lid, *[a[f] for f in ACTION_FIELDS]])
 
@@ -145,56 +158,70 @@ def sync(apply=True, only_account=None):
 
 
 def _sync_account(master, acc, mrules, incl, apply):
-    ops = []
-    with db() as c:
+    ops, writes, deletes = [], [], []
+    with db() as c:  # read only
         trules = load_rules(c, acc["id"])
         rmap = {m: (t, h) for m, t, h in c.execute(
             "SELECT master_rule_id, target_rule_id, hash FROM unified.rule_map WHERE account_id = %s",
             (acc["id"],)).fetchall()}
-        mapped_targets = {t for t, _ in rmap.values()}
-        for mid, r in mrules.items():
-            if (mid, acc["id"]) not in incl:
+    mapped_targets = {t for t, _ in rmap.values()}
+    for mid, r in mrules.items():
+        if (mid, acc["id"]) not in incl:
+            continue
+        actions = master_actions(master["id"], r)
+        h = digest(r, actions)
+        cur = rmap.get(mid)
+        if cur and cur[0] in trules:
+            if cur[1] == h:
                 continue
-            actions = master_actions(master["id"], r)
-            h = digest(r, actions)
-            cur = rmap.get(mid)
-            if cur and cur[0] in trules:
-                if cur[1] == h:
-                    continue
-                op, target = "update", cur[0]
-            else:
-                # adopt a pre-existing rule with the same system type, else the same name; otherwise create
-                cand = [t for t in trules.values() if t["id"] not in mapped_targets and (
-                    (r["systemType"] and t["systemType"] == r["systemType"]) or t["name"] == r["name"])]
-                cand.sort(key=lambda t: t["systemType"] != r["systemType"])
-                op, target = ("adopt", cand[0]["id"]) if cand else ("create", new_id())
-                clash = [t for t in trules.values() if t["name"] == r["name"] and t["id"] != target]
-                if clash:
-                    ops.append({"op": "error", "account": acc["email"], "rule": r["name"],
-                                "detail": "another rule in this account already has this name; rename one of them"})
-                    continue
-            ops.append({"op": op, "account": acc["email"], "rule": r["name"],
-                        "detail": ", ".join(a["type"] + (f" {a['label']}" if a.get("label") else "") for a in actions)})
-            if apply:
-                _write_rule(c, target, acc["id"], r, actions, insert=(op == "create"))
-                c.execute("INSERT INTO unified.rule_map VALUES (%s, %s, %s, %s, now()) ON CONFLICT (master_rule_id, "
-                          "account_id) DO UPDATE SET target_rule_id = EXCLUDED.target_rule_id, hash = EXCLUDED.hash, "
-                          "synced_at = now()", (mid, acc["id"], target, h))
-                mapped_targets.add(target)
-        # copies whose master rule is gone or is no longer ticked for this account
-        for mid, (target, _) in rmap.items():
-            if mid in mrules and (mid, acc["id"]) in incl:
+            op, target = "update", cur[0]
+        else:
+            # adopt a pre-existing rule with the same system type, else the same name; otherwise create
+            cand = [t for t in trules.values() if t["id"] not in mapped_targets and (
+                (r["systemType"] and t["systemType"] == r["systemType"]) or t["name"] == r["name"])]
+            cand.sort(key=lambda t: t["systemType"] != r["systemType"])
+            op, target = ("adopt", cand[0]["id"]) if cand else ("create", new_id())
+            clash = [t for t in trules.values() if t["name"] == r["name"] and t["id"] != target]
+            if clash:
+                ops.append({"op": "error", "account": acc["email"], "rule": r["name"],
+                            "detail": "another rule in this account already has this name; rename one of them"})
                 continue
-            name = trules.get(target, {}).get("name", target)
-            ops.append({"op": "delete", "account": acc["email"], "rule": name,
-                        "detail": "master rule removed" if mid not in mrules else "no longer shared with this account"})
-            if apply:
-                c.execute('DELETE FROM "Rule" WHERE id = %s AND "emailAccountId" = %s', (target, acc["id"]))
-                c.execute("DELETE FROM unified.rule_map WHERE master_rule_id = %s AND account_id = %s", (mid, acc["id"]))
-        if apply:
-            c.commit()
-    if apply:
-        for o in ops:
-            if o["op"] != "error":
-                log("rules", f"{o['op']} {o['rule']}", acc["email"])
+        ops.append({"op": op, "account": acc["email"], "rule": r["name"],
+                    "detail": ", ".join(a["type"] + (f" {a['label']}" if a.get("label") else "") for a in actions)})
+        writes.append((op, mid, target, r, actions, h))
+        mapped_targets.add(target)
+    # copies whose master rule is gone or is no longer ticked for this account
+    for mid, (target, _) in rmap.items():
+        if mid in mrules and (mid, acc["id"]) in incl:
+            continue
+        name = trules.get(target, {}).get("name", target)
+        ops.append({"op": "delete", "account": acc["email"], "rule": name,
+                    "detail": "master rule removed" if mid not in mrules else "no longer shared with this account"})
+        deletes.append((mid, target))
+    if not apply or not (writes or deletes):
+        return ops
+    # Gmail first, with no transaction open: label ids for every LABEL action about to be written (created if missing)
+    lids = {}
+    for _, _, _, _, actions, _ in writes:
+        for a in actions:
+            if a["type"] == "LABEL" and a.get("label") and a["label"] not in lids:
+                lids[a["label"]] = label_id(acc["id"], a["label"])
+    with db() as c:  # then one short transaction on Inbox Zero's tables
+        for op, mid, target, r, actions, h in writes:
+            if op == "adopt":  # a rule this app did not make is about to be overwritten: keep what it was
+                _backup_rule(c, target, acc["id"], f"adopted as a copy of master rule {r['name']}"[:200])
+            _write_rule(c, target, acc["id"], r, actions, insert=(op == "create"), lids=lids)
+            c.execute("INSERT INTO unified.rule_map VALUES (%s, %s, %s, %s, now()) ON CONFLICT (master_rule_id, "
+                      "account_id) DO UPDATE SET target_rule_id = EXCLUDED.target_rule_id, hash = EXCLUDED.hash, "
+                      "synced_at = now()", (mid, acc["id"], target, h))
+        for mid, target in deletes:
+            c.execute('DELETE FROM "Rule" WHERE id = %s AND "emailAccountId" = %s', (target, acc["id"]))
+            c.execute("DELETE FROM unified.rule_map WHERE master_rule_id = %s AND account_id = %s", (mid, acc["id"]))
+        c.execute("DELETE FROM unified.rule_backup WHERE id NOT IN "
+                  "(SELECT id FROM unified.rule_backup ORDER BY id DESC LIMIT 500)")
+        c.commit()
+    for o in ops:
+        if o["op"] != "error":
+            log("rules", f"{o['op']} {o['rule']}" + (" (its previous version is saved in unified.rule_backup)"
+                                                     if o["op"] == "adopt" else ""), acc["email"])
     return ops

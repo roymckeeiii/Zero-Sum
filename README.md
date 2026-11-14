@@ -240,7 +240,9 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
   instructions, and the answer is only accepted as one of the fixed actions, cleaned keep words, or exactly one
   verdict per numbered email.
 - Rule sync records which copy belongs to which master rule (with a content hash), so it only ever updates or deletes
-  its own copies. Automatic sync is off until you turn it on in the Rules tab.
+  its own copies. A rule that already existed in a target account under the same name or system type is
+  adopted (overwritten with the master's version); what it was before, with its actions, is saved first in
+  `unified.rule_backup`. Automatic sync is off until you turn it on in the Rules tab.
 
 ## Requirements
 

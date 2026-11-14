@@ -19,7 +19,7 @@ class Db:
     Every statement is kept in .sql as (text, params)."""
 
     def __init__(self):
-        self.sql, self.handlers, self.filters, self.protected, self.commits = [], [], [], set(), 0
+        self.sql, self.handlers, self.filters, self.protected, self.commits, self.open = [], [], [], set(), 0, 0
 
     def on(self, text, rows):
         self.handlers.insert(0, (text, rows))
@@ -29,9 +29,11 @@ class Db:
         return self
 
     def __enter__(self):
+        self.open += 1   # how many `with db()` blocks (connections, transactions) are open right now
         return self
 
     def __exit__(self, *a):
+        self.open -= 1
         return False
 
     def cursor(self):
