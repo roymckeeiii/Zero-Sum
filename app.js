@@ -256,9 +256,16 @@ async function loadSenders() {
         <div class="grp"><select class="cleanup" data-i="${i}" ${s.protected ? "disabled title='Protected sender'" : ""}>
           <option value="">Clean up…</option>${MENU.map(([g, acts]) => `<optgroup label="${g}">${acts.map((a) =>
             `<option value="${a}" title="${esc(TIPS[a])}">${LABELS[a]}</option>`).join("")}</optgroup>`).join("")}</select></div></td></tr>`).join("") + "</tbody></table>";
-  $("#c-prot").innerHTML = d.protected.length ? "Protected: " + d.protected.map((k) => `<span class="chip prot">${esc(k)}
-    <button class="x" data-unprot="${esc(k)}" title="Unprotect">×</button></span>`).join("") : "";
+  /* a long protected list (a pasted keep-list is ~90 entries) folds to one line; it stays open across re-renders */
+  const chips = d.protected.map((k) => `<span class="chip prot">${esc(k)}
+    <button class="x" data-unprot="${esc(k)}" title="Unprotect">×</button></span>`).join("");
+  const n = d.protected.length, domains = d.protected.filter((k) => k.startsWith("@")).length;
+  const open = $("#c-prot details") ? $("#c-prot details").open : false;
+  $("#c-prot").innerHTML = !n ? "" : n <= PROT_INLINE ? "Protected: " + chips
+    : `<details${open ? " open" : ""}><summary>Protected: ${n} senders (${domains} domain${domains === 1 ? "" : "s"}, ${n - domains}
+      address${n - domains === 1 ? "" : "es"})</summary><div class="prot-list">${chips}</div></details>`;
 }
+const PROT_INLINE = 6;
 /* confirmation dialog, with "keep emails whose subject contains" for actions that clear mail */
 const KEEPABLE = ["unsub_archive", "unsub_quarantine", "unsub_delete", "autoarchive", "quarantine", "archive", "delete", "block", "spam"];
 function askDialog(a, s, ai) {
@@ -276,7 +283,7 @@ function askDialog(a, s, ai) {
   $("#dlg-ok").className = ["unsub_delete", "delete", "block", "spam"].includes(a) ? "danger" : "primary";
   const preview = () => {  // live: which sample subjects the typed keep words would keep
     const w = $("#dlg-keep").value.split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
-    d.querySelectorAll(".subjects li").forEach((li) => li.classList.toggle("kept", w.some((x) => li.textContent.toLowerCase().includes(x))));
+    d.querySelectorAll(".subjects li").forEach((li) => li.classList.toggle("kept", subjectHas(w, li.textContent)));
   };
   $("#dlg-keep").oninput = preview;
   d.showModal();
@@ -301,6 +308,36 @@ async function runSender(s, a, b, ai) {
   } catch (err) { $("#c-result").innerHTML = `<div class="err">${esc(err.message)}</div>`; }
   loadSenders();
 }
+/* Undo: every bulk change is recorded with the messages it touched (cleanup.py _record) */
+function undoWhat(a) {
+  if (a.add.includes("TRASH")) return "moved to Trash";
+  if (a.add.includes("SPAM")) return "reported as spam";
+  if (a.add.includes("STARRED")) return "starred";
+  if (a.remove.includes("STARRED")) return "unstarred";
+  if (a.add.includes("INBOX")) return "returned to the inbox";
+  if (a.add.length) return "moved to Quarantine";
+  return a.remove.includes("INBOX") ? "archived" : "changed";
+}
+async function loadUndo() {
+  let d;
+  try { d = await api("/api/undo"); } catch (e) { $("#c-undo").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
+  $("#c-undo").innerHTML = d.actions.length ? `<p>Each line is one bulk change of the last ${d.days} days. Undo puts those
+    messages back where they were. It does not remove filters: use Keep or Reset on the sender for that.</p><ul class="ops">` +
+    d.actions.map((a) => `<li><span class="note">${esc(a.at.slice(0, 16).replace("T", " "))}</span> ${esc(a.email)}:
+      <b>${fmt(a.count)}</b> ${undoWhat(a)}${a.note ? ` (${esc(a.note)})` : ""}
+      ${a.undone ? `<span class="note">undone</span>` : `<button data-undo="${Number(a.id)}">Undo</button>`}</li>`).join("") + "</ul>"
+    : "No bulk changes recorded yet.";
+}
+$("#c-undo").onclick = async (e) => {
+  const id = e.target.dataset && e.target.dataset.undo;
+  if (!id || !confirm("Put these messages back where they were?")) return;
+  e.target.disabled = true;
+  try { const r = await api("/api/undo", { id: Number(id) }); $("#c-result").innerHTML = `<div class="card">${fmt(r.restored)} messages restored.</div>`; }
+  catch (err) { $("#c-result").innerHTML = `<div class="err">${esc(err.message)}</div>`; }
+  loadUndo(); loadSenders();
+};
+$("#c-undo-box").ontoggle = () => { if ($("#c-undo-box").open) loadUndo(); };
+
 /* 20 most recent emails from a sender, as a list (shared by Cleanup and AI Cleanup) */
 const recentCache = {};
 async function recent(addr) {
@@ -367,6 +404,20 @@ $("#c-prot").onclick = async (e) => {
   await api("/api/sender", { addr: x.dataset.unprot, action: "unprotect" }).catch((err) => alert(err.message));
   loadSenders();
 };
+$("#c-protect-many").onclick = async () => {
+  const d = $("#dlg-protect");
+  $("#dlg-protect-text").value = "";
+  d.showModal();
+  const ok = await new Promise((res) => { d.onclose = () => res(d.returnValue === "ok"); });
+  const text = $("#dlg-protect-text").value;
+  if (!ok || !text.trim()) return;
+  try {
+    const r = await api("/api/protect/bulk", { text });
+    $("#c-result").innerHTML = `<div class="card">${fmt(r.protected)} sender(s) protected. Gmail "never spam" filters are being added in the background.` +
+      (r.rejected.length ? `<br><span class="note">Not read as an address or domain: ${r.rejected.map(esc).join(", ")}</span>` : "") + "</div>";
+  } catch (err) { $("#c-result").innerHTML = `<div class="err">${esc(err.message)}</div>`; }
+  loadSenders();
+};
 $("#c-protect-btn").onclick = async () => {
   const v = $("#c-protect").value.trim().toLowerCase();
   if (!v) return;
@@ -375,12 +426,23 @@ $("#c-protect-btn").onclick = async () => {
 };
 $("#c-collect").onclick = async () => { await api("/api/collect", {}).catch(() => {}); $("#c-status").textContent = "Collecting… refresh in a minute."; };
 
+/* Whole-word match, as the applied Gmail search subject:(word) does (cleanup.py subject_has): a substring test showed
+   "Reorder now" as kept by "order", and Gmail then gave it the destructive action. */
+function subjectHas(words, subject) {
+  const sub = String(subject || "").toLowerCase();
+  return (words || []).some((w) => {
+    w = String(w || "").trim().toLowerCase().replace(/\s+/g, " ");
+    if (!w) return false;
+    const body = w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "\\s+");
+    return new RegExp(`(?<![\\p{L}\\p{N}])${body}(?![\\p{L}\\p{N}])`, "u").test(sub);
+  });
+}
+
 /* ------------------------------------------------------------------ AI cleanup */
 const GACT = { keep: "Keep & star", archive: "Archive", quarantine: "Quarantine", delete: "Delete" };
 const gactSel = (v, attrs) => `<select ${attrs}>${Object.entries(GACT).map(([k, l]) => `<option value="${k}" ${k === v ? "selected" : ""}>${l}</option>`).join("")}</select>`;
 function classify(subject, plan) {  // first group whose words appear in the subject wins, else the default
-  const sub = subject.toLowerCase();
-  const gi = plan.groups.findIndex((g) => g.words.some((w) => w && sub.includes(w.toLowerCase())));
+  const gi = plan.groups.findIndex((g) => subjectHas(g.words, subject));
   return gi >= 0 ? { action: plan.groups[gi].action, text: `${plan.groups[gi].label || "group " + (gi + 1)} → ${GACT[plan.groups[gi].action]}` }
     : { action: plan.default, text: `other → ${GACT[plan.default]}` };
 }
