@@ -247,8 +247,11 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
 - Self-hosted Inbox Zero with Google accounts, run with its `docker-compose.yml` (its `db` service and
   `inbox-zero-network`). Tested with Inbox Zero **v2.25.8**; Zero Sum writes some Inbox Zero tables directly, so check
   [Upgrading Inbox Zero](#upgrading-inbox-zero) before upgrading.
-- An authenticating reverse proxy in front of it (Cloudflare Access, oauth2-proxy, ...). Zero Sum has **no login page**:
-  it trusts the e-mail address in `AUTH_EMAIL_HEADER` and only lets in `ALLOWED_EMAILS`. Never expose its port directly.
+- An authenticating reverse proxy in front of it. Zero Sum has **no login page**. Behind **Cloudflare Access** set
+  `CF_ACCESS_TEAM_DOMAIN` and `CF_ACCESS_AUD`: it then verifies the signed Access token on every request and only lets
+  in `ALLOWED_EMAILS`. Without those two it **refuses to start**. `ALLOW_HEADER_TRUST=1` overrides that for local
+  development (or a proxy that cannot sign, on a network only that proxy can reach): the app then believes the plain
+  `AUTH_EMAIL_HEADER`, which anything that can reach the port can send. Never expose its port directly.
 
 ## Install (Docker Compose)
 
@@ -281,8 +284,10 @@ All settings are environment variables; see [`.env.example`](.env.example).
 | `EMAIL_ENCRYPT_SECRET`, `EMAIL_ENCRYPT_SALT` | required | Inbox Zero's values |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | required | Inbox Zero's Google OAuth client |
 | `ALLOWED_EMAILS` | required | comma-separated addresses allowed in |
-| `AUTH_EMAIL_HEADER` | `Cf-Access-Authenticated-User-Email` | header your proxy sets (oauth2-proxy: `X-Forwarded-Email`) |
-| `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD` | unset | behind Cloudflare Access: your team domain (`<team>.cloudflareaccess.com`) and the Access application's AUD tag. With both set, Zero Sum verifies the signed `Cf-Access-Jwt-Assertion` token and takes the user from it; the plain e-mail header is ignored. Recommended: without it, anything that can reach the port can claim to be you. |
+| `ALLOW_HEADER_TRUST` | unset | `1` = start without Access token verification and believe `AUTH_EMAIL_HEADER`. Local development only. |
+| `AUTH_EMAIL_HEADER` | `Cf-Access-Authenticated-User-Email` | only with `ALLOW_HEADER_TRUST=1`: header your proxy sets (oauth2-proxy: `X-Forwarded-Email`) |
+| `LISTEN_HOST` | `127.0.0.1` (image: `0.0.0.0`) | address the server binds to; in a container the published port decides who can reach it |
+| `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD` | unset | behind Cloudflare Access: your team domain (`<team>.cloudflareaccess.com`) and the Access application's AUD tag. With both set, Zero Sum verifies the signed `Cf-Access-Jwt-Assertion` token and takes the user from it; the plain e-mail header is ignored. Required unless `ALLOW_HEADER_TRUST=1`. |
 | `MASTER_EMAIL` | empty (rule sync off) | account whose rules are copied to the others |
 | `INBOX_ZERO_URL` | empty | your Inbox Zero address, for links |
 | `ADMIN_DATABASE_URL` | | only for `init-db` |

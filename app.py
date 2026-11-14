@@ -9,9 +9,11 @@
 Tabs: Inbox (merged, read + triage), Cleanup (bulk unsubscribe / auto-archive / archive across accounts), Analytics,
 Rules (the master account's rules pushed to every account). Nothing here sends email.
 
-Configuration is environment only (see .env.example). It must sit behind an authenticating proxy (e.g. Cloudflare
-Access, oauth2-proxy) that sets AUTH_EMAIL_HEADER; the app requires that header to be in ALLOWED_EMAILS and a custom
-header on every POST (no cross-site form posts). Background jobs: collector every COLLECT_EVERY_MIN, rule sync every
+Configuration is environment only (see .env.example). It must sit behind an authenticating proxy. With Cloudflare
+Access (CF_ACCESS_TEAM_DOMAIN + CF_ACCESS_AUD) the signed Access token says who is signed in; without those it refuses
+to start, unless ALLOW_HEADER_TRUST=1 (local development) makes it believe the plain AUTH_EMAIL_HEADER. The user must
+be in ALLOWED_EMAILS, and every POST needs a custom header (no cross-site form posts). It listens on LISTEN_HOST
+(default 127.0.0.1; the container image sets 0.0.0.0, where the published port decides who can reach it). Background jobs: collector every COLLECT_EVERY_MIN, rule sync every
 RULES_EVERY_MIN (only when auto sync is on in the Rules tab).
 """
 import json, os, sys, threading, time, traceback, urllib.parse
@@ -23,6 +25,8 @@ from core import init_schema, log, set_setting
 HERE = os.path.dirname(os.path.abspath(__file__))
 ALLOWED = {e.strip().lower() for e in os.environ.get("ALLOWED_EMAILS", "").split(",") if e.strip()}
 AUTH_HEADER = os.environ.get("AUTH_EMAIL_HEADER", "Cf-Access-Authenticated-User-Email")
+HEADER_TRUST = os.environ.get("ALLOW_HEADER_TRUST", "").strip() == "1"  # local development only: see sign_in_mode
+LISTEN_HOST = os.environ.get("LISTEN_HOST", "").strip() or "127.0.0.1"
 INBOX_ZERO_URL = os.environ.get("INBOX_ZERO_URL", "").rstrip("/")
 STATIC = {"/": ("index.html", "text/html; charset=utf-8"), "/app.js": ("app.js", "text/javascript; charset=utf-8")}
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
@@ -99,8 +103,10 @@ class H(BaseHTTPRequestHandler):
     def allowed(self):
         if access.ENABLED:   # the signed Access token decides; the plain email header is not trusted
             user = access.email_from(self.headers.get("Cf-Access-Jwt-Assertion"))
-        else:
+        elif HEADER_TRUST:   # explicit override: whoever can reach the port can write this header
             user = (self.headers.get(AUTH_HEADER) or "").lower()
+        else:                # neither configured: nobody is signed in (the process refuses to start like this)
+            user = None
         if user and user in ALLOWED:
             return True
         self.send(403, {"error": "not allowed"})
@@ -165,6 +171,19 @@ def auto_rules():
             print(f"[rules] auto sync: {len(changed)} change(s)", flush=True)
 
 
+def sign_in_mode():
+    """How requests are authenticated, decided once at start: "token" (the verified Cloudflare Access token) or
+    "header" (the plain e-mail header, only with ALLOW_HEADER_TRUST=1). With neither, the app does not start: a
+    header alone proves nothing, since anything that can reach the port can send it."""
+    if access.ENABLED:
+        return "token"
+    if HEADER_TRUST:
+        return "header"
+    raise SystemExit("refusing to start: no verified sign-in is configured. Set CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD "
+                     "so the Cloudflare Access token is checked. For local development only, ALLOW_HEADER_TRUST=1 "
+                     f"makes the app believe the {AUTH_HEADER} header as sent by whoever can reach the port.")
+
+
 def init_db():
     """Run grants.sql as Inbox Zero's database owner and give the role the password in DATABASE_URL."""
     import psycopg
@@ -203,6 +222,7 @@ if __name__ == "__main__":
     if sys.argv[1:2] == ["adopt-filters"]:
         adopt_filters_cli(sys.argv[2:])
         raise SystemExit(0)
+    mode = sign_in_mode()
     init_schema()
     if not ALLOWED:
         raise SystemExit("ALLOWED_EMAILS is empty: set it to the address(es) your auth proxy lets in")
@@ -211,8 +231,8 @@ if __name__ == "__main__":
     every(60 * int(os.environ.get("COLLECT_EVERY_MIN", "15")), ai.background_plan, 300)
     every(60 * int(os.environ.get("RULES_EVERY_MIN", "10")), auto_rules, 60)
     port = int(os.environ.get("PORT", "8080"))
-    print(f"zero-sum on :{port}, allowed: {len(ALLOWED)} address(es); sign-in: "
-          + (f"Cloudflare Access token ({access.TEAM})" if access.ENABLED else
-             f"the {AUTH_HEADER} header as sent (set CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD to verify the Access token)"),
+    print(f"zero-sum on {LISTEN_HOST}:{port}, allowed: {len(ALLOWED)} address(es); sign-in: "
+          + (f"Cloudflare Access token ({access.TEAM})" if mode == "token" else
+             f"UNVERIFIED: the {AUTH_HEADER} header as sent (ALLOW_HEADER_TRUST=1; local development only)"),
           flush=True)
-    ThreadingHTTPServer(("0.0.0.0", port), H).serve_forever()
+    ThreadingHTTPServer((LISTEN_HOST, port), H).serve_forever()

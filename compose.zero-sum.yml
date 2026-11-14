@@ -8,7 +8,8 @@
 # Paths here resolve against the Inbox Zero checkout (compose's project directory), hence ZERO_SUM_DIR.
 # It reuses Inbox Zero's env file (EMAIL_ENCRYPT_SECRET / SALT, GOOGLE_CLIENT_ID / SECRET), then .env.zero-sum, which
 # wins where both set a value (DATABASE_URL). It joins Inbox Zero's network and talks to its `db` service. Put it behind an authenticating
-# reverse proxy (Cloudflare Access, oauth2-proxy, ...) that sets AUTH_EMAIL_HEADER: it serves no login page itself.
+# reverse proxy: it serves no login page itself. With Cloudflare Access set CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD in
+# .env.zero-sum; without them it refuses to start unless ALLOW_HEADER_TRUST=1 (see README "Requirements").
 services:
   zero-sum:
     build:
