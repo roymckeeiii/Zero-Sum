@@ -255,6 +255,10 @@ CREATE TABLE IF NOT EXISTS unified.protected (
 CREATE TABLE IF NOT EXISTS unified.action_log (
   id bigserial PRIMARY KEY, at timestamptz NOT NULL DEFAULT now(), account_id text NOT NULL, note text NOT NULL DEFAULT '',
   add_labels text[] NOT NULL, remove_labels text[] NOT NULL, ids text[] NOT NULL, undone_at timestamptz);
+CREATE TABLE IF NOT EXISTS unified.filter (
+  account_id text NOT NULL, filter_id text NOT NULL, addr text NOT NULL, kind text NOT NULL, source text NOT NULL DEFAULT '',
+  created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (account_id, filter_id));
+CREATE INDEX IF NOT EXISTS filter_addr ON unified.filter (addr);
 CREATE TABLE IF NOT EXISTS unified.collect_state (
   account_id text PRIMARY KEY, newest timestamptz, oldest timestamptz, backfill_done boolean NOT NULL DEFAULT false,
   updated_at timestamptz NOT NULL DEFAULT now(), error text);

@@ -3,6 +3,7 @@ node is available), message parsing, unsubscribe headers, rule hashing and the G
 import base64, json, os, shutil, subprocess, sys, time, unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault("EMAIL_ENCRYPT_SECRET", "test-secret")
 os.environ.setdefault("EMAIL_ENCRYPT_SALT", "test-salt")
 
@@ -182,27 +183,39 @@ class Cleared(unittest.TestCase):
         self.assertFalse(cleanup.sender_matches("", "@shop.com"))
 
     def test_protecting_removes_only_this_senders_trash_filters(self):
+        # Since the app keeps a record of the filters it creates (unified.filter), "this sender's trash filters" are
+        # the recorded ones: 1, 3 and 4 below were made by the app, 2 is its star filter, 5 was made by hand in Gmail.
         filters = [{"id": "1", "criteria": {"from": "deals@shop.com"}, "action": {"addLabelIds": ["TRASH"]}},
                    {"id": "2", "criteria": {"from": "deals@shop.com"}, "action": {"addLabelIds": ["STARRED"]}},
                    {"id": "3", "criteria": {"from": "x@other.com"}, "action": {"addLabelIds": ["TRASH"]}},
                    {"id": "4", "criteria": {"from": "news@mail.shop.com", "negatedQuery": "subject:(order)"},
+                    "action": {"addLabelIds": ["TRASH"]}},
+                   {"id": "5", "criteria": {"from": "deals@shop.com", "hasAttachment": True},
                     "action": {"addLabelIds": ["TRASH"]}}]
+        from fakes import Db
         deleted = []
 
         def gmail(acc, path, method="GET", body=None):
             if method == "DELETE":
                 deleted.append(path.rsplit("/", 1)[-1])
             return {"filter": filters}
-        old = cleanup.gmail
-        cleanup.gmail = gmail
+
+        def recorded():
+            fake = Db()
+            fake.filters = [("a", "1", "deals@shop.com", "trash", "block"), ("a", "2", "deals@shop.com", "star", "star"),
+                            ("a", "3", "x@other.com", "trash", "block"), ("a", "4", "news@mail.shop.com", "trash", "block")]
+            return fake
+        old = (cleanup.gmail, cleanup.db)
+        cleanup.gmail, cleanup.db = gmail, recorded()
         try:
             self.assertEqual(cleanup.remove_trash_filters("a", "deals@shop.com"), 1)
             self.assertEqual(deleted, ["1"])
             del deleted[:]
+            cleanup.db = recorded()
             self.assertEqual(cleanup.remove_trash_filters("a", "@shop.com"), 2)   # the domain and its subdomains
             self.assertEqual(deleted, ["1", "4"])
         finally:
-            cleanup.gmail = old
+            cleanup.gmail, cleanup.db = old
 
 
 class Collector(unittest.TestCase):

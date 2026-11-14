@@ -248,21 +248,19 @@ def parse_protect_keys(text):
 
 
 def _protect_in_gmail(keys):
-    """For a bulk protect: per account, one read of its filters, then drop send-to-Trash filters for these senders and
-    add "never send to Spam" for each. Runs in the background; the protection itself is already in the database."""
-    never_spam = {"removeLabelIds": ["SPAM"]}
+    """For a bulk protect: per account, drop the filters Zero Sum itself made for these senders (Trash, archive,
+    quarantine) and add "never send to Spam" for each. Runs in the background; the protection itself is already in the database."""
     for acc in ACC.list():
         done = cleared = 0
         try:
-            for f in gmail(acc["id"], "/settings/filters").get("filter", []):
-                frm = (f.get("criteria") or {}).get("from")
-                if "TRASH" in ((f.get("action") or {}).get("addLabelIds") or []) and any(sender_matches(frm, k) for k in keys):
-                    gmail(acc["id"], f"/settings/filters/{f['id']}", "DELETE")
-                    cleared += 1
+            cleared = remove_app_filters(acc["id"], keys)
+            left = foreign_filters(acc["id"], keys)
             for k in keys:
-                _filter(acc["id"], k, never_spam)
+                _filter(acc["id"], k, NEVER_SPAM_FILTER, "never_spam", source="protect")
                 done += 1
-            log("cleanup", f"bulk protect: {done} never-spam filter(s), {cleared} send-to-Trash filter(s) removed", acc["email"])
+            log("cleanup", f"bulk protect: {done} never-spam filter(s), {cleared} of Zero Sum's own filter(s) removed"
+                + (f"; {left} filter(s) Zero Sum did not create still move mail from these senders (left in place)"
+                   if left else ""), acc["email"])
         except Exception as e:  # noqa: BLE001 - protection in Zero Sum still applies
             log("cleanup-error", f"bulk protect stopped after {done} of {len(keys)}: {e}"[:300], acc["email"])
 
@@ -317,20 +315,173 @@ def subject_has(words, subject):
     return False
 
 
-def _filter(acc_id, addr, action, remove=False, keep=None):
-    """Create (or with remove=True delete) the Gmail filter `from:addr` -> action. With `keep` (a keep_query), mail whose
-    subject matches is left out of the filter."""
-    crit = {"from": addr, **({"negatedQuery": keep} if keep else {})}
-    if remove:
-        for f in gmail(acc_id, "/settings/filters").get("filter", []):
-            if (f.get("criteria") or {}).get("from", "").lower() == addr and f.get("action") == action:
-                gmail(acc_id, f"/settings/filters/{f['id']}", "DELETE")
-        return
+TRASH_FILTER = {"addLabelIds": ["TRASH"]}
+ARCHIVE_FILTER = {"removeLabelIds": ["INBOX"]}
+STAR_FILTER = {"addLabelIds": ["STARRED"]}
+NEVER_SPAM_FILTER = {"removeLabelIds": ["SPAM"]}  # Gmail's "Never send it to Spam", for an address or a domain
+# What a recorded filter does. "keep_star" stars the kept part of a sender (keep words, a plan's keep group);
+# "star" is the Auto-star button; "never_spam" comes with Protect.
+FILTER_KINDS = ("trash", "archive", "quarantine", "keep_star", "star", "never_spam")
+AUTOMATION_KINDS = ("trash", "archive", "quarantine", "keep_star")  # one sender's clean-up automation: replaced as a set
+
+
+def _filter(acc_id, addr, action, kind, keep=None, query=None, negated=None, source=""):
+    """Create the Gmail filter `from:addr` -> action and write its id down in unified.filter, so that Protect, Keep,
+    Reset and a re-applied plan can later remove exactly the filters this app made, and never one it did not.
+    `keep` / `negated`: mail whose subject matches is left out; `query`: only mail that matches. Returns the id."""
+    if kind not in FILTER_KINDS:
+        raise ValueError("bad filter kind")
+    crit = {"from": addr}
+    if query:
+        crit["query"] = query
+    if keep or negated:
+        crit["negatedQuery"] = keep or negated
     try:
-        gmail(acc_id, "/settings/filters", "POST", {"criteria": crit, "action": action})
+        f = gmail(acc_id, "/settings/filters", "POST", {"criteria": crit, "action": action})
     except RuntimeError as e:
         if "exists" not in str(e).lower():
             raise
+        return None  # an identical filter is already there: recorded earlier, or not this app's (then it stays so)
+    fid = (f or {}).get("id")
+    if not fid:
+        return None
+    try:
+        with db() as c:
+            c.execute("INSERT INTO unified.filter (account_id, filter_id, addr, kind, source) VALUES (%s, %s, %s, %s, %s) "
+                      "ON CONFLICT (account_id, filter_id) DO UPDATE SET addr = EXCLUDED.addr, kind = EXCLUDED.kind, "
+                      "source = EXCLUDED.source", (acc_id, fid, addr, kind, str(source)[:60]))
+    except Exception:
+        try:  # a filter nobody has on record could never be cleaned up again: take it back
+            gmail(acc_id, f"/settings/filters/{fid}", "DELETE")
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+    return fid
+
+
+def remove_app_filters(acc_id, keys, kinds=AUTOMATION_KINDS, exact=False):
+    """Delete the Gmail filters this app created (unified.filter) in one account for a sender, a domain ("@example.com",
+    subdomains included) or a list of them, of the given kinds. Only recorded filters are touched: a filter someone
+    made by hand in Gmail, even `from:x -> Trash`, is never deleted. With exact=True the recorded sender must equal
+    the key (unprotecting a domain leaves the never-spam filter of a separately protected address). Returns how many."""
+    keys = [keys] if isinstance(keys, str) else list(keys)
+    with db() as c:
+        rows = c.execute("SELECT filter_id, addr FROM unified.filter WHERE account_id = %s AND kind = ANY(%s) "
+                         "ORDER BY created_at, filter_id", (acc_id, list(kinds))).fetchall()
+    n = 0
+    for fid, addr in rows:
+        if not any((addr == k) if exact else sender_matches(addr, k) for k in keys):
+            continue
+        try:
+            gmail(acc_id, f"/settings/filters/{fid}", "DELETE")
+        except RuntimeError as e:
+            if ": 404 " not in str(e):  # 404: already removed by hand in Gmail
+                raise
+        with db() as c:
+            c.execute("DELETE FROM unified.filter WHERE account_id = %s AND filter_id = %s", (acc_id, fid))
+        n += 1
+    return n
+
+
+def remove_trash_filters(acc_id, key):
+    """Delete this app's send-to-Trash filters for a sender or domain (see remove_app_filters). Returns how many."""
+    return remove_app_filters(acc_id, key, kinds=("trash",))
+
+
+def foreign_filters(acc_id, keys):
+    """How many Gmail filters that this app did NOT create still take these senders' mail out of the inbox or to
+    Trash. They are left alone; the caller tells the user, because a "protected" sender is then not fully protected."""
+    keys = [keys] if isinstance(keys, str) else list(keys)
+    with db() as c:
+        mine = {r[0] for r in c.execute("SELECT filter_id FROM unified.filter WHERE account_id = %s", (acc_id,)).fetchall()}
+    n = 0
+    for f in gmail(acc_id, "/settings/filters").get("filter", []):
+        act = f.get("action") or {}
+        moves = "TRASH" in (act.get("addLabelIds") or []) or "INBOX" in (act.get("removeLabelIds") or [])
+        frm = (f.get("criteria") or {}).get("from")
+        if moves and f.get("id") not in mine and any(sender_matches(frm, k) for k in keys):
+            n += 1
+    return n
+
+
+FOREIGN_NOTE = "{n} Gmail filter(s) not made by Zero Sum still move this sender's mail: left in place, remove them in Gmail"
+KEEPQ = re.compile(r"subject:\([^()]*\)( OR subject:\([^()]*\))*")
+
+
+def _shape(f, qlid, prot):
+    """The kind of a Gmail filter that has exactly a shape this app creates (`from:` one sender, optionally with the
+    subject query keep words produce, and one of its actions), else None."""
+    crit, act = f.get("criteria") or {}, f.get("action") or {}
+    frm = str(crit.get("from") or "").lower()
+    if not set(crit) <= {"from", "query", "negatedQuery"} or not re.fullmatch(r"[^@\s]*@[^@\s]+", frm):
+        return None
+    if any(k in crit and not KEEPQ.fullmatch(str(crit[k])) for k in ("query", "negatedQuery")):
+        return None
+    if any(not isinstance(v, list) for v in act.values()):
+        return None
+    act = {k: sorted(v) for k, v in act.items() if v}
+    bare = set(crit) == {"from"}
+    if act == NEVER_SPAM_FILTER:
+        return "never_spam" if bare and frm in prot else None
+    if frm.startswith("@"):  # only Protect makes a filter for a whole domain
+        return None
+    if act == TRASH_FILTER:
+        return "trash"
+    if act == ARCHIVE_FILTER:
+        return "archive"
+    if qlid and act == {"addLabelIds": [qlid], "removeLabelIds": ["INBOX"]}:
+        return "quarantine"
+    if act == STAR_FILTER:
+        return "star" if bare else "keep_star"
+    return None
+
+
+def adopt_filters(d=None):
+    """One-off: put the filters this app created before it kept records into unified.filter. A report only, unless
+    apply is set. A filter is a candidate when it has exactly a shape this app creates; it is adopted when the
+    database also shows this app acted on that sender in that account (a clean-up status, an applied plan, or a
+    protected key), or always with all=true. Adoption only records: it never deletes or changes a filter. Running
+    it again finds nothing new."""
+    d = d or {}
+    apply, every = bool(d.get("apply")), bool(d.get("all"))
+    prot = protected_set()
+    with db() as c:
+        planned = {r[0] for r in c.execute("SELECT addr FROM unified.ai_plan WHERE status = 'applied'").fetchall()}
+        handled = {(a, e) for a, e in c.execute('SELECT "emailAccountId", lower(email) FROM "Newsletter" '
+                                                "WHERE status IS NOT NULL").fetchall()}
+    out = []
+    for acc in ACC.list():
+        rep = {"email": acc["email"], "filters": 0, "recorded": 0, "other": 0, "candidates": [], "adopted": 0}
+        out.append(rep)
+        try:
+            with db() as c:
+                mine = {r[0] for r in c.execute("SELECT filter_id FROM unified.filter WHERE account_id = %s",
+                                                (acc["id"],)).fetchall()}
+            qlid = label_id(acc["id"], QUARANTINE, create=False)
+            for f in gmail(acc["id"], "/settings/filters").get("filter", []):
+                rep["filters"] += 1
+                if f.get("id") in mine:
+                    rep["recorded"] += 1
+                    continue
+                kind = _shape(f, qlid, prot)
+                if not kind:
+                    rep["other"] += 1
+                    continue
+                frm = f["criteria"]["from"].lower()
+                why = ("protected" if kind == "never_spam" else "cleanup status" if (acc["id"], frm) in handled
+                       else "applied plan" if frm in planned else None)
+                cand = {"id": f["id"], "from": frm, "kind": kind, "evidence": why, "adopt": bool(why or every)}
+                rep["candidates"].append(cand)
+                if apply and cand["adopt"]:
+                    with db() as c:
+                        c.execute("INSERT INTO unified.filter (account_id, filter_id, addr, kind, source) "
+                                  "VALUES (%s, %s, %s, %s, 'adopted') ON CONFLICT DO NOTHING", (acc["id"], f["id"], frm, kind))
+                    rep["adopted"] += 1
+        except Exception as e:  # noqa: BLE001 - one account failing must not hide the others' report
+            rep["error"] = str(e)[:200]
+    if apply:
+        log("cleanup", "adopt filters: " + "; ".join(f"{r['email']}: {r['adopted']} recorded" for r in out))
+    return {"applied": apply, "accounts": out}
 
 
 def undo_list(q=None):
@@ -376,19 +527,6 @@ def sender_matches(frm, key):
         dom = frm.rsplit("@", 1)[-1]
         return dom == key[1:] or dom.endswith("." + key[1:])
     return frm == key
-
-
-def remove_trash_filters(acc_id, key):
-    """Delete the account's Gmail filters that send this sender's (or domain's) mail straight to Trash. Block,
-    Unsubscribe & delete and a plan's delete groups create them; without this they outlived Protect, Keep, Reset and
-    a re-applied plan, and kept trashing new mail from a sender the app showed as protected. Returns how many."""
-    n = 0
-    for f in gmail(acc_id, "/settings/filters").get("filter", []):
-        if "TRASH" in ((f.get("action") or {}).get("addLabelIds") or []) \
-                and sender_matches((f.get("criteria") or {}).get("from"), key):
-            gmail(acc_id, f"/settings/filters/{f['id']}", "DELETE")
-            n += 1
-    return n
 
 
 def stop_automation(key):
@@ -472,14 +610,13 @@ def _one_click(url):
 
 QUARANTINE = os.environ.get("QUARANTINE_LABEL", "Quarantine")
 SHOW = int(os.environ.get("QUARANTINE_SHOW", "600"))  # messages per account listed with details on the Quarantine tab
-TRASH_FILTER = {"addLabelIds": ["TRASH"]}
-ARCHIVE_FILTER = {"removeLabelIds": ["INBOX"]}
-STAR_FILTER = {"addLabelIds": ["STARRED"]}
 # actions that remove mail from view: refused for protected senders
 DESTRUCTIVE = {"unsubscribe", "unsub_archive", "unsub_quarantine", "unsub_delete", "autoarchive", "archive",
                "quarantine", "delete", "block", "spam"}
 UNSUB = {"unsubscribe", "unsub_archive", "unsub_quarantine", "unsub_delete"}
 ACTIONS = DESTRUCTIVE | {"keep", "reset", "star", "unstar", "protect", "unprotect"}
+# actions that set up filters for future mail: each replaces the sender's earlier automation instead of adding to it
+FILTERING = {"unsub_delete", "quarantine", "unsub_quarantine", "autoarchive", "unsub_archive", "block"}
 
 
 def sender_action(d):
@@ -494,25 +631,31 @@ def sender_action(d):
                 c.execute("INSERT INTO unified.protected (key) VALUES (%s) ON CONFLICT DO NOTHING", (addr,))
             else:
                 c.execute("DELETE FROM unified.protected WHERE key = %s", (addr,))
-        never_spam = {"removeLabelIds": ["SPAM"]}  # Gmail's "Never send it to Spam", for this address or domain
-        cleared = 0
+        cleared = left = 0
         if act == "protect":
             stop_automation(addr)
         for acc in ACC.list():
             try:
-                _filter(acc["id"], addr, never_spam, remove=(act == "unprotect"))
-                if act == "protect":  # what was set up before the protection must stop deleting its mail
-                    cleared += remove_trash_filters(acc["id"], addr)
+                if act == "protect":  # what was set up before the protection must stop moving its mail: Trash,
+                    cleared += remove_app_filters(acc["id"], addr)  # archive and quarantine filters alike
+                    _filter(acc["id"], addr, NEVER_SPAM_FILTER, "never_spam", source="protect")
+                    left += foreign_filters(acc["id"], addr)
+                else:
+                    remove_app_filters(acc["id"], addr, kinds=("never_spam",), exact=True)
             except Exception as e:  # noqa: BLE001 - protection in Zero Sum still applies
                 log("cleanup-error", f"{act} {addr}: filters: {e}"[:300], acc["email"])
         if cleared:
-            log("cleanup", f"protect {addr}: removed {cleared} send-to-Trash filter(s)")
+            log("cleanup", f"protect {addr}: removed {cleared} of Zero Sum's own filter(s)")
+        if left:
+            log("cleanup", f"protect {addr}: " + FOREIGN_NOTE.format(n=left))
         if act == "protect" and not addr.startswith("@"):  # also "kept" in Inbox Zero for every account that gets it
             with db() as c:
                 for (a,) in c.execute("SELECT DISTINCT account_id FROM unified.msg WHERE from_addr = %s", (addr,)).fetchall():
                     _newsletter(c, a, addr, "APPROVED")
         log("cleanup", f"{act} {addr}")
-        return {"results": [{"email": "all accounts", "ok": True, "note": f"{addr} {act}ed"}], "manual": []}
+        return {"results": [{"email": "all accounts", "ok": True, "note": f"{addr} {act}ed"
+                             + (f"; {cleared} filter(s) removed" if cleared else "")
+                             + ("; " + FOREIGN_NOTE.format(n=left) if left else "")}], "manual": []}
     if not re.fullmatch(r"[^@\s]+@[^@\s]+", addr):
         raise ValueError("bad sender address")
     if act in DESTRUCTIVE and is_protected(addr):
@@ -530,6 +673,9 @@ def sender_action(d):
         unsub = {a: (u, p) for a, u, p in c.execute(
             "SELECT DISTINCT ON (account_id) account_id, unsub, unsub_post FROM unified.msg "
             "WHERE from_addr = %s AND unsub IS NOT NULL ORDER BY account_id, ts DESC", (addr,)).fetchall()}
+        if act in ("keep", "reset"):  # Delete and Block drop the sender's local history: its filters still say where
+            acc_ids += [r[0] for r in c.execute("SELECT DISTINCT account_id FROM unified.filter WHERE addr = %s",
+                                                (addr,)).fetchall() if r[0] not in acc_ids]
     if d.get("accounts"):
         acc_ids = [a for a in acc_ids if a in set(d["accounts"])]
     results, manual = [], []
@@ -537,6 +683,8 @@ def sender_action(d):
         em = ACC.email(a)
         try:
             note = []
+            if act in FILTERING:  # a new action replaces the sender's earlier filters, it does not stack on them
+                remove_app_filters(a, addr)
             if act in UNSUB:  # the unsubscribe part; what happens to their mail follows below
                 u, post = unsub.get(a, (None, False))
                 if u and u.startswith("https://") and post and _one_click(u):
@@ -547,21 +695,21 @@ def sender_action(d):
                 else:
                     note.append("no unsubscribe link" + ("" if act != "unsubscribe" else ": use Block or Quarantine"))
             if act == "unsub_delete":  # and clear it out: Trash now, future mail straight to Trash
-                _filter(a, addr, TRASH_FILTER, keep=kq)
+                _filter(a, addr, TRASH_FILTER, "trash", keep=kq, source=act)
                 note.append(f"{_modify_existing(a, f'from:{addr} -in:trash{nk}', add=['TRASH'])} moved to Trash, "
                             "future mail goes to Trash")
                 if not kq:
                     _drop_rows(a, addr)
             if act in ("quarantine", "unsub_quarantine"):  # held for review on the Quarantine tab, now and in future
                 lid = label_id(a, QUARANTINE)
-                _filter(a, addr, {"addLabelIds": [lid], "removeLabelIds": ["INBOX"]}, keep=kq)
+                _filter(a, addr, {"addLabelIds": [lid], "removeLabelIds": ["INBOX"]}, "quarantine", keep=kq, source=act)
                 n = _modify_existing(a, f"from:{addr} -in:trash -in:spam -label:{QUARANTINE}{nk}", add=[lid],
                                      remove=["INBOX"])  # every folder, every year
                 note.append(f"filter added, {n} moved to {QUARANTINE}")
                 with db() as c:
                     c.execute("UPDATE unified.msg SET inbox = false WHERE account_id = %s AND from_addr = %s", (a, addr))
             if act in ("autoarchive", "unsub_archive"):
-                _filter(a, addr, ARCHIVE_FILTER, keep=kq)
+                _filter(a, addr, ARCHIVE_FILTER, "archive", keep=kq, source=act)
                 note.append(f"filter added, {_archive_existing(a, addr, kq)} archived")
             elif act == "archive":
                 note.append(f"{_archive_existing(a, addr, kq)} archived")
@@ -570,7 +718,7 @@ def sender_action(d):
                 if not kq:
                     _drop_rows(a, addr)
             elif act == "block":
-                _filter(a, addr, TRASH_FILTER, keep=kq)
+                _filter(a, addr, TRASH_FILTER, "trash", keep=kq, source=act)
                 note.append(f"filter added (future mail goes to Trash), "
                             f"{_modify_existing(a, f'from:{addr} -in:trash{nk}', add=['TRASH'])} moved to Trash")
                 if not kq:
@@ -580,22 +728,21 @@ def sender_action(d):
                             "reported as spam")
                 if not kq:
                     _drop_rows(a, addr)
-            elif act in ("keep", "reset"):  # back to normal delivery: no filter may keep trashing this sender
-                n = remove_trash_filters(a, addr)
-                if n:
-                    note.append(f"{n} send-to-Trash filter(s) removed")
+            elif act in ("keep", "reset"):  # back to normal delivery: none of this app's filters may keep moving
+                n = remove_app_filters(a, addr, kinds=AUTOMATION_KINDS + (("star",) if act == "reset" else ()))
+                if n:  # this sender's mail (Trash, archive and quarantine alike)
+                    note.append(f"{n} filter(s) removed")
+                left = foreign_filters(a, addr)
+                if left:
+                    note.append(FOREIGN_NOTE.format(n=left))
             elif act == "star":
-                _filter(a, addr, STAR_FILTER)
+                _filter(a, addr, STAR_FILTER, "star", source=act)
                 note.append(f"filter added, {_modify_existing(a, f'from:{addr} in:inbox -is:starred', add=['STARRED'])} starred")
             elif act == "unstar":
-                _filter(a, addr, STAR_FILTER, remove=True)
+                remove_app_filters(a, addr, kinds=("star",), exact=True)
                 note.append(f"filter removed, {_modify_existing(a, f'from:{addr} is:starred', remove=['STARRED'])} unstarred")
             if kq and act in DESTRUCTIVE:  # the kept ones: starred now and in future, so they stand out
-                try:
-                    gmail(a, "/settings/filters", "POST", {"criteria": {"from": addr, "query": kq}, "action": STAR_FILTER})
-                except RuntimeError as e:
-                    if "exists" not in str(e).lower():
-                        raise
+                _filter(a, addr, STAR_FILTER, "keep_star", query=kq, source=act)
                 note.append(f"{_modify_existing(a, f'from:{addr} {kq} -is:starred -in:trash', add=['STARRED'])} kept and starred")
             status = {"unsubscribe": "UNSUBSCRIBED", "unsub_archive": "UNSUBSCRIBED", "unsub_quarantine": "UNSUBSCRIBED",
                       "unsub_delete": "UNSUBSCRIBED", "autoarchive": "AUTO_ARCHIVED", "quarantine": "AUTO_ARCHIVED",
@@ -693,8 +840,7 @@ def quarantine_action(d):
             add = {"delete": ["TRASH"], "archive": [], "release": ["INBOX"]}[act]
             n = _batch(a["id"], ids, add=add, remove=[lid])
             note = f"{n} {QACTIONS[act]}"
-            if act == "release" and sender:
-                _filter(a["id"], sender, {"addLabelIds": [lid], "removeLabelIds": ["INBOX"]}, remove=True)
+            if act == "release" and sender and remove_app_filters(a["id"], sender, kinds=("quarantine",), exact=True):
                 note += ", quarantine filter removed"
             results.append({"email": a["email"], "ok": True, "note": note})
         except Exception as e:  # noqa: BLE001
@@ -748,11 +894,8 @@ def _plan_action(acc_id, addr, action, crit_extra, query_extra, lid):
         filt, q, add, rem = {"addLabelIds": [lid], "removeLabelIds": ["INBOX"]}, f"-in:trash -in:spam -label:{QUARANTINE}", [lid], ["INBOX"]
     else:  # delete
         filt, q, add, rem = TRASH_FILTER, "-in:trash", ["TRASH"], []
-    try:
-        gmail(acc_id, "/settings/filters", "POST", {"criteria": {"from": addr, **crit_extra}, "action": filt})
-    except RuntimeError as e:
-        if "exists" not in str(e).lower():
-            raise
+    _filter(acc_id, addr, filt, "keep_star" if action == "keep" else {"delete": "trash"}.get(action, action),
+            query=crit_extra.get("query"), negated=crit_extra.get("negatedQuery"), source="plan")
     n = _modify_existing(acc_id, f"from:{addr} {query_extra} {q}".strip(), add=add, remove=rem)
     return n
 
@@ -929,9 +1072,9 @@ def apply_plan(d):
         rule = re.sub(r"\s+", " ", str(d.get("rule") or ""))[:400]
         if not rule:
             raise ValueError("write what to keep first")
-        for acc in ACC.list():  # an older Trash filter would delete new mail before the AI ever judged it
+        for acc in ACC.list():  # an older Trash or archive filter would move new mail before the AI ever judged it
             try:
-                remove_trash_filters(acc["id"], addr)
+                remove_app_filters(acc["id"], addr)
             except Exception as e:  # noqa: BLE001
                 log("cleanup-error", f"apply {addr}: old filters: {e}"[:300], acc["email"])
         with db() as c:
@@ -953,7 +1096,7 @@ def apply_plan(d):
         em = ACC.email(a)
         try:
             lid = label_id(a, QUARANTINE) if "quarantine" in destructive else None
-            remove_trash_filters(a, addr)  # a re-applied plan replaces the old one's delete filters, it doesn't add to them
+            remove_app_filters(a, addr)  # a re-applied plan replaces the old one's filters (every kind), it doesn't add to them
             notes, earlier = [], []  # a group only takes mail no earlier group matched
             for g in groups:
                 excl = "".join(f" -{k}" for k in earlier)

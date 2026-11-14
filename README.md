@@ -210,6 +210,12 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
   blocked, quarantined or marked as spam, by hand or by a plan: the buttons are disabled and the server refuses. The
   background analyst skips them. Protecting adds Gmail's "never send to Spam" filter in every account and marks the
   address "kept" in Inbox Zero. Auto-star still works on protected senders.
+- Every Gmail filter Zero Sum creates is written down (`unified.filter`: account, filter id, sender, kind). **Protect**,
+  **Keep**, **Reset** and applying a new action or plan remove exactly its own filters for that sender (Trash,
+  archive, quarantine and keep-star alike) and never a filter you made yourself in Gmail; if one of yours still moves
+  the sender's mail, the result says so. Filters created by a version that kept no record are adopted once with
+  `python app.py adopt-filters` (a report; add `--apply` to record them, `--all` to include filters of the app's exact
+  shape for senders it has no clean-up status for). Adoption only records: it never deletes or changes a filter.
 
 ## How it works (for the technically curious)
 

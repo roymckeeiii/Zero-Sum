@@ -2,6 +2,9 @@
 
   python app.py            serve (default)
   python app.py init-db    create/update its database role and schema (needs ADMIN_DATABASE_URL), then exit
+  python app.py adopt-filters [--apply] [--all]
+                           one-off after upgrading: report (or with --apply record) the Gmail filters this app made
+                           before it kept a record of them; never deletes or changes a filter
 
 Tabs: Inbox (merged, read + triage), Cleanup (bulk unsubscribe / auto-archive / archive across accounts), Analytics,
 Rules (the master account's rules pushed to every account). Nothing here sends email.
@@ -61,6 +64,7 @@ POST = {
     "/api/quarantine": cleanup.quarantine_action,
     "/api/undo": cleanup.undo_action,
     "/api/protect/bulk": cleanup.protect_many,
+    "/api/filters/adopt": cleanup.adopt_filters,
     "/api/ai/suggest": ai.suggest,
     "/api/ai/analyze": ai.analyze,
     "/api/ai/apply": cleanup.apply_plan,
@@ -178,9 +182,26 @@ def init_db():
     print("init-db: role iz_unified and schema unified are ready", flush=True)
 
 
+def adopt_filters_cli(args):
+    init_schema()
+    res = cleanup.adopt_filters({"apply": "--apply" in args, "all": "--all" in args})
+    for a in res["accounts"]:
+        print(f"{a['email']}: {a['filters']} filter(s) in Gmail, {a['recorded']} already on record, "
+              f"{a['other']} not of a shape Zero Sum creates (never touched)"
+              + (f"; ERROR {a['error']}" if a.get("error") else ""))
+        for c in a["candidates"]:
+            print(f"  {'adopt' if c['adopt'] else 'skip '}  {c['kind']:<10} from:{c['from']}  filter {c['id']}  "
+                  f"({c['evidence'] or 'no record that Zero Sum acted on this sender: --all adopts it too'})")
+    print("recorded the filters marked adopt" if res["applied"] else
+          "dry run: nothing recorded. Run again with --apply to record the filters marked adopt.", flush=True)
+
+
 if __name__ == "__main__":
     if sys.argv[1:] == ["init-db"]:
         init_db()
+        raise SystemExit(0)
+    if sys.argv[1:2] == ["adopt-filters"]:
+        adopt_filters_cli(sys.argv[2:])
         raise SystemExit(0)
     init_schema()
     if not ALLOWED:
