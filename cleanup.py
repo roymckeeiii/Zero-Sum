@@ -11,7 +11,7 @@ filter `from:<sender>` that skips the inbox, and archiving what is already in th
 one-click POST when the sender supports it; other links (web pages, mailto) are returned for Roy to open, since this
 app never sends email.
 """
-import email.utils, os, re, threading, time, urllib.error, urllib.parse, urllib.request
+import email.utils, http.client, ipaddress, os, re, socket, ssl, threading, time, urllib.error, urllib.parse, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 from core import ACC, POOL, db, gmail, gmail_list, header, label_id, log, new_id
@@ -27,6 +27,26 @@ COLLECT_LOCK = threading.Lock()
 
 def qs(query):
     return "/messages?q=" + urllib.parse.quote(query)
+
+
+# A sender address as this app accepts it in an action: plain mailbox characters only. It ends up in Gmail searches
+# and filter criteria, so nothing that reads as search syntax (spaces, quotes, brackets, braces, |, :, commas) gets in.
+_LOCAL, _DOMAIN = r"[a-z0-9._%+=&'~!#$*/?^-]{1,64}", r"[a-z0-9-]{1,63}(?:\.[a-z0-9-]{1,63})+"
+SENDER = re.compile(rf"{_LOCAL}@{_DOMAIN}")
+SENDER_KEY = re.compile(rf"(?:{_LOCAL})?@{_DOMAIN}")  # an address, or a whole domain ("@example.com")
+
+
+def sender_addr(value):
+    """The address of a sender action, lower-cased; ValueError unless it is one plain address."""
+    addr = str(value or "").strip().lower()
+    if len(addr) > 254 or not SENDER.fullmatch(addr):
+        raise ValueError("bad sender address")
+    return addr
+
+
+def frm(addr):
+    """Gmail search term for mail from this address: validated again here, and quoted, so it is one literal term."""
+    return f'from:"{sender_addr(addr)}"'
 
 
 def parse_unsub(value):
@@ -273,7 +293,7 @@ def parse_protect_keys(text):
             if not tok:
                 continue
             key = tok if "@" in tok else "@" + tok
-            if PROTECT_KEY.fullmatch(key) and len(key) <= 254:
+            if PROTECT_KEY.fullmatch(key) and SENDER_KEY.fullmatch(key) and len(key) <= 254:
                 if key not in keys:
                     keys.append(key)
             elif tok not in rejected:
@@ -434,8 +454,8 @@ def foreign_filters(acc_id, keys):
     for f in gmail(acc_id, "/settings/filters").get("filter", []):
         act = f.get("action") or {}
         moves = "TRASH" in (act.get("addLabelIds") or []) or "INBOX" in (act.get("removeLabelIds") or [])
-        frm = (f.get("criteria") or {}).get("from")
-        if moves and f.get("id") not in mine and any(sender_matches(frm, k) for k in keys):
+        who = (f.get("criteria") or {}).get("from")
+        if moves and f.get("id") not in mine and any(sender_matches(who, k) for k in keys):
             n += 1
     return n
 
@@ -448,8 +468,8 @@ def _shape(f, qlid, prot):
     """The kind of a Gmail filter that has exactly a shape this app creates (`from:` one sender, optionally with the
     subject query keep words produce, and one of its actions), else None."""
     crit, act = f.get("criteria") or {}, f.get("action") or {}
-    frm = str(crit.get("from") or "").lower()
-    if not set(crit) <= {"from", "query", "negatedQuery"} or not re.fullmatch(r"[^@\s]*@[^@\s]+", frm):
+    who = str(crit.get("from") or "").lower()
+    if not set(crit) <= {"from", "query", "negatedQuery"} or not SENDER_KEY.fullmatch(who):
         return None
     if any(k in crit and not KEEPQ.fullmatch(str(crit[k])) for k in ("query", "negatedQuery")):
         return None
@@ -458,8 +478,8 @@ def _shape(f, qlid, prot):
     act = {k: sorted(v) for k, v in act.items() if v}
     bare = set(crit) == {"from"}
     if act == NEVER_SPAM_FILTER:
-        return "never_spam" if bare and frm in prot else None
-    if frm.startswith("@"):  # only Protect makes a filter for a whole domain
+        return "never_spam" if bare and who in prot else None
+    if who.startswith("@"):  # only Protect makes a filter for a whole domain
         return None
     if act == TRASH_FILTER:
         return "trash"
@@ -503,15 +523,15 @@ def adopt_filters(d=None):
                 if not kind:
                     rep["other"] += 1
                     continue
-                frm = f["criteria"]["from"].lower()
-                why = ("protected" if kind == "never_spam" else "cleanup status" if (acc["id"], frm) in handled
-                       else "applied plan" if frm in planned else None)
-                cand = {"id": f["id"], "from": frm, "kind": kind, "evidence": why, "adopt": bool(why or every)}
+                who = f["criteria"]["from"].lower()
+                why = ("protected" if kind == "never_spam" else "cleanup status" if (acc["id"], who) in handled
+                       else "applied plan" if who in planned else None)
+                cand = {"id": f["id"], "from": who, "kind": kind, "evidence": why, "adopt": bool(why or every)}
                 rep["candidates"].append(cand)
                 if apply and cand["adopt"]:
                     with db() as c:
                         c.execute("INSERT INTO unified.filter (account_id, filter_id, addr, kind, source) "
-                                  "VALUES (%s, %s, %s, %s, 'adopted') ON CONFLICT DO NOTHING", (acc["id"], f["id"], frm, kind))
+                                  "VALUES (%s, %s, %s, %s, 'adopted') ON CONFLICT DO NOTHING", (acc["id"], f["id"], who, kind))
                     rep["adopted"] += 1
         except Exception as e:  # noqa: BLE001 - one account failing must not hide the others' report
             rep["error"] = str(e)[:200]
@@ -640,7 +660,7 @@ def _batch(acc_id, ids, add=(), remove=(), record=True, sender=None):
 
 
 def _archive_existing(acc_id, addr, keep=None):
-    n = _modify_existing(acc_id, f"from:{addr} in:inbox" + (f" -{keep}" if keep else ""), remove=["INBOX"], sender=addr)
+    n = _modify_existing(acc_id, f"{frm(addr)} in:inbox" + (f" -{keep}" if keep else ""), remove=["INBOX"], sender=addr)
     with db() as c:
         c.execute("UPDATE unified.msg SET inbox = false WHERE account_id = %s AND from_addr = %s", (acc_id, addr))
     return n
@@ -651,16 +671,55 @@ def _drop_rows(acc_id, addr):
         c.execute("DELETE FROM unified.msg WHERE account_id = %s AND from_addr = %s", (acc_id, addr))
 
 
-def _one_click(url):
-    req = urllib.request.Request(url, data=b"List-Unsubscribe=One-Click", method="POST",
-                                 headers={"Content-Type": "application/x-www-form-urlencoded",
-                                          "User-Agent": "Mozilla/5.0 (unsubscribe)"})
+class _Pinned(http.client.HTTPSConnection):
+    """HTTPS to one already-checked IP address, with the certificate still verified for the host name: the name
+    cannot be re-resolved to somewhere else between the check and the connection."""
+
+    def __init__(self, host, ip, timeout):
+        super().__init__(host, 443, timeout=timeout, context=ssl.create_default_context())
+        self._ip = ip
+
+    def connect(self):
+        self.sock = self._context.wrap_socket(socket.create_connection((self._ip, 443), self.timeout),
+                                              server_hostname=self.host)
+
+
+def unsub_target(url):
+    """(host, ip, path) for a one-click unsubscribe URL, or ValueError. The URL comes from a stranger's email header,
+    so it may only lead out to the public internet: https, port 443, no credentials, and every address the host
+    resolves to must be public (not loopback, private, link-local, cloud metadata, or otherwise reserved)."""
+    u = urllib.parse.urlsplit(str(url or ""))
+    if u.scheme != "https" or not u.hostname or u.username or u.password or u.port not in (None, 443):
+        raise ValueError("unsubscribe link is not a plain https address")
+    host = u.hostname.lower().rstrip(".")
     try:
-        with urllib.request.urlopen(req, timeout=20) as r:
-            return r.status < 400
-    except urllib.error.HTTPError as e:
-        return e.code < 400
-    except Exception:  # noqa: BLE001
+        ips = {ipaddress.ip_address(i[4][0].split("%")[0]) for i in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)}
+    except (OSError, ValueError):
+        raise ValueError("unsubscribe host does not resolve") from None
+    for ip in ips:
+        real = getattr(ip, "ipv4_mapped", None) or ip
+        if not real.is_global or real.is_multicast:
+            raise ValueError("unsubscribe link points at a private or reserved address")
+    if not ips:
+        raise ValueError("unsubscribe host does not resolve")
+    ip = sorted(ips, key=lambda i: (i.version, int(i)))[0]
+    return host, str(ip), (u.path or "/") + (f"?{u.query}" if u.query else "")
+
+
+def _one_click(url):
+    """RFC 8058 one-click unsubscribe: one POST, to a public https address only (unsub_target), never following a
+    redirect, 10 seconds at most. True only on a 2xx answer; anything else leaves the link for the user to open."""
+    try:
+        host, ip, path = unsub_target(url)
+        conn = _Pinned(host, ip, timeout=10)
+        try:
+            conn.request("POST", path, body=b"List-Unsubscribe=One-Click",
+                         headers={"Content-Type": "application/x-www-form-urlencoded",
+                                  "User-Agent": "Mozilla/5.0 (unsubscribe)"})
+            return 200 <= conn.getresponse().status < 300
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 - refused, unreachable or odd: not unsubscribed
         return False
 
 
@@ -680,7 +739,7 @@ def sender_action(d):
     if act not in ACTIONS:
         raise ValueError("bad sender action")
     if act in ("protect", "unprotect"):
-        if not re.fullmatch(r"[^@\s]*@[^@\s]+\.[^@\s]+", addr):
+        if len(addr) > 254 or not SENDER_KEY.fullmatch(addr):
             raise ValueError("protect an address (name@example.com) or a domain (@example.com)")
         with db() as c:
             if act == "protect":
@@ -712,8 +771,7 @@ def sender_action(d):
         return {"results": [{"email": "all accounts", "ok": True, "note": f"{addr} {act}ed"
                              + (f"; {cleared} filter(s) removed" if cleared else "")
                              + ("; " + FOREIGN_NOTE.format(n=left) if left else "")}], "manual": []}
-    if not re.fullmatch(r"[^@\s]+@[^@\s]+", addr):
-        raise ValueError("bad sender address")
+    addr = sender_addr(addr)
     if act in DESTRUCTIVE and is_protected(addr):
         raise PermissionError(f"{addr} is protected: unprotect it first")
     if act in DESTRUCTIVE and own_address(addr):
@@ -752,14 +810,14 @@ def sender_action(d):
                     note.append("no unsubscribe link" + ("" if act != "unsubscribe" else ": use Block or Quarantine"))
             if act == "unsub_delete":  # and clear it out: Trash now, future mail straight to Trash
                 _filter(a, addr, TRASH_FILTER, "trash", keep=kq, source=act)
-                note.append(f"{_modify_existing(a, f'from:{addr} -in:trash{nk}', add=['TRASH'], sender=addr)} moved to Trash, "
+                note.append(f"{_modify_existing(a, f'{frm(addr)} -in:trash{nk}', add=['TRASH'], sender=addr)} moved to Trash, "
                             "future mail goes to Trash")
                 if not kq:
                     _drop_rows(a, addr)
             if act in ("quarantine", "unsub_quarantine"):  # held for review on the Quarantine tab, now and in future
                 lid = label_id(a, QUARANTINE)
                 _filter(a, addr, {"addLabelIds": [lid], "removeLabelIds": ["INBOX"]}, "quarantine", keep=kq, source=act)
-                n = _modify_existing(a, f"from:{addr} -in:trash -in:spam -label:{QUARANTINE}{nk}", add=[lid],
+                n = _modify_existing(a, f"{frm(addr)} -in:trash -in:spam -label:{QUARANTINE}{nk}", add=[lid],
                                      remove=["INBOX"], sender=addr)  # every folder, every year
                 note.append(f"filter added, {n} moved to {QUARANTINE}")
                 with db() as c:
@@ -770,17 +828,17 @@ def sender_action(d):
             elif act == "archive":
                 note.append(f"{_archive_existing(a, addr, kq)} archived")
             elif act == "delete":
-                note.append(f"{_modify_existing(a, f'from:{addr} -in:trash{nk}', add=['TRASH'], sender=addr)} moved to Trash")
+                note.append(f"{_modify_existing(a, f'{frm(addr)} -in:trash{nk}', add=['TRASH'], sender=addr)} moved to Trash")
                 if not kq:
                     _drop_rows(a, addr)
             elif act == "block":
                 _filter(a, addr, TRASH_FILTER, "trash", keep=kq, source=act)
                 note.append(f"filter added (future mail goes to Trash), "
-                            f"{_modify_existing(a, f'from:{addr} -in:trash{nk}', add=['TRASH'], sender=addr)} moved to Trash")
+                            f"{_modify_existing(a, f'{frm(addr)} -in:trash{nk}', add=['TRASH'], sender=addr)} moved to Trash")
                 if not kq:
                     _drop_rows(a, addr)
             elif act == "spam":
-                note.append(f"{_modify_existing(a, f'from:{addr} -in:spam -in:trash{nk}', add=['SPAM'], remove=['INBOX'], sender=addr)} "
+                note.append(f"{_modify_existing(a, f'{frm(addr)} -in:spam -in:trash{nk}', add=['SPAM'], remove=['INBOX'], sender=addr)} "
                             "reported as spam")
                 if not kq:
                     _drop_rows(a, addr)
@@ -793,13 +851,13 @@ def sender_action(d):
                     note.append(FOREIGN_NOTE.format(n=left))
             elif act == "star":
                 _filter(a, addr, STAR_FILTER, "star", source=act)
-                note.append(f"filter added, {_modify_existing(a, f'from:{addr} in:inbox -is:starred', add=['STARRED'], sender=addr)} starred")
+                note.append(f"filter added, {_modify_existing(a, f'{frm(addr)} in:inbox -is:starred', add=['STARRED'], sender=addr)} starred")
             elif act == "unstar":
                 remove_app_filters(a, addr, kinds=("star",), exact=True)
-                note.append(f"filter removed, {_modify_existing(a, f'from:{addr} is:starred', remove=['STARRED'], sender=addr)} unstarred")
+                note.append(f"filter removed, {_modify_existing(a, f'{frm(addr)} is:starred', remove=['STARRED'], sender=addr)} unstarred")
             if kq and act in DESTRUCTIVE:  # the kept ones: starred now and in future, so they stand out
                 _filter(a, addr, STAR_FILTER, "keep_star", query=kq, source=act)
-                note.append(f"{_modify_existing(a, f'from:{addr} {kq} -is:starred -in:trash', add=['STARRED'], sender=addr)} kept and starred")
+                note.append(f"{_modify_existing(a, f'{frm(addr)} {kq} -is:starred -in:trash', add=['STARRED'], sender=addr)} kept and starred")
             status = {"unsubscribe": "UNSUBSCRIBED", "unsub_archive": "UNSUBSCRIBED", "unsub_quarantine": "UNSUBSCRIBED",
                       "unsub_delete": "UNSUBSCRIBED", "autoarchive": "AUTO_ARCHIVED", "quarantine": "AUTO_ARCHIVED",
                       "block": "AUTO_ARCHIVED",
@@ -869,8 +927,8 @@ def quarantine_action(d):
     if act not in QACTIONS:
         raise ValueError("bad quarantine action")
     sender = (d.get("sender") or "").strip().lower()
-    if sender and not re.fullmatch(r"[^@\s]+@[^@\s]+", sender):
-        raise ValueError("bad sender address")  # it goes into a Gmail search: an address, never a query
+    if sender:
+        sender = sender_addr(sender)  # it goes into a Gmail search: an address, never a query
     if act == "delete" and sender:
         guard_sender(sender)
     chosen = {}
@@ -891,7 +949,7 @@ def quarantine_action(d):
             if chosen:
                 ids = chosen[a["id"]]
             else:
-                query = f"/messages?labelIds={lid}" + (f"&q={urllib.parse.quote('from:' + sender)}" if sender else "")
+                query = f"/messages?labelIds={lid}" + (f"&q={urllib.parse.quote(frm(sender))}" if sender else "")
                 ids = [m["id"] for m in gmail_list(a["id"], query, "messages", MAX_BULK)]
             if not ids:
                 continue
@@ -926,14 +984,12 @@ def quarantine_action(d):
 def sender_recent(q):
     """The newest N emails from a sender across every account and folder (Trash and Spam excluded), for previews."""
     from inbox import meta
-    addr = (q.get("addr", [""])[0] or "").strip().lower()
+    addr = sender_addr(q.get("addr", [""])[0])
     n = max(1, min(int(q.get("n", ["20"])[0]), 50))
-    if not re.fullmatch(r"[^@\s]+@[^@\s]+", addr):
-        raise ValueError("bad sender address")
 
     def ids(a):
         try:
-            return [(a, m["id"]) for m in gmail_list(a["id"], qs(f"from:{addr} -in:trash -in:spam"), "messages", n)]
+            return [(a, m["id"]) for m in gmail_list(a["id"], qs(f"{frm(addr)} -in:trash -in:spam"), "messages", n)]
         except Exception:  # noqa: BLE001
             return []
 
@@ -962,7 +1018,7 @@ def _plan_action(acc_id, addr, action, crit_extra, query_extra, lid):
         filt, q, add, rem = TRASH_FILTER, "-in:trash", ["TRASH"], []
     _filter(acc_id, addr, filt, "keep_star" if action == "keep" else {"delete": "trash"}.get(action, action),
             query=crit_extra.get("query"), negated=crit_extra.get("negatedQuery"), source="plan")
-    n = _modify_existing(acc_id, f"from:{addr} {query_extra} {q}".strip(), add=add, remove=rem, sender=addr)
+    n = _modify_existing(acc_id, f"{frm(addr)} {query_extra} {q}".strip(), add=add, remove=rem, sender=addr)
     return n
 
 
@@ -1037,7 +1093,7 @@ def _ai_sort_existing(addr, rule, action, token=None):
     try:
         pairs = []
         for a in ACC.list():
-            q = f"from:{addr} -in:trash -in:spam {SKIP}" + (f" -label:{QUARANTINE}" if action == "quarantine" else "")
+            q = f"{frm(addr)} -in:trash -in:spam {SKIP}" + (f" -label:{QUARANTINE}" if action == "quarantine" else "")
             pairs += [(a, m["id"]) for m in gmail_list(a["id"], qs(q), "messages", MAX_BULK)]
         with db() as c:
             c.execute("UPDATE unified.ai_sort SET total = %s, done = 0, kept = 0, status = 'sorting' WHERE addr = %s",
@@ -1112,7 +1168,7 @@ def ai_sort_new():
             since = int(last or 0) - 3600
             pairs = []
             for a in ACC.list():
-                pairs += [(a, m["id"]) for m in gmail_list(a["id"], qs(f"from:{addr} in:inbox after:{since}"), "messages", 500)]
+                pairs += [(a, m["id"]) for m in gmail_list(a["id"], qs(f"{frm(addr)} in:inbox after:{since}"), "messages", 500)]
             if pairs:
                 kept = _ai_sort_ids(addr, rule, action, pairs)
                 log("ai-sort", f"{addr}: {len(pairs)} new, kept {kept}, rest {action}")
@@ -1138,9 +1194,7 @@ def apply_plan(d):
     """Apply a multi-group plan to a sender in every account that gets its mail:
     groups = [{"label", "words": [...], "action": keep|archive|quarantine|delete}] (first matching group wins, by subject),
     default = action for everything that matches no group (keep = leave it alone)."""
-    addr = (d.get("addr") or "").strip().lower()
-    if not re.fullmatch(r"[^@\s]+@[^@\s]+", addr):
-        raise ValueError("bad sender address")
+    addr = sender_addr(d.get("addr"))
     groups = []
     raw_groups = [g for g in (d.get("groups") or []) if any(str(w).strip() for w in (g.get("words") or []))]
     if len(raw_groups) > 6:  # refused, not cut: a dropped "keep" group would hand its mail to the default action

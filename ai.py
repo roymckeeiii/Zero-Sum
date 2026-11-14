@@ -51,7 +51,8 @@ def _subjects(addr, per_account=60):
     if rows:
         norm = collections.Counter(re.sub(r"\d+", "#", r[0].strip())[:120] for r in rows)
         return norm.most_common(80), len(rows)
-    q = urllib.parse.quote(f"from:{addr} -in:trash")
+    from cleanup import frm
+    q = urllib.parse.quote(f"{frm(addr)} -in:trash")
 
     def one(a):
         try:
@@ -68,9 +69,8 @@ def _subjects(addr, per_account=60):
 
 
 def suggest(d):
-    addr = (d.get("addr") or "").strip().lower()
-    if not re.fullmatch(r"[^@\s]+@[^@\s]+", addr):
-        raise ValueError("bad sender address")
+    from cleanup import sender_addr
+    addr = sender_addr(d.get("addr"))
     if not KEY:
         raise PermissionError("AI is not configured: set OPENROUTER_API_KEY (and optionally AI_MODEL)")
     subjects, sampled = _subjects(addr)
@@ -239,7 +239,8 @@ def analyze(d):
     if _running["busy"]:
         return {"started": False, "running": _running}
     if d.get("addr"):  # re-analyze one sender
-        addrs = [str(d["addr"]).strip().lower()]
+        from cleanup import sender_addr
+        addrs = [sender_addr(d["addr"])]
     else:
         from cleanup import protected_set, is_protected
         n = max(1, min(int(d.get("limit") or 25), 100))

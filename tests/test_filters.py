@@ -146,7 +146,7 @@ class Removed(World):
         self.assertEqual([f for f in self.db.filters if f[2] == S], [])
 
     def test_releasing_a_sender_from_quarantine_removes_only_its_quarantine_filter(self):
-        self.g.found["from:" + S] = ["aa11bb"]
+        self.g.found['from:"' + S + '"'] = ["aa11bb"]
         cleanup.quarantine_action({"action": "release", "sender": S})
         self.assertEqual(self.deleted(), ["F3"])
 
