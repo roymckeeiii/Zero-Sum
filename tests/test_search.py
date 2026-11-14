@@ -113,29 +113,37 @@ class Search(unittest.TestCase):
         self.assertEqual([e["email"] for e in d["errors"]], ["b@x.com"])
         self.assertIn("401", d["errors"][0]["error"])
 
-    def test_paging_continues_each_account_where_it_stopped(self):
+    def test_paging_is_globally_ordered_capped_and_complete(self):
+        # RFC-001885 final review: A's mail is all newer than B's from #10 on; per-account pages used to show B's old
+        # mail before A's newer second page. Now every page is newest-first across accounts and pages never overlap.
         msgs = {"A": [(f"a{i:02d}", 1000 - i, ["SENT"]) for i in range(25)],
-                "B": [(f"b{i:02d}", 500 - i, ["Label_1"]) for i in range(12)]}
+                "B": [(f"b{i:02d}", 995 - 50 * i, ["Label_1"]) for i in range(12)]}
         fake = FakeGmail(msgs)
-        d1 = self.run_search(fake, scope="all", limit=20)  # 20 split over 2 accounts: 10 each
-        self.assertEqual(len(fake.calls), 2)  # one list call per account per page
-        self.assertTrue(all(q["maxResults"] == ["10"] for _, q in fake.calls))
-        self.assertEqual(len(d1["items"]), 20)
-        page = inbox.decode_page(d1["next"])
-        self.assertEqual(page, {"A": "10", "B": "10"})
-        fake.calls.clear()
-        d2 = self.run_search(fake, scope="all", limit=20, page=d1["next"])
-        self.assertEqual(sorted(a for a, _ in fake.calls), ["A", "B"])
-        self.assertEqual(len(d2["items"]), 12)  # A 10-19, B 10-11
-        self.assertEqual(inbox.decode_page(d2["next"]), {"A": "20"})  # B is exhausted
-        fake.calls.clear()
-        d3 = self.run_search(fake, scope="all", limit=20, page=d2["next"])
-        self.assertEqual([a for a, _ in fake.calls], ["A"])  # only the account that still has results
-        self.assertEqual([i["id"] for i in d3["items"]], [f"a{i:02d}" for i in range(20, 25)])
-        self.assertEqual(d3["next"], "")
-        ids = [i["id"] for d in (d1, d2, d3) for i in d["items"]]
-        self.assertEqual(len(ids), len(set(ids)))
-        self.assertEqual(len(ids), 37)
+        seen, page, pages = [], "", 0
+        while True:
+            fake.calls.clear()
+            d = self.run_search(fake, scope="all", limit=20, **({"page": page} if page else {}))
+            pages += 1
+            self.assertLessEqual(len(d["items"]), 20)
+            self.assertLessEqual(len(fake.calls), 2)                      # <= one list call per account per page
+            seen += [(i["ts"], i["id"]) for i in d["items"]]
+            page = d["next"]
+            if not page or pages > 10:
+                break
+        self.assertEqual(len(seen), 37)
+        self.assertEqual(len({x[1] for x in seen}), 37)                   # every message exactly once
+        self.assertEqual([x[0] for x in seen], sorted((x[0] for x in seen), reverse=True))   # global order
+
+    def test_held_back_ids_are_shown_on_the_next_page(self):
+        msgs = {"A": [(f"a{i:02d}", 1000 - i, ["SENT"]) for i in range(10)],
+                "B": [(f"b{i:02d}", 100 - i, ["SENT"]) for i in range(30)]}
+        fake = FakeGmail(msgs)
+        d1 = self.run_search(fake, scope="sent", limit=20)
+        self.assertEqual([i["id"] for i in d1["items"]][:10], [f"a{i:02d}" for i in range(10)])
+        nxt = inbox.decode_page(d1["next"])
+        self.assertEqual(nxt["B"]["t"], "10")
+        self.assertNotIn("A", nxt)                                        # A is exhausted and fully shown
+        self.assertTrue(all(i["id"].startswith("b") for i in self.run_search(fake, scope="sent", limit=20, page=d1["next"])["items"]))
 
     def test_many_accounts_page_cap_and_every_message_exactly_once(self):
         global ACCOUNTS
@@ -186,7 +194,8 @@ class Search(unittest.TestCase):
         self.assertEqual(inbox.recipients(""), "")
 
     def test_bad_page_token_is_refused(self):
-        for bad in ("!!!", inbox.encode_page({"A": "1"})[:-3] + "xyz", "WzFd"):  # WzFd = base64 of a JSON list
+        for bad in ("!!!", inbox.encode_page({"A": {"t": "1", "b": []}})[:-3] + "xyz", "WzFd",
+                    inbox.encode_page({"A": "1"}), inbox.encode_page({"A": {"t": 1}})):  # old/odd shapes refused
             with self.assertRaises(ValueError):
                 inbox.decode_page(bad)
 

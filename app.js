@@ -76,8 +76,11 @@ async function loadList(keepSel, page) {
   if (scope === "label") p.set("label", S.label || "");
   if (page) p.set("page", page);
   if (!keepSel && !page) $("#list").innerHTML = `<div class="empty">Loading…</div>`;
+  // a slower answer to an older search (or its Load more) must not land in the list of a newer one (RFC-001885)
+  const req = (S.req = (S.req || 0) + 1);
   let d;
-  try { d = await api(`/api/messages?${p}`); } catch (e) { $("#list").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
+  try { d = await api(`/api/messages?${p}`); } catch (e) { if (req === S.req) $("#list").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
+  if (req !== S.req) return;
   const selId = keepSel && S.items[S.sel] ? S.items[S.sel].id : null;
   if (page) {  // append, newest first, without repeating a message already shown
     const seen = new Set(S.items.map((i) => `${i.account}/${i.id}`));

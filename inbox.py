@@ -63,9 +63,12 @@ def decode_page(page):
         d = json.loads(base64.urlsafe_b64decode(page.encode()))
     except (binascii.Error, ValueError):
         raise ValueError("bad page") from None
-    if not isinstance(d, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in d.items()):
+    ok = isinstance(d, dict) and all(
+        isinstance(k, str) and isinstance(v, dict) and isinstance(v.get("t", ""), str)
+        and isinstance(v.get("b", []), list) and all(isinstance(x, str) for x in v.get("b", [])) for k, v in d.items())
+    if not ok:
         raise ValueError("bad page")
-    return d
+    return {k: {"t": v.get("t", ""), "b": list(v.get("b", []))} for k, v in d.items()}
 
 
 def recipients(to_header):
@@ -139,27 +142,53 @@ def messages(q):
         limit = min(limit, SEARCH_PAGE_MAX)
         per = max(1, limit // max(1, len(accs)))  # per-account pages add up to at most `limit`
     errors, nxt = [], {}
+    paged = not (scope == "inbox" and page is None)
+    state = page or {}
 
     def ids(a):
+        """This account's candidates, newest first: ids held back from the last page, then a fresh page from Gmail
+        when fewer than `per` are held back. Returns (pairs, gmail token or "", has_more)."""
+        st = state.get(a["id"], {"t": "", "b": []})
+        held, token = list(st["b"]), st["t"]
+        if paged and len(held) >= per:
+            return [(a, m) for m in held], token, bool(token)
+        if page is not None and not token:
+            return [(a, m) for m in held], "", False
         p = f"/messages?maxResults={per}{params}" + (f"&q={urllib.parse.quote(gq)}" if gq else "")
-        if page is not None:
-            p += f"&pageToken={urllib.parse.quote(page[a['id']])}"
+        if token:
+            p += f"&pageToken={urllib.parse.quote(token)}"
         try:
             d = gmail(a["id"], p)
         except Exception as e:  # noqa: BLE001
             errors.append({"email": a["email"], "error": str(e)[:200]})
-            return []
-        if d.get("nextPageToken"):
-            nxt[a["id"]] = d["nextPageToken"]
-        return [(a, m["id"]) for m in d.get("messages", [])]
+            return [(a, m) for m in held], "", False
+        new_token = d.get("nextPageToken") or ""
+        return [(a, m) for m in held] + [(a, m["id"]) for m in d.get("messages", [])], new_token, bool(new_token)
 
     def safe_meta(p):
         try:
             return meta(*p)
         except Exception:  # noqa: BLE001 - message vanished between list and get
             return None
-    pairs = [p for lst in POOL.map(ids, accs) for p in lst]
+    fetched = list(POOL.map(ids, accs))
+    pairs = [p for lst, _, _ in fetched for p in lst]
     items = sorted((i for i in POOL.map(safe_meta, pairs) if i), key=lambda i: -i["ts"])
+    if paged:
+        # Global order across accounts and pages (RFC-001885 final review): an account that has more mail in Gmail
+        # may still hold messages newer than another account's oldest candidate, so nothing older than the newest
+        # such boundary is shown yet; the rest is held back in the page token and shown, in order, on "load more".
+        by_acc = {}
+        for it in items:
+            by_acc.setdefault(it["account"], []).append(it)
+        cutoff = max((by_acc[a["id"]][-1]["ts"] for (_, _, more), a in zip(fetched, accs)
+                      if more and by_acc.get(a["id"])), default=None)
+        shown = [it for it in items if cutoff is None or it["ts"] >= cutoff][:limit]
+        ids_shown = {(it["account"], it["id"]) for it in shown}
+        for (_, token, more), a in zip(fetched, accs):
+            held = [it["id"] for it in by_acc.get(a["id"], []) if (a["id"], it["id"]) not in ids_shown]
+            if held or token:
+                nxt[a["id"]] = {"t": token, "b": held}
+        items = shown
     rules = rules_for(items)
     from cleanup import is_protected, protected_set
     prot = protected_set()
