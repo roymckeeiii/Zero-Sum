@@ -50,23 +50,46 @@ async function loadAccounts() {
   $("#accounts").innerHTML = `<a data-id="" class="${S.account ? "" : "on"}"><span>All accounts</span><span class="n">${total || ""}</span></a>` +
     S.accounts.map((a) => `<a data-id="${esc(a.id)}" class="${a.id === S.account ? "on" : ""} ${a.ok ? "" : "bad"}" title="${esc(a.ok ? a.email : a.error)}">
       <span><span class="dot" style="background:${slotOf(a.id)}"></span>${esc(a.email)}</span><span class="n">${a.ok ? a.unread || "" : "!"}</span></a>`).join("") +
-    `<div class="tools"><input type="search" id="q" placeholder="Search (Gmail syntax)"><label><input type="checkbox" id="unread"> Unread only</label>
+    `<div class="tools"><input type="search" id="q" placeholder="Search (Gmail syntax)">
+      <select id="scope" title="Where to search"><option value="inbox">Inbox</option><option value="all">All mail</option>
+        <option value="sent">Sent</option><option value="label">A label…</option><option value="spamtrash">Spam &amp; Trash</option></select>
+      <input type="search" id="label" placeholder="Label name" hidden><label><input type="checkbox" id="unread"> Unread only</label>
       <button id="refresh">Refresh (r)</button></div>`;
   if (!S.accounts.length) $("#accounts").innerHTML += `<div class="err">No linked accounts yet: add them in Inbox Zero.</div>`;
   $("#q").value = S.q || ""; $("#unread").checked = !!S.unreadOnly;
+  $("#scope").value = scopeOf(); $("#label").value = S.label || ""; $("#label").hidden = S.scope !== "label";
+  $("#scope").onchange = (e) => { S.scope = e.target.value; S.limit = 30; $("#label").hidden = S.scope !== "label"; if (S.scope !== "label" || S.label) loadList(); };
+  $("#label").oninput = (e) => { S.label = e.target.value.trim(); clearTimeout(t); t = setTimeout(() => S.label && loadList(), 400); };
   let t;
   $("#q").oninput = (e) => { S.q = e.target.value; clearTimeout(t); t = setTimeout(() => loadList(), 400); };
   $("#unread").onchange = (e) => { S.unreadOnly = e.target.checked; loadList(); };
   $("#refresh").onclick = () => { loadAccounts(); loadList(true); };
 }
 
-async function loadList(keepSel) {
-  const p = new URLSearchParams({ limit: S.limit, account: S.account, q: S.q || "", unread: S.unreadOnly ? "1" : "0" });
-  if (!keepSel) $("#list").innerHTML = `<div class="empty">Loading…</div>`;
+// The list view is the inbox; typing a search searches All mail unless a scope was picked (RFC-001853 spec item 1).
+const scopeOf = () => S.scope || (S.q ? "all" : "inbox");
+// scope "inbox" keeps the original paging (a bigger limit); every other scope pages with per-account tokens (`next`)
+async function loadList(keepSel, page) {
+  const scope = scopeOf();
+  if ($("#scope")) $("#scope").value = scope;
+  const p = new URLSearchParams({ limit: S.limit, account: S.account, q: S.q || "", unread: S.unreadOnly ? "1" : "0", scope });
+  if (scope === "label") p.set("label", S.label || "");
+  if (page) p.set("page", page);
+  if (!keepSel && !page) $("#list").innerHTML = `<div class="empty">Loading…</div>`;
+  // a slower answer to an older search (or its Load more) must not land in the list of a newer one (RFC-001885)
+  const req = (S.req = (S.req || 0) + 1);
   let d;
-  try { d = await api(`/api/messages?${p}`); } catch (e) { $("#list").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
+  try { d = await api(`/api/messages?${p}`); } catch (e) { if (req === S.req) $("#list").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
+  if (req !== S.req) return;
   const selId = keepSel && S.items[S.sel] ? S.items[S.sel].id : null;
-  S.items = d.items; S.errors = d.errors; S.more = d.items.length >= S.limit;
+  if (page) {  // append, newest first, without repeating a message already shown
+    const seen = new Set(S.items.map((i) => `${i.account}/${i.id}`));
+    d.items = [...S.items, ...d.items.filter((i) => !seen.has(`${i.account}/${i.id}`))].sort((a, b) => b.ts - a.ts);
+    const errs = new Map([...(S.errors || []), ...d.errors].map((x) => [x.email, x]));  // one warning per account
+    d.errors = [...errs.values()];
+  }
+  S.items = d.items; S.errors = d.errors; S.next = d.next || "";
+  S.more = scope === "inbox" ? d.items.length >= S.limit : !!S.next;
   S.sel = selId ? S.items.findIndex((i) => i.id === selId) : -1;
   redraw();
 }
@@ -76,13 +99,13 @@ function row(it, i) {
     it.labels.map((l) => `<span class="chip">${esc(l)}</span>`).join("");
   return `<div class="row ${it.unread ? "unread" : ""} ${i === S.sel ? "sel" : ""}" data-i="${i}">
     <span class="dot" style="background:${slotOf(it.account)}"></span>
-    <span class="from" title="${esc(it.fromAddr)}">${it.starred ? '<span class="star" title="Starred">★</span> ' : ""}${it.protected ? '<span class="chip prot" title="Protected sender">protected</span>' : ""}${esc(it.from)}</span><span class="when">${when(it.ts)}</span>
+    <span class="from" title="${esc(it.folder === "Sent" && it.to ? `To: ${it.to}` : it.fromAddr)}">${it.starred ? '<span class="star" title="Starred">★</span> ' : ""}${it.protected ? '<span class="chip prot" title="Protected sender">protected</span>' : ""}${it.folder === "Sent" && it.to ? `To: ${esc(it.to)}` : esc(it.from)}</span><span class="when">${when(it.ts)}</span>
     <span class="acts"><button data-act="archive" title="Archive (e)">Archive</button>
       <button data-act="${it.starred ? "unstar" : "star"}" title="Star (s)">${it.starred ? "Unstar" : "Star"}</button>
       <button data-act="${it.unread ? "read" : "unread"}">${it.unread ? "Read" : "Unread"}</button>
       <button data-act="delete" title="Move to Trash (#)">Delete</button></span>
     <span class="subj">${esc(it.subject)}</span><span class="snip">${esc(it.snippet)}</span>
-    <span class="chips">${S.account ? "" : acctChip(it.account, it.email)}${chips}</span></div>`;
+    <span class="chips">${S.account ? "" : acctChip(it.account, it.email)}${scopeOf() !== "inbox" && it.folder ? `<span class="chip folder" title="Folder">${esc(it.folder)}</span>` : ""}${chips}</span></div>`;
 }
 
 function redraw() {
@@ -90,7 +113,9 @@ function redraw() {
     (S.items.length ? S.items.map(row).join("") : `<div class="empty">Nothing here.</div>`) +
     (S.more ? `<button id="more">Load more</button>` : "");
   const more = $("#more");
-  if (more) more.onclick = () => { S.limit = Math.min(S.limit * 2, 200); loadList(true); };
+  if (more) more.onclick = () => {
+    if (scopeOf() === "inbox") { S.limit = Math.min(S.limit * 2, 200); loadList(true); } else loadList(true, S.next);
+  };
 }
 
 async function act(i, action) {
