@@ -13,6 +13,9 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me"
 MASTER = os.environ.get("MASTER_EMAIL", "").strip().lower()  # whose rules are copied to the others; empty = no rule sync
+# Optional tenant scope: Inbox Zero user ids and/or login e-mails whose linked mailboxes this app may use. Empty (the
+# default) = every Google mailbox in the database, as before: fine when the Inbox Zero instance has one user.
+OWNERS = [x.strip() for x in os.environ.get("ACCOUNT_OWNERS", "").split(",") if x.strip()]
 POOL = ThreadPoolExecutor(max_workers=24)
 _key = None
 
@@ -53,6 +56,19 @@ def decrypt(value):
         return None
 
 
+def accounts_query(owners=None):
+    """(sql, params) for the one query that decides which mailboxes exist for this app."""
+    owners = OWNERS if owners is None else owners
+    sql = ('SELECT ea.id, ea.email, ea.name, a.access_token, a.refresh_token, a.expires_at '
+           'FROM "EmailAccount" ea JOIN "Account" a ON a.id = ea."accountId" WHERE a.provider = \'google\'')
+    params = ()
+    if owners:
+        sql += (' AND (ea."userId" = ANY(%s) OR ea."userId" IN '
+                '(SELECT u.id FROM "User" u WHERE lower(u.email) = ANY(%s)))')
+        params = ([o for o in owners if "@" not in o], [o.lower() for o in owners if "@" in o])
+    return sql + " ORDER BY ea.email", params
+
+
 class Accounts:
     """The linked Gmail accounts (EmailAccount + its Google Account row), cached for a minute."""
 
@@ -63,10 +79,8 @@ class Accounts:
         with self.lock:
             if time.time() - self.at > 60:
                 with db() as c:
-                    self.rows = [dict(zip(("id", "email", "name", "access", "refresh", "expires"), r)) for r in c.execute(
-                        'SELECT ea.id, ea.email, ea.name, a.access_token, a.refresh_token, a.expires_at '
-                        'FROM "EmailAccount" ea JOIN "Account" a ON a.id = ea."accountId" '
-                        "WHERE a.provider = 'google' ORDER BY ea.email").fetchall()]
+                    self.rows = [dict(zip(("id", "email", "name", "access", "refresh", "expires"), r))
+                                 for r in c.execute(*accounts_query()).fetchall()]
                 self.at = time.time()
 
     def list(self):

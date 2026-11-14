@@ -28,6 +28,9 @@ WRITE = {
     "Newsletter": ["id", "updatedAt", "email", "status", "emailAccountId"],         # cleanup.py, ai.py, analytics.py
 }
 TABLES = {**READ, **WRITE}
+# Read only when ACCOUNT_OWNERS is set (core.accounts_query): whose mailbox is whose. grants.sql grants these when
+# they exist, and they are checked only when the setting is in use.
+OWNER_SCOPE = {"EmailAccount": ["userId"], "User": ["id", "email"]}
 # enum -> the values Zero Sum itself writes or compares with (rule sync only copies values, so it needs none by name)
 ENUMS = {
     "ActionType": ["LABEL"],
@@ -38,12 +41,17 @@ ENUMS = {
 }
 
 
-def problems(c):
+def problems(c, owner_scope=False):
     """What the contract needs that this connection cannot see: a list of plain sentences, empty when all is there.
-    information_schema only shows columns the role may use, so a missing grant is reported like a missing column."""
+    information_schema only shows columns the role may use, so a missing grant is reported like a missing column.
+    owner_scope: also require the columns ACCOUNT_OWNERS needs."""
+    tables = {t: list(cols) for t, cols in TABLES.items()}
+    if owner_scope:
+        for t, cols in OWNER_SCOPE.items():
+            tables.setdefault(t, []).extend(cols)
     have = {}
     for table, column in c.execute("SELECT table_name, column_name FROM information_schema.columns "
-                                   "WHERE table_schema = 'public' AND table_name = ANY(%s)", (sorted(TABLES),)).fetchall():
+                                   "WHERE table_schema = 'public' AND table_name = ANY(%s)", (sorted(tables),)).fetchall():
         have.setdefault(table, set()).add(column)
     enums = {}
     for name, label in c.execute("SELECT t.typname, e.enumlabel FROM pg_type t JOIN pg_enum e ON e.enumtypid = t.oid "
@@ -51,7 +59,7 @@ def problems(c):
                                  "AND t.typname = ANY(%s)", (sorted(ENUMS),)).fetchall():
         enums.setdefault(name, set()).add(label)
     out = []
-    for table, columns in TABLES.items():
+    for table, columns in tables.items():
         if table not in have:
             out.append(f'table "{table}" is missing or not readable')
             continue
@@ -66,6 +74,6 @@ def problems(c):
 
 def check():
     """problems() on a fresh connection. Raises when the database cannot be reached."""
-    from core import db
+    from core import OWNERS, db
     with db() as c:
-        return problems(c)
+        return problems(c, owner_scope=bool(OWNERS))

@@ -4,6 +4,7 @@
 --
 -- What it may do, and nothing more:
 --   read  a few columns of "Account" / "EmailAccount" (the linked Google accounts and their encrypted tokens)
+--   read  "EmailAccount"."userId" and "User" (id, email): which Inbox Zero user a mailbox belongs to (ACCOUNT_OWNERS)
 --   read  a few columns of "ExecutedRule" (which Inbox Zero rule handled which email)
 --   write "Rule", "Action" (rule sync), "Newsletter" (sender unsubscribe / auto-archive status)
 --   own   schema "unified" (its own tables)
@@ -21,4 +22,15 @@ GRANT SELECT (id, email, name, "accountId") ON "EmailAccount" TO iz_unified;
 REVOKE SELECT ON "ExecutedRule" FROM iz_unified;  -- earlier versions granted the whole table
 GRANT SELECT ("messageId", "ruleId", status, "emailAccountId", "createdAt") ON "ExecutedRule" TO iz_unified;
 GRANT SELECT, INSERT, UPDATE, DELETE ON "Rule", "Action", "Newsletter" TO iz_unified;
+-- Only read when ACCOUNT_OWNERS is set (which Inbox Zero user a mailbox belongs to). Granted when the columns exist,
+-- so this file never fails on an Inbox Zero version that names them differently; the app then says what is missing.
+DO $$
+BEGIN
+  IF (SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND
+      ((table_name = 'EmailAccount' AND column_name = 'userId') OR
+       (table_name = 'User' AND column_name IN ('id', 'email')))) = 3 THEN
+    GRANT SELECT ("userId") ON "EmailAccount" TO iz_unified;
+    GRANT SELECT (id, email) ON "User" TO iz_unified;
+  END IF;
+END $$;
 CREATE SCHEMA IF NOT EXISTS unified AUTHORIZATION iz_unified;

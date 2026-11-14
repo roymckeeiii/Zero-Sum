@@ -255,6 +255,8 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
 - Self-hosted Inbox Zero with Google accounts, run with its `docker-compose.yml` (its `db` service and
   `inbox-zero-network`). Tested with Inbox Zero **v2.25.8**; Zero Sum writes some Inbox Zero tables directly, so check
   [Upgrading Inbox Zero](#upgrading-inbox-zero) before upgrading.
+- By default Zero Sum works on **every** Google mailbox linked in the Inbox Zero database. If your Inbox Zero has more
+  than one user, set `ACCOUNT_OWNERS` so it only touches yours.
 - An authenticating reverse proxy in front of it. Zero Sum has **no login page**. Behind **Cloudflare Access** set
   `CF_ACCESS_TEAM_DOMAIN` and `CF_ACCESS_AUD`: it then verifies the signed Access token on every request and only lets
   in `ALLOWED_EMAILS`. Without those two it **refuses to start**. `ALLOW_HEADER_TRUST=1` overrides that for local
@@ -292,6 +294,7 @@ All settings are environment variables; see [`.env.example`](.env.example).
 | `EMAIL_ENCRYPT_SECRET`, `EMAIL_ENCRYPT_SALT` | required | Inbox Zero's values |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | required | Inbox Zero's Google OAuth client |
 | `ALLOWED_EMAILS` | required | comma-separated addresses allowed in |
+| `ACCOUNT_OWNERS` | unset | comma-separated Inbox Zero user ids and/or login e-mails: only their linked mailboxes are used. Unset = every Google mailbox in the Inbox Zero database (fine for a single-user instance). Set it when other people also sign in to your Inbox Zero. |
 | `ALLOW_HEADER_TRUST` | unset | `1` = start without Access token verification and believe `AUTH_EMAIL_HEADER`. Local development only. |
 | `AUTH_EMAIL_HEADER` | `Cf-Access-Authenticated-User-Email` | only with `ALLOW_HEADER_TRUST=1`: header your proxy sets (oauth2-proxy: `X-Forwarded-Email`) |
 | `LISTEN_HOST` | `127.0.0.1` (image: `0.0.0.0`) | address the server binds to; in a container the published port decides who can reach it |

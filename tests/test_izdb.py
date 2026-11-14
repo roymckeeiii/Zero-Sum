@@ -37,11 +37,15 @@ class Grants(unittest.TestCase):
                     column_grants[table] = sorted(c.strip().strip('"') for c in m.group(1).split(","))
                 else:
                     table_grants[table] = sorted(p.strip() for p in privs.split(","))
-        self.assertEqual(column_grants, {t: sorted(cols) for t, cols in izdb.READ.items()})
+        want = {t: sorted(cols) for t, cols in izdb.READ.items()}
+        want["User"] = sorted(izdb.OWNER_SCOPE["User"])
+        want["EmailAccount"] = sorted(izdb.OWNER_SCOPE["EmailAccount"])   # the later, guarded grant is the one parsed last
+        self.assertEqual(column_grants, want)
+        self.assertIn('GRANT SELECT (id, email, name, "accountId") ON "EmailAccount" TO iz_unified;', sql)
         self.assertEqual(table_grants, {t: ["DELETE", "INSERT", "SELECT", "UPDATE"] for t in izdb.WRITE})
         # and nothing else is granted on a table: no ALL, no other table, nothing to PUBLIC
-        self.assertEqual(len(re.findall(r"\bGRANT\b", sql)), len(izdb.READ) + 1 + 2)   # + the write line, CONNECT, USAGE
-        self.assertNotRegex(sql, r"(?i)\bALL\b|PUBLIC\b(?! TO)|SUPERUSER|CREATEROLE|CREATEDB")
+        self.assertEqual(len(re.findall(r"\bGRANT\b", sql)), len(izdb.READ) + 2 + 1 + 2)   # + owner scope, write, CONNECT, USAGE
+        self.assertNotRegex(sql, r"(?i)\bALL\b|TO PUBLIC|SUPERUSER|CREATEROLE|CREATEDB")
 
     def test_it_is_idempotent(self):
         sql = read("grants.sql")
@@ -55,7 +59,7 @@ class Sources(unittest.TestCase):
         for path in glob.glob(os.path.join(ROOT, "*.py")):
             src = open(path, encoding="utf-8").read()
             used |= set(re.findall(r'(?:FROM|JOIN|INTO|UPDATE)\s+\\?"([A-Z]\w*)\\?"', src))
-        self.assertEqual(used, set(izdb.TABLES))
+        self.assertEqual(used, set(izdb.TABLES) | set(izdb.OWNER_SCOPE))
 
     def test_enum_casts_in_the_sources_are_in_the_contract(self):
         used = set()
@@ -90,6 +94,11 @@ class Check(unittest.TestCase):
             'table "Newsletter" is missing or not readable',
             'enum "NewsletterStatus" has no value AUTO_ARCHIVED',
             'enum "SystemType" is missing']))
+
+    def test_owner_scope_columns_are_required_only_when_the_setting_is_used(self):
+        self.assertEqual(izdb.problems(live(), owner_scope=False), [])
+        self.assertEqual(sorted(izdb.problems(live(), owner_scope=True)),
+                         ['column "EmailAccount"."userId" is missing or not readable', 'table "User" is missing or not readable'])
 
     def test_start_up_logs_each_problem_and_keeps_going(self):
         logged = []
