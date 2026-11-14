@@ -593,12 +593,16 @@ def stop_automation(key):
                 c.execute("DELETE FROM unified.ai_sort WHERE addr = %s", (addr,))
 
 
+def bulk_query(query):
+    """The search a bulk change really runs: a sender action never reaches what the account itself sent, its drafts
+    or chats. Used by the action and by its preview, so the two cannot drift apart."""
+    return query if "in:sent" in query else f"{query} {SKIP}"
+
+
 def _modify_existing(acc_id, query, add=(), remove=(), *, sender):
     """Apply label changes to every message matching `query` (batches of 1000). Returns the count. `sender` is whose
     mail the query selects: _batch refuses a protected sender and the account's own address."""
-    if "in:sent" not in query:  # a sender action never reaches what the account itself sent, its drafts or chats
-        query = f"{query} {SKIP}"
-    return _batch(acc_id, [m["id"] for m in gmail_list(acc_id, qs(query), "messages", MAX_BULK)], add, remove,
+    return _batch(acc_id, [m["id"] for m in gmail_list(acc_id, qs(bulk_query(query)), "messages", MAX_BULK)], add, remove,
                   sender=sender)
 
 
@@ -660,7 +664,7 @@ def _batch(acc_id, ids, add=(), remove=(), record=True, sender=None):
 
 
 def _archive_existing(acc_id, addr, keep=None):
-    n = _modify_existing(acc_id, f"{frm(addr)} in:inbox" + (f" -{keep}" if keep else ""), remove=["INBOX"], sender=addr)
+    n = _modify_existing(acc_id, sender_query("archive", addr, keep), remove=["INBOX"], sender=addr)
     with db() as c:
         c.execute("UPDATE unified.msg SET inbox = false WHERE account_id = %s AND from_addr = %s", (acc_id, addr))
     return n
@@ -734,6 +738,27 @@ ACTIONS = DESTRUCTIVE | {"keep", "reset", "star", "unstar", "protect", "unprotec
 FILTERING = {"unsub_delete", "quarantine", "unsub_quarantine", "autoarchive", "unsub_archive", "block"}
 
 
+# Which existing mail each sender action changes, as a Gmail search after `from:"sender"`. One table for the action
+# and for its preview (preview()), so the confirmation dialog counts exactly what the action will touch.
+EXISTING = {"unsub_delete": "-in:trash", "delete": "-in:trash", "block": "-in:trash",
+            "quarantine": f"-in:trash -in:spam -label:{QUARANTINE}", "unsub_quarantine": f"-in:trash -in:spam -label:{QUARANTINE}",
+            "autoarchive": "in:inbox", "unsub_archive": "in:inbox", "archive": "in:inbox",
+            "spam": "-in:spam -in:trash", "star": "in:inbox -is:starred", "unstar": "is:starred"}
+
+
+def sender_query(act, addr, kq=None):
+    """The search for the existing mail a sender action changes (None: the action changes no existing mail).
+    `kq` (keep words) leaves the kept subjects out of a destructive action."""
+    if act not in EXISTING:
+        return None
+    return f"{frm(addr)} {EXISTING[act]}" + (f" -{kq}" if kq and act in DESTRUCTIVE else "")
+
+
+def kept_query(addr, kq):
+    """The kept part of a destructive action with keep words: starred now (and, by filter, in future)."""
+    return f"{frm(addr)} {kq} -is:starred -in:trash"
+
+
 def sender_action(d):
     addr, act = (d.get("addr") or "").strip().lower(), d.get("action")
     if act not in ACTIONS:
@@ -780,7 +805,6 @@ def sender_action(d):
     _ACTION.note = f"{act} {addr}"
     if act in ("keep", "reset"):
         stop_automation(addr)
-    nk = f" -{kq}" if kq else ""  # appended to every "which existing mail" query
     with db() as c:
         acc_ids = [r[0] for r in c.execute("SELECT DISTINCT account_id FROM unified.msg WHERE from_addr = %s",
                                            (addr,)).fetchall()]
@@ -810,14 +834,14 @@ def sender_action(d):
                     note.append("no unsubscribe link" + ("" if act != "unsubscribe" else ": use Block or Quarantine"))
             if act == "unsub_delete":  # and clear it out: Trash now, future mail straight to Trash
                 _filter(a, addr, TRASH_FILTER, "trash", keep=kq, source=act)
-                note.append(f"{_modify_existing(a, f'{frm(addr)} -in:trash{nk}', add=['TRASH'], sender=addr)} moved to Trash, "
+                note.append(f"{_modify_existing(a, sender_query(act, addr, kq), add=['TRASH'], sender=addr)} moved to Trash, "
                             "future mail goes to Trash")
                 if not kq:
                     _drop_rows(a, addr)
             if act in ("quarantine", "unsub_quarantine"):  # held for review on the Quarantine tab, now and in future
                 lid = label_id(a, QUARANTINE)
                 _filter(a, addr, {"addLabelIds": [lid], "removeLabelIds": ["INBOX"]}, "quarantine", keep=kq, source=act)
-                n = _modify_existing(a, f"{frm(addr)} -in:trash -in:spam -label:{QUARANTINE}{nk}", add=[lid],
+                n = _modify_existing(a, sender_query(act, addr, kq), add=[lid],
                                      remove=["INBOX"], sender=addr)  # every folder, every year
                 note.append(f"filter added, {n} moved to {QUARANTINE}")
                 with db() as c:
@@ -828,17 +852,17 @@ def sender_action(d):
             elif act == "archive":
                 note.append(f"{_archive_existing(a, addr, kq)} archived")
             elif act == "delete":
-                note.append(f"{_modify_existing(a, f'{frm(addr)} -in:trash{nk}', add=['TRASH'], sender=addr)} moved to Trash")
+                note.append(f"{_modify_existing(a, sender_query(act, addr, kq), add=['TRASH'], sender=addr)} moved to Trash")
                 if not kq:
                     _drop_rows(a, addr)
             elif act == "block":
                 _filter(a, addr, TRASH_FILTER, "trash", keep=kq, source=act)
                 note.append(f"filter added (future mail goes to Trash), "
-                            f"{_modify_existing(a, f'{frm(addr)} -in:trash{nk}', add=['TRASH'], sender=addr)} moved to Trash")
+                            f"{_modify_existing(a, sender_query(act, addr, kq), add=['TRASH'], sender=addr)} moved to Trash")
                 if not kq:
                     _drop_rows(a, addr)
             elif act == "spam":
-                note.append(f"{_modify_existing(a, f'{frm(addr)} -in:spam -in:trash{nk}', add=['SPAM'], remove=['INBOX'], sender=addr)} "
+                note.append(f"{_modify_existing(a, sender_query(act, addr, kq), add=['SPAM'], remove=['INBOX'], sender=addr)} "
                             "reported as spam")
                 if not kq:
                     _drop_rows(a, addr)
@@ -851,13 +875,13 @@ def sender_action(d):
                     note.append(FOREIGN_NOTE.format(n=left))
             elif act == "star":
                 _filter(a, addr, STAR_FILTER, "star", source=act)
-                note.append(f"filter added, {_modify_existing(a, f'{frm(addr)} in:inbox -is:starred', add=['STARRED'], sender=addr)} starred")
+                note.append(f"filter added, {_modify_existing(a, sender_query(act, addr), add=['STARRED'], sender=addr)} starred")
             elif act == "unstar":
                 remove_app_filters(a, addr, kinds=("star",), exact=True)
-                note.append(f"filter removed, {_modify_existing(a, f'{frm(addr)} is:starred', remove=['STARRED'], sender=addr)} unstarred")
+                note.append(f"filter removed, {_modify_existing(a, sender_query(act, addr), remove=['STARRED'], sender=addr)} unstarred")
             if kq and act in DESTRUCTIVE:  # the kept ones: starred now and in future, so they stand out
                 _filter(a, addr, STAR_FILTER, "keep_star", query=kq, source=act)
-                note.append(f"{_modify_existing(a, f'{frm(addr)} {kq} -is:starred -in:trash', add=['STARRED'], sender=addr)} kept and starred")
+                note.append(f"{_modify_existing(a, kept_query(addr, kq), add=['STARRED'], sender=addr)} kept and starred")
             status = {"unsubscribe": "UNSUBSCRIBED", "unsub_archive": "UNSUBSCRIBED", "unsub_quarantine": "UNSUBSCRIBED",
                       "unsub_delete": "UNSUBSCRIBED", "autoarchive": "AUTO_ARCHIVED", "quarantine": "AUTO_ARCHIVED",
                       "block": "AUTO_ARCHIVED",
@@ -1009,17 +1033,101 @@ PLAN_ACTIONS = ("keep", "archive", "quarantine", "delete")
 def _plan_action(acc_id, addr, action, crit_extra, query_extra, lid):
     """One group of a plan: a Gmail filter for future mail + the same change on existing mail. Returns a note."""
     if action == "keep":  # stays in the inbox, starred so it stands out
-        filt, q, add, rem = STAR_FILTER, f"-is:starred -in:trash -in:spam", ["STARRED"], []
+        filt, add, rem = STAR_FILTER, ["STARRED"], []
     elif action == "archive":
-        filt, q, add, rem = ARCHIVE_FILTER, "in:inbox", [], ["INBOX"]
+        filt, add, rem = ARCHIVE_FILTER, [], ["INBOX"]
     elif action == "quarantine":
-        filt, q, add, rem = {"addLabelIds": [lid], "removeLabelIds": ["INBOX"]}, f"-in:trash -in:spam -label:{QUARANTINE}", [lid], ["INBOX"]
+        filt, add, rem = {"addLabelIds": [lid], "removeLabelIds": ["INBOX"]}, [lid], ["INBOX"]
     else:  # delete
-        filt, q, add, rem = TRASH_FILTER, "-in:trash", ["TRASH"], []
+        filt, add, rem = TRASH_FILTER, ["TRASH"], []
     _filter(acc_id, addr, filt, "keep_star" if action == "keep" else {"delete": "trash"}.get(action, action),
             query=crit_extra.get("query"), negated=crit_extra.get("negatedQuery"), source="plan")
-    n = _modify_existing(acc_id, f"{frm(addr)} {query_extra} {q}".strip(), add=add, remove=rem, sender=addr)
-    return n
+    return _modify_existing(acc_id, plan_query(addr, action, query_extra), add=add, remove=rem, sender=addr)
+
+
+PLAN_EXISTING = {"keep": "-is:starred -in:trash -in:spam", "archive": "in:inbox",
+                 "quarantine": f"-in:trash -in:spam -label:{QUARANTINE}", "delete": "-in:trash"}
+
+
+def plan_query(addr, action, query_extra):
+    """The search for the existing mail one group of a plan changes (shared by apply_plan and preview)."""
+    return " ".join(x for x in (frm(addr), query_extra.strip(), PLAN_EXISTING[action]) if x)
+
+
+def plan_input(d):
+    """(addr, groups, default) from a plan request, validated: groups = [{"label", "kq", "action"}]."""
+    addr = sender_addr(d.get("addr"))
+    groups = []
+    raw_groups = [g for g in (d.get("groups") or []) if any(str(w).strip() for w in (g.get("words") or []))]
+    if len(raw_groups) > 6:  # refused, not cut: a dropped "keep" group would hand its mail to the default action
+        raise ValueError("at most 6 groups in a plan")
+    for g in raw_groups:
+        kq = keep_query(g.get("words"))
+        if not kq or g.get("action") not in PLAN_ACTIONS:
+            raise ValueError(f"group {str(g.get('label') or '?')[:40]!r} has no usable words or a bad action")
+        groups.append({"label": str(g.get("label") or "")[:40], "kq": kq, "action": g["action"]})
+    return addr, groups, d.get("default") if d.get("default") in PLAN_ACTIONS else "keep"
+
+
+def plan_steps(groups, default):
+    """A word plan as ordered steps [(label, action, filter criteria, search)]: a group only takes mail no earlier
+    group matched, and the default takes what no group matched (nothing, when the default is keep)."""
+    steps, earlier = [], []
+    for g in groups:
+        crit = {"query": g["kq"], **({"negatedQuery": " OR ".join(earlier)} if earlier else {})}
+        steps.append((g["label"] or g["action"], g["action"], crit, g["kq"] + "".join(f" -{k}" for k in earlier)))
+        earlier.append(g["kq"])
+    if default != "keep":
+        steps.append(("everything else", default, {"negatedQuery": " OR ".join(earlier)} if earlier else {},
+                      "".join(f" -{k}" for k in earlier)))
+    return steps
+
+
+PREVIEW_MAX = int(os.environ.get("PREVIEW_MAX", "20000"))  # a preview counts up to this many per account and step
+
+
+def preview(d):
+    """What a sender action ({addr, action, keep}) or a word plan ({addr, groups, default}) would change, per account
+    and in total: counted in Gmail with the very searches the action runs (all folders, all years), not from the
+    recent local window. Nothing is changed. A count that reaches PREVIEW_MAX is reported as capped ("or more")."""
+    if "groups" in d or "default" in d:
+        addr, groups, default = plan_input(d)
+        steps = [(label, action, plan_query(addr, action, extra)) for label, action, _, extra in plan_steps(groups, default)]
+        destructive = any(action != "keep" for _, action, _ in steps)
+    else:
+        addr, act = sender_addr(d.get("addr")), d.get("action")
+        if act not in ACTIONS or act in ("protect", "unprotect"):
+            raise ValueError("bad sender action")
+        destructive = act in DESTRUCTIVE
+        kq = keep_query(d.get("keep")) if destructive else None
+        steps = [(act, act, sender_query(act, addr, kq))] if sender_query(act, addr, kq) else []
+        if kq:
+            steps.append(("kept and starred", "keep", kept_query(addr, kq)))
+    if destructive:
+        guard_sender(addr)
+    with db() as c:
+        acc_ids = [r[0] for r in c.execute("SELECT DISTINCT account_id FROM unified.msg WHERE from_addr = %s",
+                                           (addr,)).fetchall()]
+    if d.get("accounts"):
+        acc_ids = [a for a in acc_ids if a in set(d["accounts"])]
+
+    def count(job):
+        a, query = job
+        try:
+            return len(gmail_list(a, qs(bulk_query(query)), "messages", PREVIEW_MAX))
+        except Exception as e:  # noqa: BLE001 - shown per account; the other counts still help
+            return str(e)[:200]
+    jobs = [(a, query) for _, _, query in steps for a in acc_ids]
+    counts = dict(zip(jobs, POOL.map(count, jobs)))
+    out = []
+    for label, action, query in steps:
+        per = [{"id": a, "email": ACC.email(a), **({"count": counts[(a, query)], "capped": counts[(a, query)] >= PREVIEW_MAX}
+                                                 if isinstance(counts[(a, query)], int) else {"error": counts[(a, query)]})}
+               for a in acc_ids]
+        out.append({"what": label, "action": action, "query": bulk_query(query), "accounts": per,
+                    "total": sum(x.get("count", 0) for x in per),
+                    "capped": any(x.get("capped") for x in per), "failed": any("error" in x for x in per)})
+    return {"addr": addr, "accounts": len(acc_ids), "steps": out, "max": MAX_BULK}
 
 
 def _labels_for(action, lid):
@@ -1194,17 +1302,7 @@ def apply_plan(d):
     """Apply a multi-group plan to a sender in every account that gets its mail:
     groups = [{"label", "words": [...], "action": keep|archive|quarantine|delete}] (first matching group wins, by subject),
     default = action for everything that matches no group (keep = leave it alone)."""
-    addr = sender_addr(d.get("addr"))
-    groups = []
-    raw_groups = [g for g in (d.get("groups") or []) if any(str(w).strip() for w in (g.get("words") or []))]
-    if len(raw_groups) > 6:  # refused, not cut: a dropped "keep" group would hand its mail to the default action
-        raise ValueError("at most 6 groups in a plan")
-    for g in raw_groups:
-        kq = keep_query(g.get("words"))
-        if not kq or g.get("action") not in PLAN_ACTIONS:
-            raise ValueError(f"group {str(g.get('label') or '?')[:40]!r} has no usable words or a bad action")
-        groups.append({"label": str(g.get("label") or "")[:40], "kq": kq, "action": g["action"]})
-    default = d.get("default") if d.get("default") in PLAN_ACTIONS else "keep"
+    addr, groups, default = plan_input(d)
     _ACTION.note = f"plan for {addr}"
     destructive = {g["action"] for g in groups} | {default}
     if destructive - {"keep"} and is_protected(addr):
@@ -1240,17 +1338,9 @@ def apply_plan(d):
         try:
             lid = label_id(a, QUARANTINE) if "quarantine" in destructive else None
             remove_app_filters(a, addr)  # a re-applied plan replaces the old one's filters (every kind), it doesn't add to them
-            notes, earlier = [], []  # a group only takes mail no earlier group matched
-            for g in groups:
-                excl = "".join(f" -{k}" for k in earlier)
-                crit = {"query": g["kq"], **({"negatedQuery": " OR ".join(earlier)} if earlier else {})}
-                n = _plan_action(a, addr, g["action"], crit, f"{g['kq']}{excl}", lid)
-                notes.append(f"{g['label'] or g['action']}: {n} {g['action']}")
-                earlier.append(g["kq"])
-            if default != "keep":
-                crit = {"negatedQuery": " OR ".join(earlier)} if earlier else {}
-                n = _plan_action(a, addr, default, crit, "".join(f" -{k}" for k in earlier), lid)
-                notes.append(f"everything else: {n} {default}")
+            notes = []
+            for label, action, crit, extra in plan_steps(groups, default):
+                notes.append(f"{label}: {_plan_action(a, addr, action, crit, extra, lid)} {action}")
             results.append({"email": em, "ok": True, "note": "; ".join(notes) or "nothing to do"})
         except Exception as e:  # noqa: BLE001
             results.append({"email": em, "ok": False, "note": str(e)[:200]})

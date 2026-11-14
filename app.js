@@ -200,7 +200,7 @@ const TIPS = { unsubscribe: "Unsubscribe only (one-click where offered); mail al
 const CONFIRM = { unsub_delete: "Unsubscribe and move ALL mail from", delete: "Move ALL mail from", block: "Move ALL mail from",
   spam: "Report ALL mail from" };
 function confirmText(a, s) {  // every removal action asks first (Roy, 11-07)
-  const n = `${s.addr} (${s.count} recent emails across ${s.accounts.length} account(s))`;
+  const n = `${s.addr} (${s.accounts.length} account(s))`;  // how many emails: counted in Gmail, shown under the text
   if (CONFIRM[a]) return `${CONFIRM[a]} ${n}` + (a === "spam" ? " as spam?" : " to Trash?") +
     (["block", "unsub_delete"].includes(a) ? " Future mail from this sender will go straight to Trash." : "");
   if (a === "protect") return `Protect ${s.addr}? Zero Sum will refuse to unsubscribe, archive, delete or block anything from it, now and in future, and Gmail will never send it to Spam (in every account).`;
@@ -263,11 +263,38 @@ function askDialog(a, s, ai) {
     const w = $("#dlg-keep").value.split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
     d.querySelectorAll(".subjects li").forEach((li) => li.classList.toggle("kept", subjectHas(w, li.textContent)));
   };
-  $("#dlg-keep").oninput = preview;
+  /* the real number this action will touch: counted by the server with the same Gmail searches the action runs
+     (every folder, every year), not the "recent emails" figure of the list; recounted when the keep words change */
+  let countT = 0, countSeq = 0;
+  const count = async () => {
+    const seq = ++countSeq, el = $("#dlg-count");
+    if (!text) { el.textContent = ""; return; }
+    el.textContent = "Counting what this will touch in Gmail…";
+    try {
+      const r = await api("/api/sender/preview", { addr: s.addr, action: a,
+        keep: $("#dlg-keep").value.split(",").map((x) => x.trim()).filter(Boolean) });
+      if (seq === countSeq) el.textContent = previewText(r);
+    } catch (err) { if (seq === countSeq) el.textContent = `Could not count what this will touch: ${err.message}`; }
+  };
+  $("#dlg-keep").oninput = () => { preview(); clearTimeout(countT); countT = setTimeout(count, 700); };
+  count();
   d.showModal();
   return new Promise((res) => {
     d.onclose = () => res(d.returnValue === "ok" ? { keep: $("#dlg-keep").value.split(",").map((x) => x.trim()).filter(Boolean) } : null);
   });
+}
+/* "1,234 emails (a@x: 1,000 · b@y: 234)" for one step of /api/sender/preview; "or more" when the count was capped */
+function stepText(st) {
+  const one = (x) => x.error ? `${x.email}: count failed` : `${x.email}: ${fmt(x.count)}${x.capped ? "+" : ""}`;
+  return `${fmt(st.total)}${st.capped ? " or more" : ""} email${st.total === 1 && !st.capped ? "" : "s"}` +
+    (st.accounts.length ? ` (${st.accounts.map(one).join(" · ")})` : "") + (st.failed ? " — some accounts could not be counted" : "");
+}
+function previewText(r) {
+  if (!r.steps.length) return "This changes no existing mail.";
+  const main = r.steps[0], kept = r.steps.find((x) => x.what === "kept and starred");
+  return `In Gmail right now this touches ${stepText(main)}, in every folder and year` +
+    (kept ? `; ${stepText(kept)} kept and starred.` : ".") +
+    (main.accounts.some((x) => x.count > r.max) ? ` One action handles at most ${fmt(r.max)} per account.` : "");
 }
 async function runSender(s, a, b, ai) {
   const ok = await askDialog(a, s, ai);
@@ -547,8 +574,16 @@ $("#ai-body").onclick = async (e) => {
     if (isAi && !p.keep_rule.trim()) return alert("Write which emails to keep first.");
     const lines = isAi ? [`• keep: ${p.keep_rule}`, `• everything else → ${GACT[p.default]}`]
       : p.groups.map((g) => `• subject has ${g.words.join(" / ")} → ${GACT[g.action]}`).concat([`• everything else → ${GACT[p.default]}`]);
+    let counted = "";
+    if (!isAi) {  // the real numbers, from the same searches the plan runs
+      try {
+        const r = await api("/api/sender/preview", { addr: p.addr, groups: p.groups, default: p.default });
+        counted = "\n\nIn Gmail right now:\n" + (r.steps.length ? r.steps.map((st) => `• ${st.what} → ${GACT[st.action]}: ${stepText(st)}`).join("\n")
+          : "• no existing mail changes");
+      } catch (err) { counted = `\n\n(Could not count what this will touch: ${err.message})`; }
+    }
     if (!confirm(isAi ? `AI-sort mail from ${p.addr} in ${p.accounts.length} account(s)? The AI judges every existing email (every folder, every year; runs in the background) and each new one every 15 minutes:\n\n${lines.join("\n")}`
-      : `Apply this plan to ${p.addr} in ${p.accounts.length} account(s)? It sorts existing mail (every folder, every year) and adds Gmail filters for future mail:\n\n${lines.join("\n")}`)) return;
+      : `Apply this plan to ${p.addr} in ${p.accounts.length} account(s)? It sorts existing mail (every folder, every year) and adds Gmail filters for future mail:\n\n${lines.join("\n")}${counted}`)) return;
     b.disabled = true; b.textContent = "Applying…";
     try {
       const r = await api("/api/ai/apply", { addr: p.addr, groups: p.groups, default: p.default, mode: p.mode || "words", rule: p.keep_rule || "" });

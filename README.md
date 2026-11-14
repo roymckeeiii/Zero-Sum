@@ -86,8 +86,9 @@ sender to see their 20 most recent emails. A **Clean up…** menu applies to eve
 - **Auto-star** the senders that matter, and **Protect** important senders or whole domains (`@yourbank.com`): now and
   for all future mail they can never be bulk-cleared by accident, and Gmail will never send them to Spam
 
-Every action asks first, showing how many emails and accounts it will touch, and can **keep emails whose subject
-contains** certain words (*gift*, *order*, *receipt*): those stay in your inbox and get starred, while the rest is
+Every action asks first, showing how many emails it will touch in each account (counted in Gmail at that moment,
+with the same search the action runs, so it covers every folder and year, not just the recent mail in the list), and
+can **keep emails whose subject contains** certain words (*gift*, *order*, *receipt*): those stay in your inbox and get starred, while the rest is
 cleared. Or click **✨ AI suggest** and let the AI read the sender's subjects and fill that in for you. Actions reach
 your entire history in every folder, not just the inbox.
 
@@ -205,7 +206,11 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
 - Every bulk change (delete, block, archive, quarantine, spam, a plan, an AI sort) is recorded with the exact messages
   it touched before Gmail is called. **Cleanup > Undo a bulk action** lists the last 28 days and puts a change's
   messages back where they were. Undo does not remove filters: use Keep or Reset on the sender for that.
-- Every Clean up action and every plan asks for confirmation, with the number of emails and accounts affected.
+- Every Clean up action and every word plan asks for confirmation with the real number of emails per account: the
+  server counts them in Gmail with the same searches the action then runs (`POST /api/sender/preview`; up to
+  `PREVIEW_MAX`, default 20,000, per account and step, shown as "or more" beyond that). The count is taken when the
+  dialog opens, so mail that arrives in between is not in it. Bulk actions still run inside the request; one action
+  handles at most `MAX_BULK` messages per account.
 - **Protected** senders (an address, or a whole domain like `@yourbank.com`) can't be unsubscribed, archived, deleted,
   blocked, quarantined or marked as spam, by hand or by a plan: the buttons are disabled and the server refuses. The
   background analyst skips them. Protecting adds Gmail's "never send to Spam" filter in every account and marks the

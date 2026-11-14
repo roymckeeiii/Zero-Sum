@@ -65,6 +65,7 @@ def _collect(d):
 POST = {
     "/api/action": inbox.action,
     "/api/sender": cleanup.sender_action,
+    "/api/sender/preview": cleanup.preview,
     "/api/quarantine": cleanup.quarantine_action,
     "/api/undo": cleanup.undo_action,
     "/api/protect/bulk": cleanup.protect_many,
