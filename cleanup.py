@@ -1001,8 +1001,9 @@ def _ai_sort_ids(addr, rule, action, pairs, token=None):
             raise PermissionError(f"{addr} is protected: AI sort paused")
         with db() as c:  # local history first: no Gmail call for mail the collector already has
             local = {(acc, mid): (sub, snip) for acc, mid, sub, snip in c.execute(
-                "SELECT account_id, id, subject, coalesce(snippet, '') FROM unified.msg WHERE id = ANY(%s) AND subject IS NOT NULL",
-                ([mid for _, mid in chunk],)).fetchall()}
+                "SELECT account_id, id, subject, coalesce(snippet, '') FROM unified.msg "
+                "WHERE account_id = ANY(%s) AND id = ANY(%s) AND subject IS NOT NULL",
+                (sorted({a["id"] for a, _ in chunk}), [mid for _, mid in chunk])).fetchall()}
         metas = []
         for a, mid in chunk:
             if (a["id"], mid) in local:
@@ -1043,12 +1044,19 @@ def _ai_sort_existing(addr, rule, action, token=None):
                       (len(pairs), addr))
         kept = _ai_sort_ids(addr, rule, action, pairs, token)
         with db() as c:
-            c.execute("UPDATE unified.ai_sort SET status = 'active', last_ts = now(), updated_at = now() WHERE addr = %s", (addr,))
+            c.execute("UPDATE unified.ai_sort SET status = 'active', retries = 0, last_ts = now(), updated_at = now() "
+                      "WHERE addr = %s", (addr,))
         log("ai-sort", f"{addr}: sorted {len(pairs)} existing, kept {kept}, rest {action}")
     except Exception as e:  # noqa: BLE001
         if "a newer pass took over" not in str(e):   # the newer pass owns the row's status now
             with db() as c:
-                c.execute("UPDATE unified.ai_sort SET status = %s, updated_at = now() WHERE addr = %s", (f"error: {e}"[:200], addr))
+                if transient(e):  # a busy AI provider or Gmail: parked as "retry:", picked up again by resume_ai_sorts
+                    c.execute("UPDATE unified.ai_sort SET retries = retries + 1, updated_at = now(), status = CASE "
+                              "WHEN retries >= %s THEN %s ELSE %s END WHERE addr = %s",
+                              (SORT_RETRIES, f"error: gave up after {SORT_RETRIES} retries: {e}"[:200], f"retry: {e}"[:200], addr))
+                else:
+                    c.execute("UPDATE unified.ai_sort SET status = %s, updated_at = now() WHERE addr = %s",
+                              (f"error: {e}"[:200], addr))
         log("ai-sort-error", f"{addr}: {e}"[:500])
     finally:
         with _SORT_LOCK:
@@ -1056,14 +1064,29 @@ def _ai_sort_existing(addr, rule, action, token=None):
                 del _SORT_RUNS[addr]
 
 
+SORT_RETRIES = int(os.environ.get("AI_SORT_RETRIES", "5"))  # tries after a busy AI provider or Gmail, per pass
+
+
+def transient(e):
+    """Is this failure worth another try later: the AI provider or Gmail busy or unreachable, or the database?"""
+    import ai, psycopg
+    if isinstance(e, (ai.AITransient, urllib.error.URLError, TimeoutError, ConnectionError, psycopg.OperationalError)):
+        return True
+    text = str(e).lower()
+    return isinstance(e, RuntimeError) and text.startswith("gmail ") and bool(
+        re.search(r": (429|5\d\d) ", text) or "quota exceeded" in text or "ratelimit" in text.replace(" ", ""))
+
+
 def resume_ai_sorts():
-    """Pick up passes that died: the container restarted mid-pass (status still 'sorting', no pass running here), or
-    the daily AI limit stopped one (retried from the next UTC day). Before, such a sender stayed half-sorted and its
-    new mail was never sorted either, because only 'active' sorts are served."""
+    """Pick up passes that died: the container restarted mid-pass (status still 'sorting', no pass running here), the
+    daily AI limit stopped one (retried from the next UTC day), or the AI provider or Gmail was busy (status 'retry:',
+    tried again after 15 minutes, then 30, ... up to AI_SORT_RETRIES times). Before, such a sender stayed half-sorted
+    and its new mail was never sorted either, because only 'active' sorts are served."""
     with db() as c:
         rows = c.execute("SELECT addr, rule, action FROM unified.ai_sort WHERE "
                          "(status = 'sorting' AND updated_at < now() - interval '10 minutes') OR "
-                         "(status LIKE 'error: daily AI limit%%' AND updated_at::date < (now() AT TIME ZONE 'utc')::date)"
+                         "(status LIKE 'error: daily AI limit%%' AND updated_at::date < (now() AT TIME ZONE 'utc')::date) OR "
+                         "(status LIKE 'retry:%%' AND updated_at < now() - make_interval(mins => 15 * greatest(retries, 1)))"
                          ).fetchall()
     for addr, rule, action in rows:
         if addr in _SORT_RUNS or (action != "keep" and (is_protected(addr) or own_address(addr))):
@@ -1145,7 +1168,7 @@ def apply_plan(d):
                 log("cleanup-error", f"apply {addr}: old filters: {e}"[:300], acc["email"])
         with db() as c:
             c.execute("INSERT INTO unified.ai_sort (addr, rule, action) VALUES (%s, %s, %s) ON CONFLICT (addr) DO UPDATE "
-                      "SET rule = EXCLUDED.rule, action = EXCLUDED.action, status = 'sorting', done = 0, total = 0, kept = 0",
+                      "SET rule = EXCLUDED.rule, action = EXCLUDED.action, status = 'sorting', done = 0, total = 0, kept = 0, retries = 0",
                       (addr, rule, default))
             c.execute("UPDATE unified.ai_plan SET status = 'applied', updated_at = now() WHERE addr = %s", (addr,))
         start_ai_sort(addr, rule, default)

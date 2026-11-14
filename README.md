@@ -233,7 +233,12 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
   emails (subject + preview) per request; verdicts are reduced to "keep these numbers". Word-group plans become ordered
   Gmail filters (`query` / `negatedQuery`), so the first matching group wins for future mail too; AI-sorted senders are
   re-checked every collector run. Plans and sort state live in Zero Sum's own schema (`ai_plan`, `ai_sort`).
-- Every AI call counts against a daily cap (`AI_MAX_CALLS_PER_DAY`); past it, background work waits for the next day.
+- Every AI call (AI suggest included) counts against a daily cap (`AI_MAX_CALLS_PER_DAY`); past it, background work
+  waits for the next day. A busy AI provider (429 / 5xx / timeout) is retried up to three times per call; an AI sort
+  stopped by one, or by a busy Gmail, is picked up again later (`AI_SORT_RETRIES` times at most).
+- Email text is untrusted: it is sent to the model as a separate, fenced data message, never as part of the
+  instructions, and the answer is only accepted as one of the fixed actions, cleaned keep words, or exactly one
+  verdict per numbered email.
 - Rule sync records which copy belongs to which master rule (with a content hash), so it only ever updates or deletes
   its own copies. Automatic sync is off until you turn it on in the Rules tab.
 
