@@ -234,9 +234,16 @@ async function loadSenders() {
         <div class="grp"><select class="cleanup" data-i="${i}" ${s.protected ? "disabled title='Protected sender'" : ""}>
           <option value="">Clean up…</option>${MENU.map(([g, acts]) => `<optgroup label="${g}">${acts.map((a) =>
             `<option value="${a}" title="${esc(TIPS[a])}">${LABELS[a]}</option>`).join("")}</optgroup>`).join("")}</select></div></td></tr>`).join("") + "</tbody></table>";
-  $("#c-prot").innerHTML = d.protected.length ? "Protected: " + d.protected.map((k) => `<span class="chip prot">${esc(k)}
-    <button class="x" data-unprot="${esc(k)}" title="Unprotect">×</button></span>`).join("") : "";
+  /* a long protected list (a pasted keep-list is ~90 entries) folds to one line; it stays open across re-renders */
+  const chips = d.protected.map((k) => `<span class="chip prot">${esc(k)}
+    <button class="x" data-unprot="${esc(k)}" title="Unprotect">×</button></span>`).join("");
+  const n = d.protected.length, domains = d.protected.filter((k) => k.startsWith("@")).length;
+  const open = $("#c-prot details") ? $("#c-prot details").open : false;
+  $("#c-prot").innerHTML = !n ? "" : n <= PROT_INLINE ? "Protected: " + chips
+    : `<details${open ? " open" : ""}><summary>Protected: ${n} senders (${domains} domain${domains === 1 ? "" : "s"}, ${n - domains}
+      address${n - domains === 1 ? "" : "es"})</summary><div class="prot-list">${chips}</div></details>`;
 }
+const PROT_INLINE = 6;
 /* confirmation dialog, with "keep emails whose subject contains" for actions that clear mail */
 const KEEPABLE = ["unsub_archive", "unsub_quarantine", "unsub_delete", "autoarchive", "quarantine", "archive", "delete", "block", "spam"];
 function askDialog(a, s, ai) {
