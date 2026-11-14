@@ -1,9 +1,77 @@
-"""Merged inbox: newest inbox mail across every linked account, read, and thread-level triage (no sending)."""
-import base64, email.utils, re, time, urllib.parse
+"""Merged inbox: newest inbox mail across every linked account, read, and thread-level triage (no sending).
+
+Search (RFC-001853): /api/messages takes scope=inbox (default, today's behaviour: INBOX only), all (every folder
+but Spam/Trash: Inbox, Sent, archived, labels), sent, spamtrash, or label (with label=<name>). Scopes other than
+inbox drop the INBOX label filter and add the scope's Gmail search term to the user's query, which passes through
+unchanged (from:, to:, has:attachment, before:, older_than: ...). Every account is searched in parallel; results
+merge newest first. Paging: a search page is capped at SEARCH_PAGE_MAX results; each account gets
+limit // accounts of them (at least 1), so a page is at most `limit` messages, from one messages.list call per
+account plus one metadata get per message. Every fetched message is returned (nothing is cut after the fetch), and
+`next` carries each account's nextPageToken, so "load more" continues every account where it stopped. An account
+that fails shows in `errors` and the others still answer."""
+import base64, binascii, email.utils, json, re, time, urllib.parse
 
 from core import ACC, POOL, db, gmail, header, labels
 
 _meta = {}  # (account id, message id) -> (time, item)
+
+
+SCOPES = ("inbox", "all", "sent", "spamtrash", "label")
+SEARCH_PAGE_MAX = 50  # results per search page, all accounts together
+
+
+def folder_of(label_ids):
+    """Where a message lives, for search results: Trash/Spam win, then Inbox, Sent, Drafts, else Archived."""
+    for sys_id, name in (("TRASH", "Trash"), ("SPAM", "Spam"), ("INBOX", "Inbox"), ("SENT", "Sent"), ("DRAFT", "Drafts")):
+        if sys_id in label_ids:
+            return name
+    return "Archived"
+
+
+def label_term(name):
+    """Gmail's search form of a label name: lower case, spaces and slashes become dashes (label:my-label)."""
+    t = re.sub(r"[\s/]+", "-", name.strip().lower())
+    t = re.sub(r"[^\w&.-]", "", t)
+    if not t:
+        raise ValueError("bad label")
+    return f"label:{t}"
+
+
+def scope_query(scope, label=""):
+    """(extra Gmail q term, URL params) for a search scope; inbox keeps the INBOX label filter it always had."""
+    if scope == "inbox":
+        return "", "&labelIds=INBOX"
+    if scope == "all":
+        return "", ""  # messages.list without labelIds already skips Spam and Trash
+    if scope == "sent":
+        return "in:sent", ""
+    if scope == "spamtrash":
+        return "{in:spam in:trash}", "&includeSpamTrash=true"
+    if scope == "label":
+        return label_term(label), ""
+    raise ValueError("bad scope")
+
+
+def encode_page(tokens):
+    return base64.urlsafe_b64encode(json.dumps(tokens, sort_keys=True).encode()).decode() if tokens else ""
+
+
+def decode_page(page):
+    if not page:
+        return None
+    try:
+        d = json.loads(base64.urlsafe_b64decode(page.encode()))
+    except (binascii.Error, ValueError):
+        raise ValueError("bad page") from None
+    if not isinstance(d, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in d.items()):
+        raise ValueError("bad page")
+    return d
+
+
+def recipients(to_header):
+    """Display form of a To header: names (or addresses), comma-separated, at most 3 then "+N"."""
+    people = [n or a for n, a in email.utils.getaddresses([to_header or ""]) if n or a]
+    return ", ".join(people[:3]) + (f" +{len(people) - 3}" if len(people) > 3 else "")
 
 
 def meta(account, mid):
@@ -11,15 +79,15 @@ def meta(account, mid):
     t, item = _meta.get(k, (0, None))
     if item and time.time() - t < 120:
         return item
-    m = gmail(account["id"], f"/messages/{mid}?format=metadata&metadataHeaders=From&metadataHeaders=Subject")
+    m = gmail(account["id"], f"/messages/{mid}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject")
     hs = m.get("payload", {}).get("headers", [])
     name, addr = email.utils.parseaddr(header(hs, "from"))
     lab = labels(account["id"])
     ids = m.get("labelIds", [])
     item = {"account": account["id"], "email": account["email"], "id": m["id"], "threadId": m["threadId"],
-            "from": name or addr, "fromAddr": addr, "subject": header(hs, "subject") or "(no subject)",
+            "from": name or addr, "fromAddr": addr, "to": recipients(header(hs, "to")), "subject": header(hs, "subject") or "(no subject)",
             "snippet": m.get("snippet", ""), "ts": int(m.get("internalDate", 0)) // 1000,
-            "unread": "UNREAD" in ids, "starred": "STARRED" in ids,
+            "unread": "UNREAD" in ids, "starred": "STARRED" in ids, "folder": folder_of(ids),
             "labels": sorted(lab[x] for x in ids if x in lab)}
     _meta[k] = (time.time(), item)
     if len(_meta) > 20000:
@@ -58,17 +126,32 @@ def messages(q):
     limit = max(10, min(int(q.get("limit", ["30"])[0]), 200))
     only = q.get("account", [""])[0]
     search = q.get("q", [""])[0].strip()
-    gq = " ".join(x for x in (search, "is:unread" if q.get("unread", ["0"])[0] == "1" else "") if x)
+    scope = q.get("scope", ["inbox"])[0] or "inbox"
+    term, params = scope_query(scope, q.get("label", [""])[0])
+    page = decode_page(q.get("page", [""])[0])
+    gq = " ".join(x for x in (search, term, "is:unread" if q.get("unread", ["0"])[0] == "1" else "") if x)
     accs = [a for a in ACC.list() if not only or a["id"] == only]
-    errors = []
+    if page is not None:  # "load more": only the accounts that still had results, from where each stopped
+        accs = [a for a in accs if a["id"] in page]
+    if scope == "inbox" and page is None:
+        per = limit  # unchanged inbox paging: the UI asks for a bigger limit
+    else:
+        limit = min(limit, SEARCH_PAGE_MAX)
+        per = max(1, limit // max(1, len(accs)))  # per-account pages add up to at most `limit`
+    errors, nxt = [], {}
 
     def ids(a):
-        p = f"/messages?maxResults={limit}&labelIds=INBOX" + (f"&q={urllib.parse.quote(gq)}" if gq else "")
+        p = f"/messages?maxResults={per}{params}" + (f"&q={urllib.parse.quote(gq)}" if gq else "")
+        if page is not None:
+            p += f"&pageToken={urllib.parse.quote(page[a['id']])}"
         try:
-            return [(a, m["id"]) for m in gmail(a["id"], p).get("messages", [])]
+            d = gmail(a["id"], p)
         except Exception as e:  # noqa: BLE001
             errors.append({"email": a["email"], "error": str(e)[:200]})
             return []
+        if d.get("nextPageToken"):
+            nxt[a["id"]] = d["nextPageToken"]
+        return [(a, m["id"]) for m in d.get("messages", [])]
 
     def safe_meta(p):
         try:
@@ -83,7 +166,7 @@ def messages(q):
     for it in items:
         it["rules"] = rules.get((it["account"], it["id"]), [])
         it["protected"] = is_protected(it["fromAddr"].lower(), prot)
-    return {"items": items, "errors": errors}
+    return {"items": items, "errors": errors, "scope": scope, "next": encode_page(nxt)}
 
 
 def body_of(payload):
