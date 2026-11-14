@@ -224,6 +224,40 @@ def own_address(addr):
     return addr in {a["email"].lower() for a in ACC.list()}
 
 
+def guard_sender(addr, prot=None):
+    """The one refusal every destructive path ends in: a protected sender's mail, and mail from one of the linked
+    accounts' own addresses, is never trashed, archived, quarantined or reported, whoever asks."""
+    if is_protected(addr, prot):
+        raise PermissionError(f"{addr} is protected: unprotect it first")
+    if own_address(addr):
+        raise PermissionError(f"{addr} is one of your own accounts: its mail is never cleaned up")
+
+
+def removes_mail(add, remove):
+    """Does this label change take mail out of view (Trash, Spam, a holding label, out of the inbox)? Starring and
+    putting mail back in the inbox do not."""
+    return bool(set(add) - {"STARRED", "INBOX"}) or "INBOX" in remove
+
+
+def senders_of(acc_id, ids):
+    """{message id: sender address, or None when it cannot be told}: from the local history, else read from Gmail."""
+    who = {}
+    for i in range(0, len(ids), 5000):
+        with db() as c:
+            who.update(c.execute("SELECT id, from_addr FROM unified.msg WHERE account_id = %s AND id = ANY(%s)",
+                                 (acc_id, ids[i:i + 5000])).fetchall())
+
+    def read(mid):
+        try:
+            m = gmail(acc_id, f"/messages/{mid}?format=metadata&metadataHeaders=From")
+            return email.utils.parseaddr(header(m.get("payload", {}).get("headers", []), "from"))[1].lower() or None
+        except Exception:  # noqa: BLE001 - unknown stays unknown: the caller leaves that message alone
+            return None
+    todo = [i for i in ids if i not in who]
+    who.update(zip(todo, CPOOL.map(read, todo)))
+    return who
+
+
 PROTECT_KEY = re.compile(r"[^@\s,;]*@[^@\s,;]+\.[^@\s,;]+")
 
 
@@ -331,6 +365,8 @@ def _filter(acc_id, addr, action, kind, keep=None, query=None, negated=None, sou
     `keep` / `negated`: mail whose subject matches is left out; `query`: only mail that matches. Returns the id."""
     if kind not in FILTER_KINDS:
         raise ValueError("bad filter kind")
+    if kind in ("trash", "archive", "quarantine") or removes_mail(action.get("addLabelIds") or (), action.get("removeLabelIds") or ()):
+        guard_sender(addr)  # whatever the caller checked: no filter may move a protected sender's future mail
     crit = {"from": addr}
     if query:
         crit["query"] = query
@@ -537,11 +573,13 @@ def stop_automation(key):
                 c.execute("DELETE FROM unified.ai_sort WHERE addr = %s", (addr,))
 
 
-def _modify_existing(acc_id, query, add=(), remove=()):
-    """Apply label changes to every message matching `query` (batches of 1000). Returns the count."""
+def _modify_existing(acc_id, query, add=(), remove=(), *, sender):
+    """Apply label changes to every message matching `query` (batches of 1000). Returns the count. `sender` is whose
+    mail the query selects: _batch refuses a protected sender and the account's own address."""
     if "in:sent" not in query:  # a sender action never reaches what the account itself sent, its drafts or chats
         query = f"{query} {SKIP}"
-    return _batch(acc_id, [m["id"] for m in gmail_list(acc_id, qs(query), "messages", MAX_BULK)], add, remove)
+    return _batch(acc_id, [m["id"] for m in gmail_list(acc_id, qs(query), "messages", MAX_BULK)], add, remove,
+                  sender=sender)
 
 
 _ACTION = threading.local()   # .note: what the person asked for ("block deals@shop.com"), for the undo list
@@ -558,8 +596,26 @@ def _record(acc_id, ids, add, remove):
         c.execute("DELETE FROM unified.action_log WHERE at < now() - make_interval(days => %s)", (UNDO_DAYS,))
 
 
-def _batch(acc_id, ids, add=(), remove=(), record=True):
-    """Apply label changes to these message ids (batches of 1000). Returns the count."""
+def _batch(acc_id, ids, add=(), remove=(), record=True, sender=None):
+    """Apply label changes to these message ids (batches of 1000). Returns the count.
+
+    Every bulk change ends here, so this is where a protected sender and the user's own address are refused, whatever
+    the entry point checked. `sender` is the address (or addresses) the ids belong to. Without it, a change that takes
+    mail out of view leaves out the messages the local history attributes to a protected or own address."""
+    ids = list(ids)
+    if ids and removes_mail(add, remove):
+        prot = protected_set()
+        if sender is not None:
+            for s in ([sender] if isinstance(sender, str) else sorted(sender)):
+                guard_sender(s, prot)
+        else:
+            with db() as c:
+                known = c.execute("SELECT id, from_addr FROM unified.msg WHERE account_id = %s AND id = ANY(%s)",
+                                  (acc_id, ids)).fetchall()
+            if known:
+                own = {a["email"].lower() for a in ACC.list()}
+                held = {i for i, frm in known if frm in own or is_protected(frm, prot)}
+                ids = [i for i in ids if i not in held]
     if ids and record and (add or remove):
         _record(acc_id, ids, add, remove)
     for i in range(0, len(ids), 1000):
@@ -584,7 +640,7 @@ def _batch(acc_id, ids, add=(), remove=(), record=True):
 
 
 def _archive_existing(acc_id, addr, keep=None):
-    n = _modify_existing(acc_id, f"from:{addr} in:inbox" + (f" -{keep}" if keep else ""), remove=["INBOX"])
+    n = _modify_existing(acc_id, f"from:{addr} in:inbox" + (f" -{keep}" if keep else ""), remove=["INBOX"], sender=addr)
     with db() as c:
         c.execute("UPDATE unified.msg SET inbox = false WHERE account_id = %s AND from_addr = %s", (acc_id, addr))
     return n
@@ -696,7 +752,7 @@ def sender_action(d):
                     note.append("no unsubscribe link" + ("" if act != "unsubscribe" else ": use Block or Quarantine"))
             if act == "unsub_delete":  # and clear it out: Trash now, future mail straight to Trash
                 _filter(a, addr, TRASH_FILTER, "trash", keep=kq, source=act)
-                note.append(f"{_modify_existing(a, f'from:{addr} -in:trash{nk}', add=['TRASH'])} moved to Trash, "
+                note.append(f"{_modify_existing(a, f'from:{addr} -in:trash{nk}', add=['TRASH'], sender=addr)} moved to Trash, "
                             "future mail goes to Trash")
                 if not kq:
                     _drop_rows(a, addr)
@@ -704,7 +760,7 @@ def sender_action(d):
                 lid = label_id(a, QUARANTINE)
                 _filter(a, addr, {"addLabelIds": [lid], "removeLabelIds": ["INBOX"]}, "quarantine", keep=kq, source=act)
                 n = _modify_existing(a, f"from:{addr} -in:trash -in:spam -label:{QUARANTINE}{nk}", add=[lid],
-                                     remove=["INBOX"])  # every folder, every year
+                                     remove=["INBOX"], sender=addr)  # every folder, every year
                 note.append(f"filter added, {n} moved to {QUARANTINE}")
                 with db() as c:
                     c.execute("UPDATE unified.msg SET inbox = false WHERE account_id = %s AND from_addr = %s", (a, addr))
@@ -714,17 +770,17 @@ def sender_action(d):
             elif act == "archive":
                 note.append(f"{_archive_existing(a, addr, kq)} archived")
             elif act == "delete":
-                note.append(f"{_modify_existing(a, f'from:{addr} -in:trash{nk}', add=['TRASH'])} moved to Trash")
+                note.append(f"{_modify_existing(a, f'from:{addr} -in:trash{nk}', add=['TRASH'], sender=addr)} moved to Trash")
                 if not kq:
                     _drop_rows(a, addr)
             elif act == "block":
                 _filter(a, addr, TRASH_FILTER, "trash", keep=kq, source=act)
                 note.append(f"filter added (future mail goes to Trash), "
-                            f"{_modify_existing(a, f'from:{addr} -in:trash{nk}', add=['TRASH'])} moved to Trash")
+                            f"{_modify_existing(a, f'from:{addr} -in:trash{nk}', add=['TRASH'], sender=addr)} moved to Trash")
                 if not kq:
                     _drop_rows(a, addr)
             elif act == "spam":
-                note.append(f"{_modify_existing(a, f'from:{addr} -in:spam -in:trash{nk}', add=['SPAM'], remove=['INBOX'])} "
+                note.append(f"{_modify_existing(a, f'from:{addr} -in:spam -in:trash{nk}', add=['SPAM'], remove=['INBOX'], sender=addr)} "
                             "reported as spam")
                 if not kq:
                     _drop_rows(a, addr)
@@ -737,13 +793,13 @@ def sender_action(d):
                     note.append(FOREIGN_NOTE.format(n=left))
             elif act == "star":
                 _filter(a, addr, STAR_FILTER, "star", source=act)
-                note.append(f"filter added, {_modify_existing(a, f'from:{addr} in:inbox -is:starred', add=['STARRED'])} starred")
+                note.append(f"filter added, {_modify_existing(a, f'from:{addr} in:inbox -is:starred', add=['STARRED'], sender=addr)} starred")
             elif act == "unstar":
                 remove_app_filters(a, addr, kinds=("star",), exact=True)
-                note.append(f"filter removed, {_modify_existing(a, f'from:{addr} is:starred', remove=['STARRED'])} unstarred")
+                note.append(f"filter removed, {_modify_existing(a, f'from:{addr} is:starred', remove=['STARRED'], sender=addr)} unstarred")
             if kq and act in DESTRUCTIVE:  # the kept ones: starred now and in future, so they stand out
                 _filter(a, addr, STAR_FILTER, "keep_star", query=kq, source=act)
-                note.append(f"{_modify_existing(a, f'from:{addr} {kq} -is:starred -in:trash', add=['STARRED'])} kept and starred")
+                note.append(f"{_modify_existing(a, f'from:{addr} {kq} -is:starred -in:trash', add=['STARRED'], sender=addr)} kept and starred")
             status = {"unsubscribe": "UNSUBSCRIBED", "unsub_archive": "UNSUBSCRIBED", "unsub_quarantine": "UNSUBSCRIBED",
                       "unsub_delete": "UNSUBSCRIBED", "autoarchive": "AUTO_ARCHIVED", "quarantine": "AUTO_ARCHIVED",
                       "block": "AUTO_ARCHIVED",
@@ -813,6 +869,10 @@ def quarantine_action(d):
     if act not in QACTIONS:
         raise ValueError("bad quarantine action")
     sender = (d.get("sender") or "").strip().lower()
+    if sender and not re.fullmatch(r"[^@\s]+@[^@\s]+", sender):
+        raise ValueError("bad sender address")  # it goes into a Gmail search: an address, never a query
+    if act == "delete" and sender:
+        guard_sender(sender)
     chosen = {}
     for it in d.get("items") or []:
         if re.fullmatch(r"[0-9a-f]{6,32}", str(it.get("id", ""))):
@@ -835,11 +895,17 @@ def quarantine_action(d):
                 ids = [m["id"] for m in gmail_list(a["id"], query, "messages", MAX_BULK)]
             if not ids:
                 continue
-            if act == "delete" and sender and is_protected(sender):
-                raise PermissionError(f"{sender} is protected: unprotect it first")
             add = {"delete": ["TRASH"], "archive": [], "release": ["INBOX"]}[act]
-            n = _batch(a["id"], ids, add=add, remove=[lid])
+            senders, left = None, 0
+            if act == "delete":  # "all", ticked messages and one sender alike: every message's real sender is
+                who = senders_of(a["id"], ids)  # looked up, and protected, own and unknown ones stay in Quarantine
+                prot, own = protected_set(), {x["email"].lower() for x in ACC.list()}
+                ok = [i for i in ids if who.get(i) and who[i] not in own and not is_protected(who[i], prot)]
+                left, ids, senders = len(ids) - len(ok), ok, {who[i] for i in ok}
+            n = _batch(a["id"], ids, add=add, remove=[lid], sender=senders) if ids else 0
             note = f"{n} {QACTIONS[act]}"
+            if left:
+                note += f"; {left} left in {QUARANTINE} (protected sender, your own address, or sender unknown)"
             if act == "release" and sender and remove_app_filters(a["id"], sender, kinds=("quarantine",), exact=True):
                 note += ", quarantine filter removed"
             results.append({"email": a["email"], "ok": True, "note": note})
@@ -896,7 +962,7 @@ def _plan_action(acc_id, addr, action, crit_extra, query_extra, lid):
         filt, q, add, rem = TRASH_FILTER, "-in:trash", ["TRASH"], []
     _filter(acc_id, addr, filt, "keep_star" if action == "keep" else {"delete": "trash"}.get(action, action),
             query=crit_extra.get("query"), negated=crit_extra.get("negatedQuery"), source="plan")
-    n = _modify_existing(acc_id, f"from:{addr} {query_extra} {q}".strip(), add=add, remove=rem)
+    n = _modify_existing(acc_id, f"from:{addr} {query_extra} {q}".strip(), add=add, remove=rem, sender=addr)
     return n
 
 
@@ -958,7 +1024,7 @@ def _ai_sort_ids(addr, rule, action, pairs, token=None):
             lid = label_id(acc_id, QUARANTINE) if action == "quarantine" else None
             add, rem = _labels_for(action, lid)
             if add or rem:
-                _batch(acc_id, ids, add=add, remove=rem)
+                _batch(acc_id, ids, add=add, remove=rem, sender=addr)
         with db() as c:
             c.execute("UPDATE unified.ai_sort SET done = done + %s, kept = kept + %s, updated_at = now() WHERE addr = %s",
                       (len(chunk), sum(1 for (_, _m), k in zip(metas, verdicts) if k), addr))
