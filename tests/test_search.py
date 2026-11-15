@@ -18,19 +18,24 @@ class FakeAcc:
 class FakeGmail:
     """messages: {account: [(id, ts, labelIds)]}, newest first. Records every list call's parsed query string."""
 
-    def __init__(self, messages, fail=()):
+    def __init__(self, messages, fail=(), meta_fail=(), gone=()):
         self.messages, self.fail, self.calls = messages, set(fail), []
+        self.meta_fail, self.gone = set(meta_fail), set(gone)
 
     def __call__(self, acc, path, *a, **k):
         if acc in self.fail:
             raise RuntimeError("Gmail GET /messages: 401 token revoked")
+        if path.startswith("/messages/") and acc in self.meta_fail:
+            raise RuntimeError("Gmail GET /messages/x: 401 token revoked")
+        if path.startswith("/messages/") and path.split("/")[2].split("?")[0] in self.gone:
+            raise RuntimeError("Gmail GET /messages/x: 404 Not Found")
         base, _, qs = path.partition("?")
         if base == "/messages":
             q = urllib.parse.parse_qs(qs)
             self.calls.append((acc, q))
             rows = self.messages.get(acc, [])
-            if "INBOX" in q.get("labelIds", []):
-                rows = [r for r in rows if "INBOX" in r[2]]
+            for lid in q.get("labelIds", []):
+                rows = [r for r in rows if lid in r[2]]
             term = q.get("q", [""])[0]
             if "in:sent" in term:
                 rows = [r for r in rows if "SENT" in r[2]]
@@ -80,7 +85,7 @@ class Search(unittest.TestCase):
         self.assertEqual([i["id"] for i in d["items"]], ["a0", "b0"])
         for _, q in fake.calls:
             self.assertEqual(q["labelIds"], ["INBOX"])
-            self.assertEqual(q["maxResults"], ["30"])
+            self.assertEqual(q["maxResults"], ["15"])   # capped token paging: 30 // 2 accounts (RFC-001886)
             self.assertEqual(q["q"], ["from:boss has:attachment"])
 
     def test_sent_scope_returns_only_sent(self):
@@ -94,9 +99,11 @@ class Search(unittest.TestCase):
         self.assertEqual(inbox.scope_query("all"), ("", ""))
         self.assertEqual(inbox.scope_query("sent"), ("in:sent", ""))
         self.assertEqual(inbox.scope_query("spamtrash"), ("{in:spam in:trash}", "&includeSpamTrash=true"))
-        self.assertEqual(inbox.scope_query("label", "Receipts/2026 Tax"), ("label:receipts-2026-tax", ""))
-        self.assertEqual(inbox.scope_query("label", 'x" OR in:anywhere'), ("label:x-or-inanywhere", ""))  # no operator smuggled in
-        for bad in (("label", "  "), ("label", '"'), ("everything", "")):
+        self.assertEqual(inbox.scope_query("label", "Receipts/2026 Tax"), ("", ""))   # resolved per account to an id
+        self.assertEqual(inbox.label_term('x" OR in:anywhere'), "label:x-or-inanywhere")  # no operator smuggled in
+        with self.assertRaises(ValueError):
+            inbox.label_term('"')
+        for bad in (("label", "  "), ("everything", "")):
             with self.assertRaises(ValueError):
                 inbox.scope_query(*bad)
 
@@ -179,12 +186,67 @@ class Search(unittest.TestCase):
         self.assertTrue(all(q["maxResults"] == ["25"] for _, q in fake.calls))
 
     def test_label_scope_with_unread_end_to_end(self):
-        fake = FakeGmail({"A": [("a1", 300, ["Label_1"])], "B": [("b1", 200, ["Label_1"])]})
+        fake = FakeGmail({"A": [("a1", 300, ["Label_1"])], "B": [("b1", 200, ["Label_9"])]})
+        inbox.labels = lambda acc: {"A": {"Label_1": "Receipts 2026"}, "B": {"Label_9": "Receipts 2026"}}[acc]
         d = self.run_search(fake, scope="label", label="Receipts 2026", q="from:shop", unread=1)
         self.assertEqual(len(d["items"]), 2)
-        self.assertTrue(all(q["q"] == ["from:shop label:receipts-2026 is:unread"] for _, q in fake.calls))
+        self.assertTrue(all(q["q"] == ["from:shop is:unread"] for _, q in fake.calls))
+        self.assertEqual(sorted(q["labelIds"][0] for _, q in fake.calls), ["Label_1", "Label_9"])  # each account's own id
         with self.assertRaises(ValueError):  # app.py turns ValueError into a 400
             self.run_search(fake, scope="label", label="")
+
+    # RFC-001886 final review (1): Inbox searches page with capped per-account tokens like every other scope
+    def test_inbox_pages_with_capped_tokens_and_load_more_continues(self):
+        msgs = {"A": [(f"a{i:03d}", 1000 - 2 * i, ["INBOX"]) for i in range(60)],
+                "B": [(f"b{i:03d}", 999 - 2 * i, ["INBOX"]) for i in range(60)]}
+        fake = FakeGmail(msgs)
+        d = self.run_search(fake, limit=200)          # no scope = inbox; an old client's big limit is capped
+        self.assertLessEqual(len(d["items"]), inbox.SEARCH_PAGE_MAX)
+        self.assertTrue(all(q["maxResults"] == ["25"] for _, q in fake.calls))
+        self.assertTrue(d["next"])
+        seen, page = [i["id"] for i in d["items"]], d["next"]
+        while page:
+            d = self.run_search(fake, limit=30, page=page)
+            seen += [i["id"] for i in d["items"]]
+            page = d["next"]
+        self.assertEqual(len(seen), 120)
+        self.assertEqual(len(set(seen)), 120)            # nothing repeated, nothing lost
+        ts = {r[0]: r[1] for rows in msgs.values() for r in rows}
+        self.assertEqual(seen, sorted(seen, key=lambda m: -ts[m]))   # one global newest-first order across pages
+
+    # RFC-001886 final review (2): distinct label names whose Gmail search forms collide are not merged
+    def test_label_names_that_slug_alike_stay_distinct(self):
+        fake = FakeGmail({"A": [("a1", 300, ["Label_1"]), ("a2", 200, ["Label_2"])], "B": [("b1", 100, ["Label_2"])]})
+        inbox.labels = lambda acc: {"A": {"Label_1": "Work/2026", "Label_2": "Work-2026"},
+                                    "B": {"Label_2": "Work-2026"}}[acc]
+        self.assertEqual(inbox.label_term("Work/2026"), inbox.label_term("Work-2026"))   # the old collision
+        d = self.run_search(fake, scope="label", label="Work/2026")
+        self.assertEqual([i["id"] for i in d["items"]], ["a1"])
+        self.assertEqual([acc for acc, _ in fake.calls], ["A"])    # B has no "Work/2026": not searched at all
+        self.assertEqual(d["errors"], [])
+        d = self.run_search(fake, scope="label", label="work-2026")    # Gmail names are case-insensitive
+        self.assertEqual(sorted(i["id"] for i in d["items"]), ["a2", "b1"])
+
+    # RFC-001886 final review (3): an auth failure while fetching message metadata is reported for that account
+    def test_metadata_auth_failure_is_reported_per_account_and_404_is_not(self):
+        fake = FakeGmail({"A": [("a1", 300, ["SENT"])], "B": [("b1", 200, ["SENT"]), ("b2", 100, ["SENT"])]},
+                         meta_fail={"A"}, gone={"b2"})
+        d = self.run_search(fake, scope="sent")
+        self.assertEqual([i["id"] for i in d["items"]], ["b1"])
+        self.assertEqual([e["email"] for e in d["errors"]], ["a@x.com"])
+        self.assertIn("401", d["errors"][0]["error"])
+
+    def test_a_label_lookup_failure_is_reported_and_other_accounts_answer(self):
+        fake = FakeGmail({"A": [("a1", 300, ["Label_1"])], "B": [("b1", 200, ["Label_1"])]})
+
+        def labels(acc):
+            if acc == "A":
+                raise PermissionError("Google refused the login for a@x.com (401)")
+            return {"Label_1": "Receipts"}
+        inbox.labels = labels
+        d = self.run_search(fake, scope="label", label="Receipts")
+        self.assertEqual([i["id"] for i in d["items"]], ["b1"])
+        self.assertEqual([e["email"] for e in d["errors"]], ["a@x.com"])
 
     def test_results_carry_recipients_for_sent_mail(self):
         fake = FakeGmail({"A": [("a1", 300, ["SENT"])], "B": []})

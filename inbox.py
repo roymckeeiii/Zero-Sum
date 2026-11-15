@@ -1,14 +1,18 @@
 """Merged inbox: newest inbox mail across every linked account, read, and thread-level triage (no sending).
 
-Search (RFC-001853): /api/messages takes scope=inbox (default, today's behaviour: INBOX only), all (every folder
-but Spam/Trash: Inbox, Sent, archived, labels), sent, spamtrash, or label (with label=<name>). Scopes other than
-inbox drop the INBOX label filter and add the scope's Gmail search term to the user's query, which passes through
-unchanged (from:, to:, has:attachment, before:, older_than: ...). Every account is searched in parallel; results
-merge newest first. Paging: a search page is capped at SEARCH_PAGE_MAX results; each account gets
+Search (RFC-001853): /api/messages takes scope=inbox (default: INBOX only), all (every folder but Spam/Trash:
+Inbox, Sent, archived, labels), sent, spamtrash, or label (with label=<name>). Scopes other than inbox drop the
+INBOX label filter and add the scope's Gmail search term to the user's query, which passes through unchanged
+(from:, to:, has:attachment, before:, older_than: ...). The label scope resolves the exact label name to each
+account's own label id (labelIds=<id>), so two labels whose search forms collide ("A/B" and "A-B" are both
+label:a-b in Gmail search) are never merged, and an account without that label is not searched. Every account is
+searched in parallel; results merge newest first. Paging, Inbox included (RFC-001886 final review): a page is
+capped at SEARCH_PAGE_MAX results; each account gets
 limit // accounts of them (at least 1), so a page is at most `limit` messages, from one messages.list call per
 account plus one metadata get per message. Every fetched message is returned (nothing is cut after the fetch), and
 `next` carries each account's nextPageToken, so "load more" continues every account where it stopped. An account
-that fails shows in `errors` and the others still answer."""
+that fails (listing, its labels, or a message's metadata: e.g. a revoked login) shows in `errors` and the others
+still answer; only a message that vanished between list and get (404) is skipped silently."""
 import base64, binascii, email.utils, json, re, time, urllib.parse
 
 from core import ACC, POOL, db, gmail, header, labels
@@ -48,8 +52,18 @@ def scope_query(scope, label=""):
     if scope == "spamtrash":
         return "{in:spam in:trash}", "&includeSpamTrash=true"
     if scope == "label":
-        return label_term(label), ""
+        if not (label or "").strip():
+            raise ValueError("bad label")
+        return "", ""  # resolved per account to labelIds=<id> (label_ids_for), not a slugged search term
     raise ValueError("bad scope")
+
+
+def label_ids_for(lab, name):
+    """Ids of this account's label(s) named exactly `name` ({id: name} from core.labels); Gmail label names are
+    case-insensitive, so a case-only difference still matches, but "A/B" never matches "A-B"."""
+    want = name.strip()
+    exact = [i for i, n in lab.items() if n == want]
+    return exact or [i for i, n in lab.items() if n.lower() == want.lower()]
 
 
 def encode_page(tokens):
@@ -136,13 +150,23 @@ def messages(q):
     accs = [a for a in ACC.list() if not only or a["id"] == only]
     if page is not None:  # "load more": only the accounts that still had results, from where each stopped
         accs = [a for a in accs if a["id"] in page]
-    if scope == "inbox" and page is None:
-        per = limit  # unchanged inbox paging: the UI asks for a bigger limit
-    else:
-        limit = min(limit, SEARCH_PAGE_MAX)
-        per = max(1, limit // max(1, len(accs)))  # per-account pages add up to at most `limit`
+    limit = min(limit, SEARCH_PAGE_MAX)
     errors, nxt = [], {}
-    paged = not (scope == "inbox" and page is None)
+    acct_params = {a["id"]: params for a in accs}
+    if scope == "label":
+        name = q.get("label", [""])[0]
+        for a in list(accs):
+            try:
+                found = label_ids_for(labels(a["id"]), name)
+            except Exception as e:  # noqa: BLE001 - e.g. a revoked login, shown per account
+                errors.append({"email": a["email"], "error": str(e)[:200]})
+                found = []
+            if not found:
+                accs.remove(a)  # this account has no such label: nothing to search
+                continue
+            acct_params[a["id"]] = "".join(f"&labelIds={urllib.parse.quote(i)}" for i in found[:1])
+    per = max(1, limit // max(1, len(accs)))  # per-account pages add up to at most `limit`
+    paged = True
     state = page or {}
 
     def ids(a):
@@ -154,7 +178,7 @@ def messages(q):
             return [(a, m) for m in held], token, bool(token)
         if page is not None and not token:
             return [(a, m) for m in held], "", False
-        p = f"/messages?maxResults={per}{params}" + (f"&q={urllib.parse.quote(gq)}" if gq else "")
+        p = f"/messages?maxResults={per}{acct_params[a['id']]}" + (f"&q={urllib.parse.quote(gq)}" if gq else "")
         if token:
             p += f"&pageToken={urllib.parse.quote(token)}"
         try:
@@ -165,14 +189,21 @@ def messages(q):
         new_token = d.get("nextPageToken") or ""
         return [(a, m) for m in held] + [(a, m["id"]) for m in d.get("messages", [])], new_token, bool(new_token)
 
+    meta_errors = {}
+
     def safe_meta(p):
         try:
             return meta(*p)
-        except Exception:  # noqa: BLE001 - message vanished between list and get
+        except Exception as e:  # noqa: BLE001
+            if " 404 " in f" {e} ":   # vanished between list and get: nothing to report
+                return None
+            meta_errors.setdefault(p[0]["email"], str(e)[:200])   # e.g. the login was revoked mid-search
             return None
     fetched = list(POOL.map(ids, accs))
     pairs = [p for lst, _, _ in fetched for p in lst]
     items = sorted((i for i in POOL.map(safe_meta, pairs) if i), key=lambda i: -i["ts"])
+    listed = {e["email"] for e in errors}
+    errors += [{"email": em, "error": err} for em, err in meta_errors.items() if em not in listed]
     if paged:
         # Global order across accounts and pages (RFC-001885 final review): an account that has more mail in Gmail
         # may still hold messages newer than another account's oldest candidate, so nothing older than the newest

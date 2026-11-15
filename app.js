@@ -68,7 +68,7 @@ async function loadAccounts() {
 
 // The list view is the inbox; typing a search searches All mail unless a scope was picked (RFC-001853 spec item 1).
 const scopeOf = () => S.scope || (S.q ? "all" : "inbox");
-// scope "inbox" keeps the original paging (a bigger limit); every other scope pages with per-account tokens (`next`)
+// every scope, Inbox included, pages with per-account tokens (`next`) (RFC-001886 final review)
 async function loadList(keepSel, page) {
   const scope = scopeOf();
   if ($("#scope")) $("#scope").value = scope;
@@ -89,7 +89,7 @@ async function loadList(keepSel, page) {
     d.errors = [...errs.values()];
   }
   S.items = d.items; S.errors = d.errors; S.next = d.next || "";
-  S.more = scope === "inbox" ? d.items.length >= S.limit : !!S.next;
+  S.more = !!S.next;
   S.sel = selId ? S.items.findIndex((i) => i.id === selId) : -1;
   redraw();
 }
@@ -114,7 +114,7 @@ function redraw() {
     (S.more ? `<button id="more">Load more</button>` : "");
   const more = $("#more");
   if (more) more.onclick = () => {
-    if (scopeOf() === "inbox") { S.limit = Math.min(S.limit * 2, 200); loadList(true); } else loadList(true, S.next);
+    loadList(true, S.next);
   };
 }
 
