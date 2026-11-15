@@ -330,6 +330,16 @@ All settings are environment variables; see [`.env.example`](.env.example).
   cleaned keywords and message numbers before anything is shown. Nothing the AI returns runs without your confirmation.
 - The container runs read-only as an unprivileged user with all capabilities dropped.
 
+## Deploy definitions
+
+- `compose.zero-sum.yml` is the Docker Compose add-on described under Install. It is kept in step with the app by
+  hand and is not exercised by the tests or by the maintainer's own server, so treat it as a starting point and check
+  the start-up log after an upgrade.
+- `deploy/zero-sum.container.in` is a Podman quadlet template (read-only, no capabilities, port on 127.0.0.1 only,
+  health check on `/healthz?deep=1`); this is how the maintainer's server runs it.
+- `deploy/env.contract` lists every environment variable the app reads and whether it is required. A test keeps it
+  equal to what the code reads, so a setup script can be checked against one file instead of re-reading the source.
+
 ## Inbox Zero versions
 
 [`inbox-zero.version`](inbox-zero.version) names the Inbox Zero release this version of Zero Sum is tested with.
