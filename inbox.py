@@ -2,6 +2,7 @@
 import base64, email.utils, re, time, urllib.parse
 
 from core import ACC, POOL, db, gmail, header, labels
+from guard import is_protected, protected_set
 
 _meta = {}  # (account id, message id) -> (time, item)
 
@@ -78,7 +79,6 @@ def messages(q):
     pairs = [p for lst in POOL.map(ids, accs) for p in lst]
     items = sorted((i for i in POOL.map(safe_meta, pairs) if i), key=lambda i: -i["ts"])
     rules = rules_for(items)
-    from cleanup import is_protected, protected_set
     prot = protected_set()
     for it in items:
         it["rules"] = rules.get((it["account"], it["id"]), [])

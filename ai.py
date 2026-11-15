@@ -6,11 +6,12 @@ AI_BASE_URL. Subjects and previews are untrusted text from strangers. They are s
 a marker that is new for every call (data()), never mixed into the instructions; and the model's answer is limited to
 a fixed set of actions, short cleaned keep words, or one verdict per numbered email, all validated below.
 """
-import collections, json, os, re, secrets, time, urllib.error, urllib.parse, urllib.request
+import collections, datetime, json, os, re, secrets, threading, time, urllib.error, urllib.parse, urllib.request
 
 from concurrent.futures import ThreadPoolExecutor
 
-from core import ACC, POOL, db, gmail, gmail_list, header
+from core import ACC, POOL, db, gmail, gmail_list, header, set_setting, setting
+from guard import frm, is_protected, protected_set, sender_addr, subject_has
 
 KEY = os.environ.get("OPENROUTER_API_KEY", "").strip()
 MODEL = os.environ.get("AI_MODEL", "anthropic/claude-haiku-5.5")
@@ -51,7 +52,6 @@ def _subjects(addr, per_account=60):
     if rows:
         norm = collections.Counter(re.sub(r"\d+", "#", r[0].strip())[:120] for r in rows)
         return norm.most_common(80), len(rows)
-    from cleanup import frm
     q = urllib.parse.quote(f"{frm(addr)} -in:trash")
 
     def one(a):
@@ -69,7 +69,6 @@ def _subjects(addr, per_account=60):
 
 
 def suggest(d):
-    from cleanup import sender_addr
     addr = sender_addr(d.get("addr"))
     if not KEY:
         raise PermissionError("AI is not configured: set OPENROUTER_API_KEY (and optionally AI_MODEL)")
@@ -81,15 +80,12 @@ def suggest(d):
     words = [re.sub(r"[^\w\s'&$%!-]", " ", str(w), flags=re.U).strip()[:40] for w in (ans.get("keep_words") or [])][:6]
     words = [w for w in words if w] if action not in ("keep", "protect") else []
     reason = re.sub(r"\s+", " ", str(ans.get("reason") or ""))[:300]
-    from cleanup import subject_has
     kept = [{"subject": s, "count": n, "kept": subject_has(words, s)} for s, n in subjects]
     return {"addr": addr, "action": action, "keep_words": words, "reason": reason, "model": MODEL,
             "sampled": sampled, "subjects": kept}
 
 
 # ---------------------------------------------------------------- AI Cleanup page: multi-group plans
-import threading
-
 PLAN_PROMPT = """You help someone clean up email from ONE sender across several of their inboxes. Below are subject lines
 from that sender (count x subject). Most senders mix mail worth keeping (orders, receipts, shipping, account, security,
 bookings, bills) with promotions. Split this sender's mail into groups by subject words, and give each group an action:
@@ -130,7 +126,6 @@ DAILY_CAP = int(os.environ.get("AI_MAX_CALLS_PER_DAY", "400"))
 
 def _count_call():
     """Count AI calls per UTC day; refuse past AI_MAX_CALLS_PER_DAY so background work can't run up a bill."""
-    import datetime
     day = datetime.datetime.utcnow().strftime("%Y-%m-%d")
     with db() as c:
         n = c.execute("INSERT INTO unified.settings (k, v) VALUES (%s, '1') ON CONFLICT (k) DO UPDATE "
@@ -239,10 +234,8 @@ def analyze(d):
     if _running["busy"]:
         return {"started": False, "running": _running}
     if d.get("addr"):  # re-analyze one sender
-        from cleanup import sender_addr
         addrs = [sender_addr(d["addr"])]
     else:
-        from cleanup import protected_set, is_protected
         n = max(1, min(int(d.get("limit") or 25), 100))
         prot = protected_set()
         with db() as c:
@@ -323,14 +316,6 @@ def classify(rule, items):
     return out
 
 
-def classify_preview(d):
-    """Tag the 20 most recent emails of a sender with the rule, for the plan preview."""
-    from cleanup import sender_recent
-    items = sender_recent({"addr": [str(d.get("addr") or "")], "n": ["20"]})["items"]
-    verdicts = classify(d.get("rule"), [(it["subject"], it["snippet"]) for it in items])
-    return {"verdicts": {it["id"]: v for it, v in zip(items, verdicts)}}
-
-
 # ---------------------------------------------------------------- background analyst: plan every sender over time
 PLANS_PER_RUN = int(os.environ.get("AI_PLANS_PER_RUN", "4"))
 MIN_EMAILS = int(os.environ.get("AI_MIN_EMAILS", "5"))
@@ -339,8 +324,6 @@ MIN_EMAILS = int(os.environ.get("AI_MIN_EMAILS", "5"))
 def background_plan():
     """Every collector run (when on): plan the biggest senders that have no plan yet, or whose mail grew by half since
     their plan, from the local history. Paced by AI_PLANS_PER_RUN and the daily AI call cap."""
-    from core import setting
-    from cleanup import is_protected, protected_set
     if not KEY or setting("ai_background", "1") != "1" or _running["busy"]:
         return
     prot = protected_set()
@@ -359,7 +342,6 @@ def background_plan():
 
 def progress(q=None):
     """How far the slow, complete pass has got: mail collected vs each mailbox's total, senders analyzed vs all."""
-    from core import setting
 
     def total(a):
         try:
@@ -373,7 +355,6 @@ def progress(q=None):
         senders = c.execute("SELECT count(*) FROM (SELECT from_addr FROM unified.msg GROUP BY 1 HAVING count(*) >= %s) s",
                             (MIN_EMAILS,)).fetchone()[0]
         planned = c.execute("SELECT count(*) FROM unified.ai_plan").fetchone()[0]
-        import datetime
         calls = c.execute("SELECT v FROM unified.settings WHERE k = %s",
                           (f"ai_calls:{datetime.datetime.utcnow():%Y-%m-%d}",)).fetchone()
     return {"collected": sum(coll.values()), "mailboxTotal": sum(totals.values()), "withSubject": with_subj,
@@ -384,6 +365,5 @@ def progress(q=None):
 
 
 def set_background(d):
-    from core import set_setting
     set_setting("ai_background", "1" if d.get("on") else "0")
     return {"ok": True}

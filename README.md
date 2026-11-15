@@ -346,6 +346,12 @@ models, plus `utils/encryption.ts`, the environment variable names and the docke
 
 ## Development
 
+One Python process, standard library HTTP server, no framework. `app.py` (routes, sign-in gate, background jobs),
+`core.py` (database, tokens, Gmail calls), `izdb.py` (the Inbox Zero schema contract), `guard.py` (input validation,
+protected senders), `collector.py` (mail metadata), `gmailops.py` (filters, bulk label changes, undo journal),
+`actions.py` (sender actions, quarantine, plans, previews), `aisort.py` and `ai.py` (AI), `inbox.py`, `analytics.py`,
+`rulesync.py`, `access.py`. `cleanup.py` is only a facade over the five modules it was split into.
+
 ```sh
 pip install cryptography==43.0.3 "psycopg[binary]==3.2.3"
 python3 -m unittest discover -s tests

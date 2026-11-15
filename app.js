@@ -313,7 +313,7 @@ async function runSender(s, a, b, ai) {
   } catch (err) { $("#c-result").innerHTML = `<div class="err">${esc(err.message)}</div>`; }
   loadSenders();
 }
-/* Undo: every bulk change is recorded with the messages it touched (cleanup.py _record) */
+/* Undo: every bulk change is recorded with the messages it touched (gmailops.py _record) */
 function undoWhat(a) {
   if (a.add.includes("TRASH")) return "moved to Trash";
   if (a.add.includes("SPAM")) return "reported as spam";
@@ -431,7 +431,7 @@ $("#c-protect-btn").onclick = async () => {
 };
 $("#c-collect").onclick = async () => { await api("/api/collect", {}).catch(() => {}); $("#c-status").textContent = "Collecting… refresh in a minute."; };
 
-/* Whole-word match, as the applied Gmail search subject:(word) does (cleanup.py subject_has): a substring test showed
+/* Whole-word match, as the applied Gmail search subject:(word) does (guard.py subject_has): a substring test showed
    "Reorder now" as kept by "order", and Gmail then gave it the destructive action. */
 function subjectHas(words, subject) {
   const sub = String(subject || "").toLowerCase();

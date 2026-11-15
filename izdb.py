@@ -25,7 +25,7 @@ READ = {
 WRITE = {
     "Rule": ["id", "createdAt", "updatedAt", "emailAccountId", *RULE_FIELDS],       # rulesync.py
     "Action": ["id", "createdAt", "updatedAt", "ruleId", "labelId", *ACTION_FIELDS],  # rulesync.py
-    "Newsletter": ["id", "updatedAt", "email", "status", "emailAccountId"],         # cleanup.py, ai.py, analytics.py
+    "Newsletter": ["id", "updatedAt", "email", "status", "emailAccountId"],         # actions.py, ai.py, analytics.py
 }
 TABLES = {**READ, **WRITE}
 # Read only when ACCOUNT_OWNERS is set (core.accounts_query): whose mailbox is whose. grants.sql grants these when

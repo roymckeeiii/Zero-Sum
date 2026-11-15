@@ -81,7 +81,8 @@ class OneClick(unittest.TestCase):
 
     def test_the_real_connection_is_plain_http_client_which_has_no_redirect_handling(self):
         import http.client
-        with open(cleanup.__file__, encoding="utf-8") as f:
+        import actions
+        with open(actions.__file__, encoding="utf-8") as f:
             src = f.read()
         self.assertIn("class _Pinned(http.client.HTTPSConnection)", src)
         self.assertNotIn("urlopen(", src.split("def _one_click(url):")[1].split("\n\n\n")[0])

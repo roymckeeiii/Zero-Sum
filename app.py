@@ -19,7 +19,7 @@ RULES_EVERY_MIN (only when auto sync is on in the Rules tab).
 import json, os, sys, threading, time, traceback, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-import access, ai, analytics, cleanup, core, inbox, izdb, rulesync
+import access, actions, ai, aisort, analytics, collector, core, gmailops, inbox, izdb, rulesync
 from core import init_schema, log, set_setting
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -38,15 +38,15 @@ GET = {
     "/api/accounts": lambda q: inbox.accounts(),
     "/api/messages": inbox.messages,
     "/api/message": inbox.message,
-    "/api/senders": cleanup.senders,
+    "/api/senders": actions.senders,
     "/api/analytics": analytics.overview,
     "/api/rules": lambda q: rulesync.state(),
-    "/api/protected": cleanup.protected_list,
-    "/api/quarantine": cleanup.quarantine_list,
-    "/api/undo": cleanup.undo_list,
-    "/api/sender/recent": cleanup.sender_recent,
+    "/api/protected": actions.protected_list,
+    "/api/quarantine": actions.quarantine_list,
+    "/api/undo": gmailops.undo_list,
+    "/api/sender/recent": gmailops.sender_recent,
     "/api/ai/plans": ai.plans,
-    "/api/ai/sorting": cleanup.ai_sort_status,
+    "/api/ai/sorting": aisort.ai_sort_status,
     "/api/ai/progress": ai.progress,
     "/api/rules/preview": lambda q: rulesync.sync(apply=False),
 }
@@ -58,24 +58,24 @@ def _auto(d):
 
 
 def _collect(d):
-    threading.Thread(target=cleanup.collect_all, daemon=True).start()
+    threading.Thread(target=collector.collect_all, daemon=True).start()
     return {"ok": True, "started": True}
 
 
 POST = {
     "/api/action": inbox.action,
-    "/api/sender": cleanup.sender_action,
-    "/api/sender/preview": cleanup.preview,
-    "/api/quarantine": cleanup.quarantine_action,
-    "/api/undo": cleanup.undo_action,
-    "/api/protect/bulk": cleanup.protect_many,
-    "/api/filters/adopt": cleanup.adopt_filters,
+    "/api/sender": actions.sender_action,
+    "/api/sender/preview": actions.preview,
+    "/api/quarantine": actions.quarantine_action,
+    "/api/undo": gmailops.undo_action,
+    "/api/protect/bulk": actions.protect_many,
+    "/api/filters/adopt": gmailops.adopt_filters,
     "/api/ai/suggest": ai.suggest,
     "/api/ai/analyze": ai.analyze,
-    "/api/ai/apply": cleanup.apply_plan,
+    "/api/ai/apply": actions.apply_plan,
     "/api/ai/skip": ai.skip,
-    "/api/ai/classify": ai.classify_preview,
-    "/api/ai/stop-sort": cleanup.stop_ai_sort,
+    "/api/ai/classify": aisort.classify_preview,
+    "/api/ai/stop-sort": aisort.stop_ai_sort,
     "/api/ai/background": ai.set_background,
     "/api/rules/sync": lambda d: rulesync.sync(apply=True),
     "/api/rules/include": rulesync.set_include,
@@ -243,7 +243,7 @@ def init_db():
 
 def adopt_filters_cli(args):
     init_schema()
-    res = cleanup.adopt_filters({"apply": "--apply" in args, "all": "--all" in args})
+    res = gmailops.adopt_filters({"apply": "--apply" in args, "all": "--all" in args})
     for a in res["accounts"]:
         print(f"{a['email']}: {a['filters']} filter(s) in Gmail, {a['recorded']} already on record, "
               f"{a['other']} not of a shape Zero Sum creates (never touched)"
@@ -267,8 +267,8 @@ if __name__ == "__main__":
     if not ALLOWED:
         raise SystemExit("ALLOWED_EMAILS is empty: set it to the address(es) your auth proxy lets in")
     check_upstream_schema()
-    every(60 * int(os.environ.get("COLLECT_EVERY_MIN", "15")), cleanup.collect_all, 20)
-    every(60 * int(os.environ.get("COLLECT_EVERY_MIN", "15")), cleanup.ai_sort_new, 120)
+    every(60 * int(os.environ.get("COLLECT_EVERY_MIN", "15")), collector.collect_all, 20)
+    every(60 * int(os.environ.get("COLLECT_EVERY_MIN", "15")), aisort.ai_sort_new, 120)
     every(60 * int(os.environ.get("COLLECT_EVERY_MIN", "15")), ai.background_plan, 300)
     every(60 * int(os.environ.get("RULES_EVERY_MIN", "10")), auto_rules, 60)
     port = int(os.environ.get("PORT", "8080"))

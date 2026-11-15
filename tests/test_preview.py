@@ -125,7 +125,7 @@ class Preview(World):
         self.assertNotIn("recent emails across", js)
         self.assertIn('api("/api/sender/preview"', js)
         import app
-        self.assertIs(app.POST["/api/sender/preview"], cleanup.preview)
+        self.assertIs(app.POST["/api/sender/preview"], cleanup.preview)   # the facade hands out the real function
 
 
 if __name__ == "__main__":
