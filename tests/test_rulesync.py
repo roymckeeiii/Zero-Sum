@@ -171,5 +171,60 @@ class Sync(World):
                 rulesync.sync()
 
 
+class InboxZeroV230(World):
+    """Inbox Zero v2.30 adds Action.emailAccountId and messaging-channel actions; v2.25.8 has neither."""
+
+    def column(self, present):
+        hit = [(1,)] if present else []
+        self.db.on("information_schema.columns", lambda p: hit if p == ("Action", "emailAccountId") else [])
+
+    def action_insert(self):
+        (sql, params), = self.db.said('INSERT INTO "Action"')
+        cols = [c.strip().strip('"') for c in sql.split("(", 1)[1].split(")", 1)[0].split(",")]
+        cols.remove("updatedAt")                                                   # now(), not a parameter
+        self.assertEqual(sql.count("%s"), len(params))
+        return dict(zip(cols, params))
+
+    def test_v2_25_8_copies_actions_without_the_account_column(self):
+        self.column(False)
+        rulesync.sync()
+        a = self.action_insert()
+        self.assertNotIn("emailAccountId", a)
+        self.assertEqual((a["labelId"], a["type"]), ("L_acc2_Receipts", "LABEL"))
+
+    def test_v2_30_copies_carry_the_target_account_not_the_master(self):
+        self.column(True)
+        rulesync.sync()
+        a = self.action_insert()
+        target = self.db.said('INSERT INTO "Rule"')[0][1][0]
+        self.assertEqual((a["ruleId"], a["emailAccountId"], a["labelId"]), (target, "acc2", "L_acc2_Receipts"))
+
+    def test_the_column_is_checked_on_every_sync_so_an_upgrade_needs_no_restart(self):
+        self.column(False)
+        rulesync.sync()
+        self.assertNotIn("emailAccountId", self.db.said('INSERT INTO "Action"')[0][0])
+        self.db.sql.clear()
+        self.map = []                                                              # make the copy again
+        self.column(True)
+        rulesync.sync()
+        self.assertIn("emailAccountId", self.db.said('INSERT INTO "Action"')[0][0])
+        checks = self.db.said("information_schema.columns")
+        self.assertEqual(len(checks), 1)                                           # once per account pass
+        self.assertIn("table_schema = 'public'", checks[0][0])
+
+    def test_messaging_channel_actions_are_not_copied(self):
+        self.actions = {"m1": [action("m1"), action("m1", "NOTIFY_MESSAGING_CHANNEL", None, None),
+                               action("m1", "DRAFT_MESSAGING_CHANNEL", None, None), action("m1", "STAR", None, None)]}
+        rulesync.sync()
+        self.assertEqual([p[-len(rulesync.ACTION_FIELDS)] for _, p in self.db.said('INSERT INTO "Action"')],
+                         ["LABEL", "STAR"])
+
+    def test_a_rule_with_only_messaging_channel_actions_is_copied_with_none(self):
+        self.actions = {"m1": [action("m1", "NOTIFY_MESSAGING_CHANNEL", None, None)]}
+        self.assertEqual(self.ops(rulesync.sync()), [("create", "two@x.com", "Receipts")])
+        self.assertEqual(self.db.said('INSERT INTO "Action"'), [])
+        self.assertEqual(len(self.db.said('INSERT INTO "Rule"')), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

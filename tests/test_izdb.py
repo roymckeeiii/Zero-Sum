@@ -215,6 +215,18 @@ class UpstreamCheck(unittest.TestCase):
         self.assertIn("AUTO_ARCHIVED: MISSING", e(SCHEMA_OLD.replace("  AUTO_ARCHIVED\n", "")))
         self.assertTrue(self.cu.enum_contract(SCHEMA_OLD, "SystemType", []).startswith("("))
 
+    def test_versioned_columns_are_watched_but_not_required(self):
+        v225 = "model Action {\n  id String @id\n  ruleId String\n}\n"
+        v230 = v225.replace("  ruleId String\n", "  ruleId String\n  emailAccountId String\n")
+        got = {}
+        for tag, schema in (("old", v225), ("new", v230)):
+            with Patched(self.cu, raw=lambda t, path, s=schema: s if path.endswith("schema.prisma") else ""):
+                got[tag] = self.cu.watched(tag)["model Action (columns Zero Sum uses)"]
+        self.assertIn("(column emailAccountId not found)", got["old"])            # the upgrade shows up in the diff
+        self.assertIn("emailAccountId String", got["new"])
+        self.assertFalse(set(izdb.VERSIONED["Action"]) & set(izdb.TABLES["Action"]))   # problems() never asks for it
+        self.assertEqual(izdb.problems(live()), [])
+
     def test_it_watches_exactly_the_contract(self):
         with Patched(self.cu, raw=lambda tag, path: SCHEMA_OLD if path.endswith("schema.prisma") else ""):
             items = self.cu.watched("v1")

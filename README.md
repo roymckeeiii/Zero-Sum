@@ -354,6 +354,11 @@ It compares only what Zero Sum depends on (the columns and enum values declared 
 models, plus `utils/encryption.ts`, the environment variable names and the docker-compose services/endpoints). Exit 0 = nothing relevant changed: bump
 `inbox-zero.version`. Exit 1 = adapt Zero Sum first; the diff shows what changed.
 
+Already handled for v2.30: versioned token encryption (`v1:` prefix), `Action.emailAccountId` (written on rule copies
+when the column exists, checked on every sync, declared as a versioned column in `izdb.py`) and messaging-channel
+actions (Slack/Teams/Telegram; not copied to other accounts, since they point at the master's own channel). The pin
+stays at the tested release until `check_upstream.py` has been run against the new one.
+
 ## Development
 
 One Python process, standard library HTTP server, no framework. `app.py` (routes, sign-in gate, background jobs),

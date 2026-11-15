@@ -8,16 +8,23 @@
 - Gmail label ids differ per account: LABEL actions are matched by label name and the label is created when missing.
   Labels are looked up (a Gmail call) before the database transaction on Inbox Zero's tables is opened, never inside.
 - Learned sender patterns (Rule.groupId) and deprecated category filters are per-account history: not copied.
+- Actions that post to a messaging channel (Slack/Teams/Telegram: DRAFT_/NOTIFY_MESSAGING_CHANNEL, Inbox Zero
+  v2.30+) point at the master account's own channel, so they are not copied. A rule whose only actions are of that
+  kind is copied with no actions (its conditions still apply).
+- Inbox Zero v2.30 ties every Action to its account (Action.emailAccountId): copies carry the target account's id
+  when the column exists (izdb.VERSIONED, checked on every sync pass), so the same code runs on v2.25.8 and v2.30.
 - Opt-in: a master rule is copied only to the accounts ticked for it (unified.rule_include); untick and its copy
   there is deleted. Nothing is shared by default: each address usually gets different mail.
 """
 import hashlib, json, threading
 
 from core import ACC, MASTER, db, label_id, labels, log, new_id, setting
-from izdb import ACTION_FIELDS, ENUM, RULE_FIELDS  # the upstream columns this copies: declared in izdb.py
+from izdb import ACTION_FIELDS, ENUM, RULE_FIELDS, has_column  # the upstream columns this copies: declared in izdb.py
 
 MASTER_HINT = bool(MASTER)
 
+# per-account action types (they reference the master's own messaging channel): never copied
+SKIP_ACTION_TYPES = {"DRAFT_MESSAGING_CHANNEL", "NOTIFY_MESSAGING_CHANNEL"}
 LOCK = threading.Lock()
 
 
@@ -46,6 +53,8 @@ def master_actions(master_id, rule):
     lab = labels(master_id)
     out = []
     for a in rule["actions"]:
+        if a["type"] in SKIP_ACTION_TYPES:
+            continue
         a = dict(a)
         if a["type"] == "LABEL":
             a["label"] = lab.get(a["labelId"]) or a["label"]
@@ -113,9 +122,10 @@ def _backup_rule(c, target_id, account_id, reason):
               (reason, target_id, account_id))
 
 
-def _write_rule(c, target_id, account_id, rule, actions, insert, lids):
+def _write_rule(c, target_id, account_id, rule, actions, insert, lids, action_account=None):
     """Write one copy. `lids` maps label names to this account's Gmail label ids, resolved by the caller beforehand:
-    no Gmail call happens while the transaction is open."""
+    no Gmail call happens while the transaction is open. `action_account`: whether "Action" has "emailAccountId"
+    (Inbox Zero v2.30+); None asks the database."""
     cols = RULE_FIELDS
     vals = [rule[f] for f in cols]
     casts = [f'%s::"{ENUM[f]}"' if f in ENUM else "%s" for f in cols]
@@ -127,11 +137,16 @@ def _write_rule(c, target_id, account_id, rule, actions, insert, lids):
         c.execute(f'UPDATE "Rule" SET {sets}, "updatedAt" = now() WHERE id = %s AND "emailAccountId" = %s',
                   [*vals, target_id, account_id])
     c.execute('DELETE FROM "Action" WHERE "ruleId" = %s', (target_id,))
+    if action_account is None:
+        action_account = has_column(c, "Action", "emailAccountId")
+    extra = ['"emailAccountId"'] if action_account else []
+    cols = ", ".join(['"ruleId"', *extra, '"labelId"', *(q(f) for f in ACTION_FIELDS)])
     acasts = ", ".join(f'%s::"{ENUM[f]}"' if f in ENUM else "%s" for f in ACTION_FIELDS)
     for a in actions:
         lid = lids[a["label"]] if a["type"] == "LABEL" and a.get("label") else None
-        c.execute(f'INSERT INTO "Action" (id, "updatedAt", "ruleId", "labelId", {", ".join(q(f) for f in ACTION_FIELDS)}) '
-                  f"VALUES (%s, now(), %s, %s, {acasts})", [new_id(), target_id, lid, *[a[f] for f in ACTION_FIELDS]])
+        c.execute(f'INSERT INTO "Action" (id, "updatedAt", {cols}) VALUES (%s, now(), %s, {"%s, " * len(extra)}%s, '
+                  f"{acasts})", [new_id(), target_id, *([account_id] if extra else []), lid,
+                                 *[a[f] for f in ACTION_FIELDS]])
 
 
 def sync(apply=True, only_account=None):
@@ -203,10 +218,12 @@ def _sync_account(master, acc, mrules, incl, apply):
             if a["type"] == "LABEL" and a.get("label") and a["label"] not in lids:
                 lids[a["label"]] = label_id(acc["id"], a["label"])
     with db() as c:  # then one short transaction on Inbox Zero's tables
+        action_account = has_column(c, "Action", "emailAccountId")  # once per pass: an upgrade is seen next sync
         for op, mid, target, r, actions, h in writes:
             if op == "adopt":  # a rule this app did not make is about to be overwritten: keep what it was
                 _backup_rule(c, target, acc["id"], f"adopted as a copy of master rule {r['name']}"[:200])
-            _write_rule(c, target, acc["id"], r, actions, insert=(op == "create"), lids=lids)
+            _write_rule(c, target, acc["id"], r, actions, insert=(op == "create"), lids=lids,
+                        action_account=action_account)
             c.execute("INSERT INTO unified.rule_map VALUES (%s, %s, %s, %s, now()) ON CONFLICT (master_rule_id, "
                       "account_id) DO UPDATE SET target_rule_id = EXCLUDED.target_rule_id, hash = EXCLUDED.hash, "
                       "synced_at = now()", (mid, acc["id"], target, h))

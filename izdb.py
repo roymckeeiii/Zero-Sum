@@ -28,6 +28,10 @@ WRITE = {
     "Newsletter": ["id", "updatedAt", "email", "status", "emailAccountId"],         # actions.py, ai.py, analytics.py
 }
 TABLES = {**READ, **WRITE}
+# Columns only some Inbox Zero versions have: used when present, never required by check(). Inbox Zero v2.30 ties
+# every Action to its account (Action.emailAccountId, with a composite foreign key to Rule); on v2.25.8 it does not
+# exist. Rule sync asks has_column() on each pass, so an upgrade is picked up without restarting Zero Sum.
+VERSIONED = {"Action": ["emailAccountId"]}
 # Read only when ACCOUNT_OWNERS is set (core.accounts_query): whose mailbox is whose. grants.sql grants these when
 # they exist, and they are checked only when the setting is in use.
 OWNER_SCOPE = {"EmailAccount": ["userId"], "User": ["id", "email"]}
@@ -70,6 +74,12 @@ def problems(c, owner_scope=False):
             continue
         out += [f'enum "{name}" has no value {v}' for v in values if v not in enums[name]]
     return out
+
+
+def has_column(c, table, column):
+    """Does Inbox Zero's table (schema public, the one problems() checks) have this column, as this role sees it?"""
+    return c.execute("SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = %s "
+                     "AND column_name = %s", (table, column)).fetchone() is not None
 
 
 def check():

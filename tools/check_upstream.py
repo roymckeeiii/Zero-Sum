@@ -6,7 +6,8 @@
 Prints, per watched item, "same" or a unified diff, and exits 0 when nothing Zero Sum depends on changed (bump
 inbox-zero.version and you are done), 1 when something did (adapt Zero Sum first), 2 on errors. Watched:
 - the columns Zero Sum reads or writes in Inbox Zero's Prisma models, their model-level attributes (@@unique, @@map)
-  and the enum values it uses: exactly the contract declared in izdb.py, not the whole models, so a new upstream
+  and the enum values it uses: exactly the contract declared in izdb.py (VERSIONED columns included: a release
+  that adds or drops one shows up), not the whole models, so a new upstream
   column that Zero Sum never touches is not reported;
 - apps/web/utils/encryption.ts (how Google tokens are encrypted);
 - the environment variable names apps/web/env.ts accepts (deployments set some of them);
@@ -84,7 +85,8 @@ def compose_shape(src):
 
 def watched(tag):
     schema = raw(tag, "apps/web/prisma/schema.prisma")
-    items = {f"model {m} (columns Zero Sum uses)": model_contract(schema, m, cols) for m, cols in izdb.TABLES.items()}
+    items = {f"model {m} (columns Zero Sum uses)": model_contract(schema, m, cols + izdb.VERSIONED.get(m, []))
+             for m, cols in izdb.TABLES.items()}
     items.update({f"enum {e}": enum_contract(schema, e, vals) for e, vals in izdb.ENUMS.items()})
     items["utils/encryption.ts"] = raw(tag, "apps/web/utils/encryption.ts")
     items["env.ts variable names"] = env_names(raw(tag, "apps/web/env.ts"))
