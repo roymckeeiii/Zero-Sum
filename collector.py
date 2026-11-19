@@ -89,14 +89,16 @@ def collect_account(acc):
                                            "ORDER BY ts DESC LIMIT %s", (a, BACKFILL_STEP)).fetchall()]
     if missing:
         _store(a, missing, refill=True)
-    # read / inbox state can change after collection: refresh the last 30 days from two cheap id lists
+    # read / inbox state can change after collection: refresh the last 30 days from two cheap id lists. `newest` is
+    # never later than now: one message dated in the future (mail imported with a wrong Date header) would otherwise
+    # make the next new-mail pass search after that date and miss everything arriving until then.
     inbox = [m["id"] for m in gmail_list(a, qs("in:inbox newer_than:30d"), "messages", 10000)]
     unread = [m["id"] for m in gmail_list(a, qs("is:unread newer_than:30d"), "messages", 10000)]
     with db() as c:
         c.execute("UPDATE unified.msg SET inbox = (id = ANY(%s)), unread = (id = ANY(%s)) "
                   "WHERE account_id = %s AND ts > now() - interval '30 days'", (inbox, unread, a))
         c.execute("INSERT INTO unified.collect_state (account_id, newest, oldest, backfill_done, updated_at, error) "
-                  "SELECT %s, max(ts), min(ts), %s, now(), NULL FROM unified.msg WHERE account_id = %s "
+                  "SELECT %s, least(max(ts), now()), min(ts), %s, now(), NULL FROM unified.msg WHERE account_id = %s "
                   "ON CONFLICT (account_id) DO UPDATE SET newest = EXCLUDED.newest, oldest = EXCLUDED.oldest, "
                   "backfill_done = EXCLUDED.backfill_done, updated_at = now(), error = NULL", (a, done, a))
     return added

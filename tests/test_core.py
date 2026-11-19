@@ -266,6 +266,22 @@ class Collector(unittest.TestCase):
         self.assertGreaterEqual(cleanup.NEW_MAIL_MAX, 100000)
 
 
+    def test_a_message_dated_in_the_future_does_not_stall_the_new_mail_pass(self):
+        sql = []
+        fake = FakeDb()
+        fake.execute = lambda q, params=None: sql.append(q) or type("R", (), {
+            "fetchall": staticmethod(lambda: []), "fetchone": staticmethod(lambda: None)})()
+        old = (cleanup.gmail_list, cleanup._store, cleanup.db)
+        cleanup.gmail_list, cleanup._store, cleanup.db = (lambda *a, **k: []), (lambda *a, **k: 0), fake
+        try:
+            cleanup.collect_account({"id": "acc"})
+        finally:
+            cleanup.gmail_list, cleanup._store, cleanup.db = old
+        state = next(q for q in sql if "INSERT INTO unified.collect_state" in q)
+        self.assertIn("least(max(ts), now())", state)          # the next pass searches after:<newest>
+        self.assertNotIn(" max(ts), min(ts)", state)
+
+
 class Previews(unittest.TestCase):
     def test_preview_matches_whole_words_like_the_gmail_search(self):
         for words, subject, expect in ((["order"], "Your order shipped", True), (["order"], "Reorder now", False),
