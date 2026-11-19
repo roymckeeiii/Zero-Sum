@@ -308,9 +308,21 @@ class Undo(unittest.TestCase):
     def setUp(self):
         self.calls, self.sql = [], []
         fake = FakeDb()
-        fake.execute = lambda sql, params=None: (self.sql.append((sql, params)) or type("R", (), {
-            "fetchall": staticmethod(lambda: []),
-            "fetchone": staticmethod(lambda: ("acc", ["TRASH"], ["INBOX"], ["m1", "m2"], None))})())
+        self.log_row = {"undone": None}   # the journal row #7: a Delete of m1, m2; undone_at as set by the SQL below
+
+        def execute(sql, params=None):
+            self.sql.append((sql, params))
+            one = None
+            if "SET undone_at = now()" in sql:   # the claim: only a row nobody has undone yet
+                if self.log_row["undone"] is None:
+                    self.log_row["undone"] = "now"
+                    one = ("acc", ["TRASH"], ["INBOX"], ["m1", "m2"])
+            elif "SET undone_at = NULL" in sql:
+                self.log_row["undone"] = None
+            elif "SELECT undone_at FROM unified.action_log" in sql:
+                one = (self.log_row["undone"],)
+            return type("R", (), {"fetchall": staticmethod(lambda: []), "fetchone": staticmethod(lambda: one)})()
+        fake.execute = execute
         self.old = (cleanup.db, cleanup.gmail, cleanup._store, cleanup.log)
         self.old_acc, cleanup.ACC = cleanup.ACC, type("A", (), {"email": staticmethod(lambda a: "me@x.com")})()
         cleanup.db = fake
@@ -340,6 +352,37 @@ class Undo(unittest.TestCase):
                                                                  "removeLabelIds": ["TRASH"]}))
         self.assertFalse([s for s, _ in self.sql if "INSERT INTO unified.action_log" in s])
         self.assertTrue([s for s, _ in self.sql if "SET undone_at" in s])
+
+    def test_one_change_is_undone_once_even_when_undo_is_clicked_twice(self):
+        cleanup.undo_action({"id": 7})
+        with self.assertRaises(ValueError) as e:
+            cleanup.undo_action({"id": 7})
+        self.assertIn("already undone", str(e.exception))
+        self.assertEqual(len(self.calls), 1)   # Gmail was asked once
+        claim = [s for s, _ in self.sql if "SET undone_at = now()" in s][0]
+        self.assertIn("undone_at IS NULL", claim)   # the check and the claim are one statement: no race between them
+        self.assertIn("make_interval", claim)       # nor is a change past UNDO_DAYS (its Trash may be gone) undone
+
+    def test_a_failed_undo_can_be_tried_again(self):
+        def down(*a, **k):
+            raise RuntimeError("Gmail POST /messages/batchModify: 500 backend error")
+        cleanup.gmail = down
+        with self.assertRaises(RuntimeError):
+            cleanup.undo_action({"id": 7})
+        self.assertIsNone(self.log_row["undone"])   # released: not shown as undone when nothing came back
+        cleanup.gmail = lambda acc, path, method="GET", body=None: self.calls.append((path, body)) or {}
+        self.assertEqual(cleanup.undo_action({"id": 7}), {"ok": True, "restored": 2})
+
+    def test_an_unknown_or_expired_change_is_refused(self):
+        self.log_row["undone"] = "earlier"
+        with self.assertRaises(ValueError) as e:
+            cleanup.undo_action({"id": 7})
+        self.assertIn("already undone", str(e.exception))
+        cleanup.db.execute = lambda sql, params=None: type("R", (), {"fetchone": staticmethod(lambda: None)})()
+        with self.assertRaises(ValueError) as e:
+            cleanup.undo_action({"id": 8})
+        self.assertIn("no such action", str(e.exception))
+        self.assertEqual(self.calls, [])
 
 
 class AccessToken(unittest.TestCase):

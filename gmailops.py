@@ -206,7 +206,8 @@ def undo_list(q=None):
     """Bulk changes of the last UNDO_DAYS days, newest first, for the Undo list."""
     with db() as c:
         rows = c.execute("SELECT id, at, account_id, note, add_labels, remove_labels, cardinality(ids), undone_at "
-                         "FROM unified.action_log ORDER BY id DESC LIMIT 60").fetchall()
+                         "FROM unified.action_log WHERE at > now() - make_interval(days => %s) "
+                         "ORDER BY id DESC LIMIT 60", (UNDO_DAYS,)).fetchall()
     names = {a["id"]: a["email"] for a in ACC.list()}
     return {"days": UNDO_DAYS, "actions": [
         {"id": i, "at": at.isoformat(), "email": names.get(acc, acc), "note": note, "add": add, "remove": rem,
@@ -216,23 +217,33 @@ def undo_list(q=None):
 
 def undo_action(d):
     """Put the messages of one recorded bulk change back as they were: its added labels come off (out of Trash,
-    Spam or Quarantine), its removed labels go back on (INBOX). Filters are not touched: Keep or Reset removes those."""
+    Spam or Quarantine), its removed labels go back on (INBOX). Filters are not touched: Keep or Reset removes those.
+
+    The change is claimed (undone_at set) in the same statement that reads it, so a double click or a second tab
+    cannot run one undo twice; if Gmail then fails, the claim is released and Undo can be tried again. A change older
+    than UNDO_DAYS is refused even before the journal is pruned: Gmail may already have emptied that Trash."""
+    aid = int(d.get("id") or 0)
     with db() as c:
-        row = c.execute("SELECT account_id, add_labels, remove_labels, ids, undone_at FROM unified.action_log "
-                        "WHERE id = %s", (int(d.get("id") or 0),)).fetchone()
+        row = c.execute("UPDATE unified.action_log SET undone_at = now() WHERE id = %s AND undone_at IS NULL "
+                        "AND at > now() - make_interval(days => %s) "
+                        "RETURNING account_id, add_labels, remove_labels, ids", (aid, UNDO_DAYS)).fetchone()
+        if not row:
+            seen = c.execute("SELECT undone_at FROM unified.action_log WHERE id = %s "
+                             "AND at > now() - make_interval(days => %s)", (aid, UNDO_DAYS)).fetchone()
     if not row:
-        raise ValueError("no such action (older than %d days?)" % UNDO_DAYS)
-    acc, add, rem, ids, undone = row
-    if undone:
-        raise ValueError("already undone")
-    n = _batch(acc, list(ids), add=list(rem), remove=list(add), record=False)
-    with db() as c:
-        c.execute("UPDATE unified.action_log SET undone_at = now() WHERE id = %s", (int(d["id"]),))
+        raise ValueError("already undone" if seen and seen[0] else "no such action (older than %d days?)" % UNDO_DAYS)
+    acc, add, rem, ids = row
+    try:
+        n = _batch(acc, list(ids), add=list(rem), remove=list(add), record=False)
+    except Exception:
+        with db() as c:   # nothing (or not everything) was put back: let the person try again
+            c.execute("UPDATE unified.action_log SET undone_at = NULL WHERE id = %s", (aid,))
+        raise
     try:  # Delete/Block dropped these messages from the local history: read them back so the sender shows up again
         _store(acc, list(ids)[:5000])
     except Exception as e:  # noqa: BLE001 - the mail itself is restored; the collector fills the rest
-        log("cleanup-error", f"undo #{int(d['id'])}: history not refreshed: {e}"[:300], ACC.email(acc))
-    log("cleanup", f"undo #{int(d['id'])}: {n} messages restored", ACC.email(acc))
+        log("cleanup-error", f"undo #{aid}: history not refreshed: {e}"[:300], ACC.email(acc))
+    log("cleanup", f"undo #{aid}: {n} messages restored", ACC.email(acc))
     return {"ok": True, "restored": n}
 
 
