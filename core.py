@@ -254,6 +254,7 @@ CREATE TABLE IF NOT EXISTS unified.rule_map (
   hash text NOT NULL, synced_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (master_rule_id, account_id));
 CREATE TABLE IF NOT EXISTS unified.rule_include (
   master_rule_id text NOT NULL, account_id text NOT NULL, PRIMARY KEY (master_rule_id, account_id));
+ALTER TABLE unified.rule_map ADD COLUMN IF NOT EXISTS adopted boolean NOT NULL DEFAULT false;
 CREATE TABLE IF NOT EXISTS unified.log (
   id bigserial PRIMARY KEY, at timestamptz NOT NULL DEFAULT now(), kind text NOT NULL, account text, msg text NOT NULL);
 CREATE TABLE IF NOT EXISTS unified.settings (k text PRIMARY KEY, v text NOT NULL);

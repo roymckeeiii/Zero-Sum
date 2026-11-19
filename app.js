@@ -792,7 +792,8 @@ async function loadAnalytics() {
 $("#a-days").onchange = loadAnalytics;
 
 /* ------------------------------------------------------------------ rules */
-const OPS = { create: "create", adopt: "adopt existing", update: "update", delete: "delete", error: "error" };
+const OPS = { create: "create", adopt: "adopt existing", update: "update", delete: "delete", error: "error",
+  restore: "put back own rule", detach: "stop managing", held: "waiting" };
 async function loadRules() {
   let d;
   try { d = await api("/api/rules"); } catch (e) { $("#r-matrix").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
@@ -801,32 +802,67 @@ async function loadRules() {
   $("#r-master").innerHTML = `Rules are written in Inbox Zero on <b>${esc(d.master.email)}</b>. Tick a rule under an account to share it there; nothing is shared unless ticked.
     ${S.izUrl ? `<a href="${esc(S.izUrl)}" target="_blank" rel="noopener">Edit rules ↗</a>` : ""}`;
   $("#r-auto").checked = d.auto;
+  S.ruleCells = {};
   $("#r-matrix").innerHTML = d.rules.length ? `<table class="matrix"><thead><tr><th>Master rule</th>` +
     d.accounts.map((a) => `<th class="num" title="${esc(a.email)}">${acctChip(a.id, a.email)}</th>`).join("") + `</tr></thead><tbody>` +
     d.rules.map((r) => `<tr><td><b>${esc(r.name)}</b>${r.enabled ? "" : ' <span class="note">(off)</span>'}<br>
       <span class="note">${esc(r.actions.join(", ").toLowerCase())}</span></td>` +
-      d.accounts.map((a) => { const st = r.cells[a.id];
+      d.accounts.map((a) => { const st = r.cells[a.id]; S.ruleCells[`${r.id}|${a.id}`] = { rule: r.name, email: a.email, st };
         return `<td class="cell"><label title="Copy this rule to ${esc(a.email)}"><input type="checkbox" data-r="${esc(r.id)}" data-a="${esc(a.id)}" aria-label="${esc(`Copy ${r.name} to ${a.email}`)}" ${st === "off" || st === "removing" ? "" : "checked"}>
           ${st === "off" ? "" : `<span class="st ${st}">${st}</span>`}</label></td>`; }).join("") + "</tr>").join("") + "</tbody></table>"
     : `<div class="empty">The master account has no rules yet: create them in Inbox Zero.</div>`;
   $("#r-log").innerHTML = d.log.length ? `<div class="card"><h3>Recent sync activity</h3><ul class="ops">` +
     d.log.map((l) => `<li class="${l.kind.includes("error") ? "err" : ""}"><span class="note">${esc(stamp(l.at))}</span>
       ${esc(l.account || "")}: ${esc(l.msg)}</li>`).join("") + "</ul></div>" : "";
+  loadRuleBackups();
 }
+// every rule saved before sync overwrote it (unified.rule_backup), each with a button that puts it back
+async function loadRuleBackups() {
+  let d;
+  try { d = await api("/api/rules/backups"); } catch (e) { $("#r-backups").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
+  $("#r-backups").innerHTML = d.backups.length ? `<details class="card"><summary><b>Saved rules</b> <span class="note">(${d.backups.length}):
+      each account's own rules as they were before sync changed them</span></summary><ul class="ops">` +
+    d.backups.map((b) => `<li><span class="note">${esc(stamp(b.at))}</span> <b>${esc(b.rule || "(no name)")}</b>
+      <span class="note">on ${esc(b.account)} · ${esc(b.reason)}${b.exists ? "" : " · deleted since"}</span>
+      <button data-b="${esc(b.id)}" data-name="${esc(b.rule || "")}" data-acc="${esc(b.account)}">Restore</button></li>`).join("") + "</ul></details>" : "";
+}
+$("#r-backups").onclick = async (e) => {
+  const b = e.target.closest("button[data-b]");
+  if (!b || !confirm(`Put "${b.dataset.name}" back in ${b.dataset.acc} as it was saved? What is there now is saved first, and the rule stops being shared.`)) return;
+  try { const r = await api("/api/rules/restore", { id: b.dataset.b }); toast(`Restored ${esc(r.rule)} on ${esc(r.account)}`); }
+  catch (err) { alert(`Restore failed: ${err.message}`); }
+  loadRules();
+};
 function showOps(res) {
   const ops = res.ops.filter((o) => o.op !== "same");
   $("#r-ops").innerHTML = `<div class="card"><h3>${res.applied ? "Synced" : "Preview"}: ${ops.length ? `${ops.length} change(s)` : "everything is up to date"}</h3>` +
+    (res.masterChanged ? `<div class="err">MASTER_EMAIL changed from ${esc(res.masterChanged.from)} to ${esc(res.masterChanged.to)}: copies of the old master's rules are only removed after you confirm with Sync now.</div>` : "") +
     (ops.length ? `<ul class="ops">` + ops.map((o) => `<li class="${o.op === "error" ? "err" : ""}"><b>${esc(OPS[o.op] || o.op)}</b> ${esc(o.rule)}
       <span class="note">on ${esc(o.account)}${o.detail ? ` · ${esc(o.detail)}` : ""}</span></li>`).join("") + "</ul>" : "") + "</div>";
 }
 $("#r-preview").onclick = async () => { try { showOps(await api("/api/rules/preview")); } catch (e) { $("#r-ops").innerHTML = `<div class="err">${esc(e.message)}</div>`; } };
+// Sync now: look first. Deletes (and a changed master account) are listed and run only for what the user confirms.
 $("#r-sync").onclick = async (e) => { e.target.disabled = true;
-  try { showOps(await api("/api/rules/sync", {})); } catch (err) { $("#r-ops").innerHTML = `<div class="err">${esc(err.message)}</div>`; }
-  e.target.disabled = false; loadRules(); };
+  try {
+    const plan = await api("/api/rules/preview"), dels = plan.ops.filter((o) => o.op === "delete");
+    const confirmed = dels.map((o) => o.key);
+    if (plan.masterChanged) confirmed.push("master-change");
+    const ask = (plan.masterChanged ? `MASTER_EMAIL changed from ${plan.masterChanged.from} to ${plan.masterChanged.to}. Copies made from the old master's rules will be removed.\n\n` : "") +
+      (dels.length ? `Delete ${dels.length} rule(s) that sync made?\n\n${dels.map((o) => `• ${o.rule} on ${o.account} (${o.detail})`).join("\n")}\n\nRules an account had before sync are put back, never deleted.` : "Continue?");
+    if ((dels.length || plan.masterChanged) && !confirm(ask)) { showOps(plan); return; }
+    showOps(await api("/api/rules/sync", { confirm: confirmed }));
+  } catch (err) { $("#r-ops").innerHTML = `<div class="err">${esc(err.message)}</div>`; }
+  finally { e.target.disabled = false; loadRules(); }
+};
 $("#r-auto").onchange = (e) => api("/api/rules/auto", { on: e.target.checked }).catch((err) => alert(err.message));
 $("#r-matrix").onchange = async (e) => {
   const c = e.target.closest("input[data-r]");
   if (!c) return;
+  const cell = (S.ruleCells || {})[`${c.dataset.r}|${c.dataset.a}`];
+  if (!c.checked && cell && cell.st !== "off" && cell.st !== "pending" &&
+      !confirm(`Stop sharing "${cell.rule}" with ${cell.email}? At the next sync its copy there is removed (a rule that account had before is put back instead).`)) {
+    c.checked = true; return;
+  }
   await api("/api/rules/include", { rule: c.dataset.r, account: c.dataset.a, include: c.checked }).catch((err) => alert(err.message));
   loadRules();
 };

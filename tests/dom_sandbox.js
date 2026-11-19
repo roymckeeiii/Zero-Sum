@@ -16,11 +16,13 @@ function load(exportNames) {
     set: (t, k, v) => { t[k] = v; return true; },
   }));
   const pending = [], intervals = [];
+  const confirms = [];   // every confirm() question; set confirms.answer = false to press Cancel
   const document = new Proxy({}, { get: (t, k) => (k === "querySelector" ? el : k === "querySelectorAll" ? () => []
     : k === "hidden" ? false : stub()) });
   const ctx = {
     console, URLSearchParams, setTimeout, clearTimeout, setInterval: (fn) => intervals.push(fn), clearInterval: () => {}, Promise, JSON, Math, Date, Intl, Set, Map, String, Number, Error,
     document, window: stub(), localStorage: stub(), location: stub(), navigator: stub(), history: stub(), alert: () => {},
+    confirm: (m) => { confirms.push(String(m)); return confirms.answer !== false; },
     matchMedia: () => stub(), addEventListener: () => {}, requestAnimationFrame: () => 0, encodeURIComponent,
     fetch: (url, opts) => new Promise((resolve) => pending.push({ url: String(url), body: opts && opts.body ? JSON.parse(opts.body) : null, resolve })),
   };
@@ -31,7 +33,7 @@ function load(exportNames) {
   const ok = (body) => ({ ok: true, status: 200, json: async () => body });
   // answer whatever is waiting with empty data (accounts, config, lists), a few rounds deep
   const settle = async () => { for (let i = 0; i < 5; i++) { for (const p of pending.splice(0)) p.resolve(ok(p.url.includes("/api/accounts") ? [] : { items: [], errors: [], next: "" })); await tick(); } };
-  return { t: ctx.__t, els, el, pending, intervals, tick, ok, settle };
+  return { t: ctx.__t, els, el, pending, intervals, confirms, tick, ok, settle };
 }
 
 module.exports = { load };

@@ -52,6 +52,7 @@ GET = {
     "/api/ai/sorting": aisort.ai_sort_status,
     "/api/ai/progress": ai.progress,
     "/api/rules/preview": lambda q: rulesync.sync(apply=False),
+    "/api/rules/backups": lambda q: rulesync.backups(),
 }
 
 
@@ -80,7 +81,9 @@ POST = {
     "/api/ai/classify": aisort.classify_preview,
     "/api/ai/stop-sort": aisort.stop_ai_sort,
     "/api/ai/background": ai.set_background,
-    "/api/rules/sync": lambda d: rulesync.sync(apply=True),
+    # deletes happen only for the keys the user confirmed after seeing the preview (rulesync.sync)
+    "/api/rules/sync": lambda d: rulesync.sync(apply=True, confirm=[str(k) for k in d.get("confirm") or []]),
+    "/api/rules/restore": rulesync.restore,
     "/api/rules/include": rulesync.set_include,
     "/api/rules/auto": _auto,
     "/api/collect": _collect,
@@ -215,10 +218,11 @@ def every(seconds, fn, first_delay):
 def auto_rules():
     from core import setting
     if setting("rules_auto", "0") == "1":
-        res = rulesync.sync(apply=True)
-        changed = [o for o in res["ops"] if o["op"] != "same"]
-        if changed:
-            print(f"[rules] auto sync: {len(changed)} change(s)", flush=True)
+        res = rulesync.sync(apply=True, auto=True)   # deletes at most rulesync.AUTO_MAX_DELETES copies per run
+        changed = [o for o in res["ops"] if o["op"] not in ("same", "held")]
+        held = [o for o in res["ops"] if o["op"] == "held"]
+        if changed or held:
+            print(f"[rules] auto sync: {len(changed)} change(s), {len(held)} waiting for Sync now", flush=True)
 
 
 def sign_in_mode():

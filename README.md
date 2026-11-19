@@ -256,6 +256,12 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
   its own copies. A rule that already existed in a target account under the same name or system type is
   adopted (overwritten with the master's version); what it was before, with its actions, is saved first in
   `unified.rule_backup`. Automatic sync is off until you turn it on in the Rules tab.
+- Removing a copy (unticked, or its master rule deleted) never deletes a rule the account had before: an adopted rule is
+  put back as it was from its backup, or, with no backup, left as it is and no longer managed. Only copies Zero Sum
+  created are deleted, and only after you confirm them: "Sync now" lists every delete first. The automatic sync
+  deletes at most `RULES_AUTO_MAX_DELETES` (default 3) copies per run; the rest wait for "Sync now" and are logged.
+  When `MASTER_EMAIL` names another account than the last sync, nothing is removed until "Sync now" confirms the
+  change. Every saved rule can be put back from "Saved rules" on the Rules tab.
 
 ## Requirements
 
@@ -311,6 +317,7 @@ All settings are environment variables; see [`.env.example`](.env.example).
 | `ADMIN_DATABASE_URL` | | only for `init-db` |
 | `PORT` | `8080` | inside the container |
 | `COLLECT_EVERY_MIN`, `RULES_EVERY_MIN` | `15`, `10` | background jobs |
+| `RULES_AUTO_MAX_DELETES` | `3` | most rule copies the automatic sync deletes in one run; the rest wait for "Sync now" |
 | `BACKFILL_DAYS`, `BACKFILL_STEP` | `0` (all history), `2000` | how far back the collector reads (days; 0 = to the account's first email), and how much per run per account |
 | `MAX_BULK` | `200000` | most emails one bulk action touches per account |
 | `OPENROUTER_API_KEY`, `AI_MODEL`, `AI_BASE_URL` | empty, `anthropic/claude-haiku-5.5`, OpenRouter | all AI features: AI Cleanup, AI sort, AI suggest, background analyst (off without a key) |
