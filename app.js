@@ -127,8 +127,12 @@ async function act(i, action) {
     S.items = S.items.filter((x) => !(x.threadId === it.threadId && x.account === it.account));
     if (S.sel >= S.items.length) S.sel = S.items.length - 1;
     redraw();
-    if (action === "delete") toast(`Moved to Trash: ${esc(it.subject)}`, "Undo",
-      () => api("/api/action", { account: it.account, threadId: it.threadId, action: "undelete" }).then(() => loadList(true)));
+    // undo: out of Trash, or back in the inbox; but archiving a search result that was not in the inbox changed
+    // nothing, and an "undo" would put it in the inbox for the first time
+    const undo = action === "delete" ? "undelete" : it.folder === "Inbox" ? "inbox" : null;
+    toast(`${action === "delete" ? "Moved to Trash" : "Archived"}: ${esc(it.subject)}`, undo && "Undo",
+      () => api("/api/action", { account: it.account, threadId: it.threadId, action: undo }).then(() => { loadList(true); loadAccounts(); })
+        .catch((e) => alert(`Undo failed: ${e.message}`)));
     if (S.sel >= 0) open(S.sel); else $("#reader").innerHTML = `<div class="empty">${action === "delete" ? "Deleted" : "Archived"}.</div>`;
   } else if (action === "star" || action === "unstar") { it.starred = action === "star"; redraw(); if (S.sel === i) open(i); }
   else { it.unread = action === "unread"; redraw(); }
