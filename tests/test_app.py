@@ -1,6 +1,6 @@
 """app.py's gate, over a real loopback socket: who is signed in (verified Access token, or the plain header only with
 the explicit override), the custom header every POST needs, and the refusal to start without verified sign-in."""
-import http.client, json, os, sys, threading, unittest
+import contextlib, http.client, io, json, os, sys, threading, unittest
 from http.server import ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -103,6 +103,32 @@ class Gate(unittest.TestCase):
             app.POST["/api/sender"] = boom
             status, body = self.call("POST", "/api/sender", tok, {})
             self.assertEqual((status, body["error"]), (code, str(exc)))
+
+    def test_an_unexpected_error_reaches_the_page_only_as_a_reference(self):
+        self.mode(token=True, header=False)
+        tok = {"Cf-Access-Jwt-Assertion": "good", "X-Requested-With": "zero-sum"}
+
+        def boom(d):
+            raise RuntimeError("Gmail POST /messages/batchModify: 400 secret-subject from alice@example.org")
+        app.POST["/api/sender"] = boom
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            status, body = self.call("POST", "/api/sender", tok, {})
+        self.assertEqual(status, 502)
+        self.assertNotIn("alice@example.org", json.dumps(body))
+        self.assertNotIn("RuntimeError", json.dumps(body))
+        self.assertIn(body["ref"], body["error"])
+        self.assertIn(f"ref {body['ref']}", out.getvalue())                     # the log keeps the details
+        self.assertIn("alice@example.org", out.getvalue())
+
+    def test_failed_requests_are_logged_without_their_query_string(self):
+        h = app.H.__new__(app.H)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.quiet.old["log_message"](h, '"%s" %s %s', "GET /api/messages?q=alice%40example.org&account=acc1 HTTP/1.1",
+                                          "502", "-")
+            self.quiet.old["log_message"](h, '"%s" %s %s', "GET /api/messages?q=x HTTP/1.1", "200", "-")
+        self.assertEqual(out.getvalue(), '"GET /api/messages HTTP/1.1" 502 -\n')
 
     def raw_post(self, length_header, body=b""):
         c = http.client.HTTPConnection("127.0.0.1", self.srv.server_address[1], timeout=5)

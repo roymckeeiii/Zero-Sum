@@ -16,7 +16,7 @@ be in ALLOWED_EMAILS, and every POST needs a custom header (no cross-site form p
 (default 127.0.0.1; the container image sets 0.0.0.0, where the published port decides who can reach it). Background jobs: collector every COLLECT_EVERY_MIN, rule sync every
 RULES_EVERY_MIN (only when auto sync is on in the Rules tab).
 """
-import json, os, sys, threading, time, traceback, urllib.parse
+import json, os, re, secrets, sys, threading, time, traceback, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import access, actions, ai, aisort, analytics, collector, core, gmailops, inbox, izdb, rulesync
@@ -131,8 +131,9 @@ class H(BaseHTTPRequestHandler):
     server_version = "zero-sum"
 
     def log_message(self, fmt, *args):
+        # failed requests only, and without their query strings: those carry search words, account and message ids
         if len(args) > 1 and str(args[1])[:1] in "45":
-            print(f"{fmt % args}", flush=True)
+            print(fmt % tuple(re.sub(r"\?[^\s\"']*", "", a) if isinstance(a, str) else a for a in args), flush=True)
 
     def send(self, code, body, ctype="application/json"):
         b = body if isinstance(body, bytes) else json.dumps(body, default=str).encode()
@@ -163,9 +164,12 @@ class H(BaseHTTPRequestHandler):
             self.send(409, {"error": str(e)})
         except (KeyError, ValueError) as e:
             self.send(400, {"error": str(e)[:200]})
-        except Exception as e:  # noqa: BLE001
-            print("error:", repr(e)[:300], traceback.format_exc()[-800:], flush=True)
-            self.send(502, {"error": f"{type(e).__name__}: {str(e)[:200]}"})
+        except Exception as e:  # noqa: BLE001 - the details stay in the server log, under a reference the page shows
+            ref = secrets.token_hex(4)
+            print(f"error ref {ref} on {urllib.parse.urlparse(self.path).path}:", repr(e)[:300],
+                  traceback.format_exc()[-800:], flush=True)
+            self.send(502, {"error": f"Something went wrong (reference {ref}); the details are in Zero Sum's log.",
+                            "ref": ref})
 
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)

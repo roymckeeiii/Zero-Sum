@@ -333,6 +333,8 @@ All settings are environment variables; see [`.env.example`](.env.example).
 - Zero Sum can read every linked mailbox, as Inbox Zero can. Run it only behind authentication, for yourself.
 - Email bodies are shown in a sandboxed iframe with no scripts; remote images are blocked until you click "Show images", which applies to that message only.
 - POST requests need a custom header, so other sites cannot submit actions with your session.
+- Failed requests are logged by path only, without query strings (search words, account and message ids). An
+  unexpected error reaches the page only as a short reference; its details are in the container log under it.
 - One-click unsubscribe POSTs to a URL taken from the sender's own `List-Unsubscribe` header, so it is held to the
   public internet: https on port 443 only, every address the host resolves to must be public (no loopback, private,
   link-local or cloud-metadata addresses), the connection goes to the address that was checked, redirects are not
