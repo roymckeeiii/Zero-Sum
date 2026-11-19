@@ -39,9 +39,31 @@ def is_protected(addr, prot=None):
     return any("@" + ".".join(labels[i:]) in prot for i in range(max(1, len(labels) - 1)))
 
 
-def own_address(addr):
-    """True when addr is one of the linked accounts: `from:<me>` matches everything that account ever sent."""
-    return addr in {a["email"].lower() for a in ACC.list()}
+GMAIL_DOMAINS = {"gmail.com", "googlemail.com"}
+
+
+def mailbox(addr):
+    """The mailbox an address delivers to, for comparing addresses: lower-cased, "+tag" dropped (me+news@ is me@),
+    and for Gmail also the dots in the name and googlemail.com (m.e@googlemail.com is me@gmail.com)."""
+    local, _, domain = str(addr or "").strip().lower().rpartition("@")
+    if not local:
+        return str(addr or "").strip().lower()
+    local = local.split("+", 1)[0] or local
+    if domain in GMAIL_DOMAINS:
+        local, domain = local.replace(".", ""), "gmail.com"
+    return f"{local}@{domain}"
+
+
+def own_set():
+    """The linked accounts' own mailboxes (see mailbox()). Gmail "send as" aliases are not included: this app does
+    not read /settings/sendAs, so mail from an alias on another domain is not recognised as the user's own."""
+    return {mailbox(a["email"]) for a in ACC.list()}
+
+
+def own_address(addr, own=None):
+    """True when addr is one of the linked accounts, in any spelling that reaches the same mailbox (+tag, Gmail dots,
+    googlemail.com): `from:<me>` matches everything that account ever sent."""
+    return mailbox(addr) in (own_set() if own is None else own)
 
 
 def guard_sender(addr, prot=None):

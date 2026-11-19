@@ -83,6 +83,37 @@ class ChokePoint(World):
         self.untouched()
 
 
+class OwnSpellings(World):
+    """The user's own mailbox in any spelling that delivers to it: +tags, Gmail's ignored dots, googlemail.com."""
+
+    def setUp(self):
+        super().setUp()
+        self.acc = Accounts(ME, "jane.doe@gmail.com")
+        self.p2 = Patched(cleanup, ACC=self.acc)
+        self.p2.__enter__()
+        self.addCleanup(self.p2.__exit__)
+
+    def test_variants_of_an_own_address_are_own(self):
+        for addr in ("me+news@x.com", "ME@x.com", "jane.doe@gmail.com", "janedoe@gmail.com", "j.a.n.e.d.o.e+x@gmail.com",
+                     "jane.doe@googlemail.com", "janedoe+shop@googlemail.com"):
+            self.assertTrue(cleanup.own_address(addr), addr)
+        for addr in ("m.e@x.com", "me@x.co", "jane.doe@gmail.co", "janedoe2@gmail.com", "x+me@x.com"):
+            self.assertFalse(cleanup.own_address(addr), addr)   # dots only count at Gmail; the tag is after the +
+
+    def test_every_destructive_path_refuses_a_variant(self):
+        for who in ("me+tag@x.com", "jane.doe+promo@googlemail.com", "janedoe@gmail.com"):
+            with self.assertRaises(PermissionError, msg=who):
+                cleanup.sender_action({"addr": who, "action": "block"})
+            with self.assertRaises(PermissionError, msg=who):
+                cleanup._batch("acc1", ["m1"], add=["TRASH"], sender=who)
+        self.db.on("SELECT id, from_addr FROM unified.msg", [("m1", JUNK), ("m2", "me+x@x.com"), ("m3", "jane.doe@googlemail.com")])
+        self.assertEqual(cleanup._batch("acc1", ["m1", "m2", "m3"], add=["TRASH"]), 1)
+        self.untouched_but_m1()
+
+    def untouched_but_m1(self):
+        self.assertEqual([c[3]["ids"] for c in self.g.changes("batchModify")], [["m1"]])
+
+
 class RealSender(World):
     """Gmail's from:"addr" also finds mail where addr is only in the display name, or part of a longer address: a
     destructive sender action changes only mail really from addr, and says how much it left alone."""

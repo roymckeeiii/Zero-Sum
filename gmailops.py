@@ -6,7 +6,7 @@ import email.utils, os, re, threading
 
 from collector import CPOOL, SKIP, _store, qs
 from core import ACC, POOL, db, gmail, gmail_list, header, label_id, log
-from guard import (frm, guard_sender, is_protected, own_address, protected_set, removes_mail, sender_addr,
+from guard import (frm, guard_sender, is_protected, own_address, own_set, protected_set, removes_mail, sender_addr,
                    sender_matches, SENDER_KEY)
 from inbox import meta
 
@@ -270,12 +270,12 @@ def _modify_existing(acc_id, query, add=(), remove=(), *, sender):
             guard_sender(s, prot)   # the sender itself first: refused outright, whatever the messages turn out to be
         who = senders_of(acc_id, ids)
         mine = [i for i in ids if who.get(i) == sender]
-        held = getattr(_ACTION, "held", None)
+        held, own = getattr(_ACTION, "held", None), own_set()
         if held is not None:
             for i in ids:
                 if who.get(i) != sender:
                     w = who.get(i)
-                    held["protected" if w and (own_address(w) or is_protected(w, prot)) else "other"] += 1
+                    held["protected" if w and (own_address(w, own) or is_protected(w, prot)) else "other"] += 1
         ids = mine
     return _batch(acc_id, ids, add, remove, sender=sender)
 
@@ -328,8 +328,8 @@ def _batch(acc_id, ids, add=(), remove=(), record=True, sender=None):
                 known = c.execute("SELECT id, from_addr FROM unified.msg WHERE account_id = %s AND id = ANY(%s)",
                                   (acc_id, ids)).fetchall()
             if known:
-                own = {a["email"].lower() for a in ACC.list()}
-                held = {i for i, frm in known if frm in own or is_protected(frm, prot)}
+                own = own_set()
+                held = {i for i, frm in known if own_address(frm, own) or is_protected(frm, prot)}
                 ids = [i for i in ids if i not in held]
     if ids and record and (add or remove):
         _record(acc_id, ids, add, remove)

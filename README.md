@@ -334,7 +334,10 @@ All settings are environment variables; see [`.env.example`](.env.example).
   public internet: https on port 443 only, every address the host resolves to must be public (no loopback, private,
   link-local or cloud-metadata addresses), the connection goes to the address that was checked, redirects are not
   followed, and it gives up after 10 seconds. Anything else is left as a link for you to open.
-- Sender addresses in requests must be plain addresses and are quoted in every Gmail search.
+- Sender addresses in requests must be plain addresses and are quoted in every Gmail search. A sender action only
+  changes mail whose real sender is that address (Gmail's `from:` search also matches display names), and never mail
+  from a protected sender or from a linked account's own address, in any spelling that reaches it (`+tags`, Gmail's
+  dots, `googlemail.com`). Gmail "send as" aliases on other domains are not known to Zero Sum: protect them.
 - Email text sent to the AI is treated as untrusted: prompts say so, and answers are reduced to a fixed set of actions,
   cleaned keywords and message numbers before anything is shown. Nothing the AI returns runs without your confirmation.
 - The container runs read-only as an unprivileged user with all capabilities dropped.

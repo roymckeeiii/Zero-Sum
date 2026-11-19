@@ -10,7 +10,7 @@ from core import ACC, POOL, db, gmail_list, label_id, log, new_id
 from gmailops import (ARCHIVE_FILTER, AUTOMATION_KINDS, FOREIGN_NOTE, MAX_BULK, NEVER_SPAM_FILTER, QUARANTINE, STAR_FILTER,
                       TRASH_FILTER, _ACTION, _batch, _filter, _modify_existing, bulk_query, foreign_filters,
                       held_note, held_start, remove_app_filters, senders_of)
-from guard import (SENDER_KEY, frm, guard_sender, is_protected, keep_query, own_address, parse_protect_keys,
+from guard import (SENDER_KEY, frm, guard_sender, is_protected, keep_query, own_address, own_set, parse_protect_keys,
                    protected_set, sender_addr)
 from inbox import meta
 
@@ -429,8 +429,8 @@ def quarantine_action(d):
             senders, left = None, 0
             if act == "delete":  # "all", ticked messages and one sender alike: every message's real sender is
                 who = senders_of(a["id"], ids)  # looked up, and protected, own and unknown ones stay in Quarantine
-                prot, own = protected_set(), {x["email"].lower() for x in ACC.list()}
-                ok = [i for i in ids if who.get(i) and who[i] not in own and not is_protected(who[i], prot)]
+                prot, own = protected_set(), own_set()
+                ok = [i for i in ids if who.get(i) and not own_address(who[i], own) and not is_protected(who[i], prot)]
                 left, ids, senders = len(ids) - len(ok), ok, {who[i] for i in ok}
             n = _batch(a["id"], ids, add=add, remove=[lid], sender=senders) if ids else 0
             note = f"{n} {QACTIONS[act]}"
