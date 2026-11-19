@@ -42,6 +42,14 @@ class Chart(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("DAILY-CHART OK", r.stdout)
 
+    def test_server_times_in_the_undo_list_and_rule_log_are_shown_on_the_viewers_clock(self):
+        r = subprocess.run(["node", os.path.join(HERE, "local_times.js")], capture_output=True, text=True, timeout=60,
+                           env={**os.environ, "TZ": "America/New_York"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("LOCAL-TIMES OK", r.stdout)
+        js = open(os.path.join(os.path.dirname(HERE), "app.js"), encoding="utf-8").read()
+        self.assertNotIn('.at.slice(0, 16)', js)     # the server's text, in the database's zone, is not shown as is
+
 
 if __name__ == "__main__":
     unittest.main()

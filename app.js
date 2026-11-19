@@ -23,6 +23,13 @@ function setSlots(accs) { S.slot = {}; [...accs].sort((a, b) => a.email.localeCo
 const short = (email) => email.split("@")[0];
 const acctChip = (id, email) => `<span class="chip"><span class="dot" style="background:${slotOf(id)}"></span>${esc(short(email))}</span>`;
 
+// A server timestamp (ISO 8601 with its offset) as "YYYY-MM-DD HH:MM" on this browser's clock: the server's own
+// text is in the database's time zone, often UTC, which is not when it happened for the person reading the list.
+function stamp(iso) {
+  const d = new Date(iso), p = (n) => String(n).padStart(2, "0");
+  if (!iso || isNaN(d)) return iso || "";
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
 function when(ts) {
   const d = new Date(ts * 1000), now = new Date();
   if (d.toDateString() === now.toDateString()) return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
@@ -373,7 +380,7 @@ async function loadUndo() {
   try { d = await api("/api/undo"); } catch (e) { $("#c-undo").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
   $("#c-undo").innerHTML = d.actions.length ? `<p>Each line is one bulk change of the last ${d.days} days. Undo puts those
     messages back where they were. It does not remove filters: use Keep or Reset on the sender for that.</p><ul class="ops">` +
-    d.actions.map((a) => `<li><span class="note">${esc(a.at.slice(0, 16).replace("T", " "))}</span> ${esc(a.email)}:
+    d.actions.map((a) => `<li><span class="note">${esc(stamp(a.at))}</span> ${esc(a.email)}:
       <b>${fmt(a.count)}</b> ${undoWhat(a)}${a.note ? ` (${esc(a.note)})` : ""}
       ${a.undone ? `<span class="note">undone</span>` : `<button data-undo="${Number(a.id)}">Undo</button>`}</li>`).join("") + "</ul>"
     : "No bulk changes recorded yet.";
@@ -759,7 +766,7 @@ async function loadAnalytics() {
   let d;
   try { d = await api(`/api/analytics?days=${days}&tz=${encodeURIComponent(viewerZone())}`); } catch (e) { $("#a-body").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
   const t = d.totals, cv = d.coverage;
-  $("#a-cover").textContent = `Mail history: ${cv.backfilled}/${cv.accounts} accounts fully collected${cv.since ? `, since ${cv.since.slice(0, 10)}` : ""}.`;
+  $("#a-cover").textContent = `Mail history: ${cv.backfilled}/${cv.accounts} accounts fully collected${cv.since ? `, since ${stamp(cv.since).slice(0, 10)}` : ""}.`;
   const tile = (v, k) => `<div class="tile"><div class="v">${v}</div><div class="k">${k}</div></div>`;
   const chart = dailyChart(d.daily, days, d.tz);
   $("#a-body").innerHTML = `<div class="tiles">${tile(fmt(t.received), "emails received")}${tile(t.readPct == null ? "–" : t.readPct + "%", "read")}
@@ -803,7 +810,7 @@ async function loadRules() {
           ${st === "off" ? "" : `<span class="st ${st}">${st}</span>`}</label></td>`; }).join("") + "</tr>").join("") + "</tbody></table>"
     : `<div class="empty">The master account has no rules yet: create them in Inbox Zero.</div>`;
   $("#r-log").innerHTML = d.log.length ? `<div class="card"><h3>Recent sync activity</h3><ul class="ops">` +
-    d.log.map((l) => `<li class="${l.kind.includes("error") ? "err" : ""}"><span class="note">${esc(l.at.slice(0, 16).replace("T", " "))}</span>
+    d.log.map((l) => `<li class="${l.kind.includes("error") ? "err" : ""}"><span class="note">${esc(stamp(l.at))}</span>
       ${esc(l.account || "")}: ${esc(l.msg)}</li>`).join("") + "</ul></div>" : "";
 }
 function showOps(res) {
