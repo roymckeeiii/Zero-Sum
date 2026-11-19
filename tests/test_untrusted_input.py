@@ -40,7 +40,11 @@ class OneClick(unittest.TestCase):
     DNS = {"news.shop.com": ["93.184.216.34"], "inside.evil.com": ["10.0.0.5"], "meta.evil.com": ["169.254.169.254"],
            "loop.evil.com": ["127.0.0.1"], "mixed.evil.com": ["93.184.216.34", "192.168.1.1"], "v6.evil.com": ["::1"],
            "mapped.evil.com": ["::ffff:127.0.0.1"], "ula.evil.com": ["fd00::1"], "cgn.evil.com": ["100.64.0.1"],
-           "zero.evil.com": ["0.0.0.0"], "v6ok.shop.com": ["2606:2800:220:1:248:1893:25c8:1946"]}
+           "zero.evil.com": ["0.0.0.0"], "v6ok.shop.com": ["2606:2800:220:1:248:1893:25c8:1946"],
+           "nat64.evil.com": ["64:ff9b::a00:1"], "nat64local.evil.com": ["64:ff9b:1::a00:1"],
+           "compat.evil.com": ["::a00:1"], "sitelocal.evil.com": ["fec0::1"], "6to4.evil.com": ["2002:a00:1::1"],
+           "teredo.evil.com": ["2001:0:4136:e378:8000:63bf:f5ff:fffa"],   # Teredo client 10.0.0.5
+           "nat64ok.shop.com": ["64:ff9b::5db8:d822"]}                     # NAT64 for 93.184.216.34
 
     def setUp(self):
         Conn.made, Conn.status = [], 200
@@ -65,6 +69,15 @@ class OneClick(unittest.TestCase):
                 cleanup.unsub_target(url)
             self.assertFalse(cleanup._one_click(url), url)
         self.assertEqual(Conn.made, [])                           # nothing was even connected to
+
+    def test_ipv6_spellings_of_private_ipv4_and_internal_ipv6_are_refused(self):
+        for host in ("nat64", "nat64local", "compat", "sitelocal", "6to4", "teredo"):
+            url = f"https://{host}.evil.com/u"
+            with self.assertRaises(ValueError, msg=url):
+                cleanup.unsub_target(url)
+            self.assertFalse(cleanup._one_click(url), url)
+        self.assertEqual(Conn.made, [])
+        self.assertEqual(cleanup.unsub_target("https://nat64ok.shop.com/u")[1], "64:ff9b::5db8:d822")   # a public one
 
     def test_only_plain_https_on_443(self):
         for url in ("http://news.shop.com/u", "ftp://news.shop.com/u", "file:///etc/passwd", "mailto:u@shop.com",

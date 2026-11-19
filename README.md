@@ -337,7 +337,8 @@ All settings are environment variables; see [`.env.example`](.env.example).
   unexpected error reaches the page only as a short reference; its details are in the container log under it.
 - One-click unsubscribe POSTs to a URL taken from the sender's own `List-Unsubscribe` header, so it is held to the
   public internet: https on port 443 only, every address the host resolves to must be public (no loopback, private,
-  link-local or cloud-metadata addresses), the connection goes to the address that was checked, redirects are not
+  link-local or cloud-metadata addresses, nor IPv6 spellings of them: NAT64, 6to4, Teredo, IPv4-compatible or
+  site-local), the connection goes to the address that was checked, redirects are not
   followed, and it gives up after 10 seconds. Anything else is left as a link for you to open.
 - Sender addresses in requests must be plain addresses and are quoted in every Gmail search. A sender action only
   changes mail whose real sender is that address (Gmail's `from:` search also matches display names), and never mail
