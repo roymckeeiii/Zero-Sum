@@ -393,19 +393,32 @@ def quarantine_action(d):
         raise ValueError("choose messages, a sender, or all")
     _ACTION.note = f"quarantine {act}" + (f" {sender}" if sender else " (all)" if d.get("all") else " (chosen)")
     results = []
-    for a in ACC.list():
+    accounts = ACC.list()
+    unknown = sum(len(set(v)) for k, v in chosen.items() if k not in {a["id"] for a in accounts})
+    if unknown:
+        results.append({"email": "(unknown account)", "ok": False, "note": f"{unknown} not acted on: not a linked account"})
+    for a in accounts:
         if chosen and a["id"] not in chosen:
             continue
         try:
             lid = _qlabel(a["id"])
-            if not lid:
+            refused = 0
+            if chosen:  # what the page sent is only a request: act on a message only if Gmail says it is in Quarantine
+                want = list(dict.fromkeys(chosen[a["id"]]))
+                held = set()
+                if lid:
+                    held = {m["id"] for m in gmail_list(a["id"], f"/messages?labelIds={lid}", "messages", MAX_BULK)}
+                ids = [i for i in want if i in held]
+                refused = len(want) - len(ids)
+            elif not lid:
                 continue
-            if chosen:
-                ids = chosen[a["id"]]
             else:
                 query = f"/messages?labelIds={lid}" + (f"&q={urllib.parse.quote(frm(sender))}" if sender else "")
                 ids = [m["id"] for m in gmail_list(a["id"], query, "messages", MAX_BULK)]
             if not ids:
+                if refused:
+                    results.append({"email": a["email"], "ok": False,
+                                    "note": f"0 {QACTIONS[act]}; {refused} not in {QUARANTINE}, left alone"})
                 continue
             add = {"delete": ["TRASH"], "archive": [], "release": ["INBOX"]}[act]
             senders, left = None, 0
@@ -416,6 +429,8 @@ def quarantine_action(d):
                 left, ids, senders = len(ids) - len(ok), ok, {who[i] for i in ok}
             n = _batch(a["id"], ids, add=add, remove=[lid], sender=senders) if ids else 0
             note = f"{n} {QACTIONS[act]}"
+            if refused:
+                note += f"; {refused} not in {QUARANTINE}, left alone"
             if left:
                 note += f"; {left} left in {QUARANTINE} (protected sender, your own address, or sender unknown)"
             if act == "release" and sender and remove_app_filters(a["id"], sender, kinds=("quarantine",), exact=True):

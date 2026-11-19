@@ -177,6 +177,32 @@ class Quarantine(World):
                 cleanup.quarantine_action({"action": "delete", "items": items})
         self.assertEqual(self.g.calls, [])
 
+    def test_chosen_messages_must_really_carry_the_quarantine_label(self):
+        self.g.found["labelIds=Label_Q"] = ["aaaa01", "bbbb02"]          # what Gmail says is in Quarantine right now
+        self.db.on("SELECT id, from_addr FROM unified.msg", [("aaaa01", JUNK), ("ffff06", JUNK), ("abcd07", JUNK)])
+        items = [{"account": "acc1", "id": i} for i in ("aaaa01", "ffff06", "abcd07", "aaaa01")]   # an inbox message too
+        r = cleanup.quarantine_action({"action": "delete", "items": items})
+        self.assertEqual(self.trashed(), [["aaaa01"]])
+        self.assertEqual(self.db.said("INSERT INTO unified.action_log")[0][1][4], ["aaaa01"])
+        note = r["results"][0]["note"]
+        self.assertIn("1 moved to Trash", note)
+        self.assertIn("2 not in Quarantine, left alone", note)
+        for act in ("archive", "release"):     # a release would otherwise put any message back in the inbox
+            self.g.calls.clear()
+            r = cleanup.quarantine_action({"action": act, "items": [{"account": "acc1", "id": "ffff06"}]})
+            self.assertEqual(self.g.changes("batchModify"), [], act)
+            self.assertEqual([(x["ok"], "1 not in Quarantine" in x["note"]) for x in r["results"]], [(False, True)])
+
+    def test_chosen_messages_of_an_unlinked_account_or_without_a_label_are_refused_with_a_count(self):
+        r = cleanup.quarantine_action({"action": "delete", "items": [{"account": "acc9", "id": "aaaa01"},
+                                                                     {"account": "acc9", "id": "bbbb02"}]})
+        self.assertEqual(self.g.calls, [])
+        self.assertEqual([x["note"] for x in r["results"]], ["2 not acted on: not a linked account"])
+        with Patched(cleanup, label_id=lambda a, name, create=True: None):   # no Quarantine label in this account
+            r = cleanup.quarantine_action({"action": "release", "items": [{"account": "acc1", "id": "aaaa01"}]})
+        self.assertEqual(self.g.calls, [])
+        self.assertIn("1 not in Quarantine", r["results"][0]["note"])
+
     def test_archive_and_release_still_work_for_everything(self):
         cleanup.quarantine_action({"action": "release", "all": True})
         self.assertEqual([len(c[3]["ids"]) for c in self.g.changes("batchModify")], [5])
