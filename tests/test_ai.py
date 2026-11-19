@@ -191,6 +191,10 @@ class SortResume(unittest.TestCase):
         cleanup.resume_ai_sorts()
         sql = self.db.said("FROM unified.ai_sort WHERE")[0][0]
         self.assertIn("status LIKE 'retry:%%' AND updated_at < now() - make_interval(mins => 15 * greatest(retries, 1))", sql)
+        # the daily AI limit counts UTC days (ai._count_call): both sides of the "a new day" test are UTC dates, whatever
+        # the database session's TimeZone is (a bare updated_at::date is a local date there)
+        self.assertIn("(updated_at AT TIME ZONE 'utc')::date < (now() AT TIME ZONE 'utc')::date", sql)
+        self.assertNotIn("updated_at::date", sql)
         with Patched(cleanup, _ai_sort_ids=lambda *a, **k: 0):
             cleanup._ai_sort_existing("deals@shop.com", "keep news", "delete")
         self.assertIn("status = 'active', retries = 0", self.db.said("UPDATE unified.ai_sort SET")[-1][0])

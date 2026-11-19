@@ -137,7 +137,7 @@ def resume_ai_sorts():
     with db() as c:
         rows = c.execute("SELECT addr, rule, action FROM unified.ai_sort WHERE "
                          "(status = 'sorting' AND updated_at < now() - interval '10 minutes') OR "
-                         "(status LIKE 'error: daily AI limit%%' AND updated_at::date < (now() AT TIME ZONE 'utc')::date) OR "
+                         "(status LIKE 'error: daily AI limit%%' AND (updated_at AT TIME ZONE 'utc')::date < (now() AT TIME ZONE 'utc')::date) OR "
                          "(status LIKE 'retry:%%' AND updated_at < now() - make_interval(mins => 15 * greatest(retries, 1)))"
                          ).fetchall()
     for addr, rule, action in rows:
