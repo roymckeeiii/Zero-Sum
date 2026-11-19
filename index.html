@@ -179,8 +179,13 @@ select.cleanup { padding:3px 6px; font-size:12px; }
 #toast button { background:none; color:var(--panel); border:1px solid currentColor; }
 @media (max-width: 900px) {
   #v-inbox.on { grid-template-columns:1fr; grid-template-rows:auto 1fr; }
-  #accounts { display:flex; overflow-x:auto; border-right:0; border-bottom:1px solid var(--line); padding:0; }
-  #accounts a { flex:none; } #accounts .tools { display:none; }
+  #accounts { display:flex; flex-wrap:wrap; border-right:0; border-bottom:1px solid var(--line); padding:4px; }
+  #accounts a { flex:none; max-width:100%; }
+  /* search, scope and Unread only stay usable on a phone: a full-width row under the accounts */
+  #accounts .tools { flex:1 1 100%; flex-direction:row; flex-wrap:wrap; align-items:center; padding:4px; }
+  #accounts .tools input[type=search] { flex:1 1 160px; min-width:0; }
+  /* the tab bar scrolls sideways instead of pushing Analytics and Rules off the screen */
+  header .tabs { max-width:100%; overflow-x:auto; } .tabs button { flex:none; white-space:nowrap; }
   #reader { display:none; position:fixed; inset:0; z-index:5; }
   body.reading #reader { display:flex; } .mobile { display:inline-block; }
   .grid2 { grid-template-columns:1fr; }

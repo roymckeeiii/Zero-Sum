@@ -56,6 +56,13 @@ class Page(unittest.TestCase):
                 continue   # inside a <label>, or under the dialog's heading
             self.assertTrue("aria-label" in tag or "title=" in tag, tag)
 
+    def test_on_a_phone_search_stays_and_the_tab_bar_scrolls(self):
+        narrow = HTML.split("@media (max-width: 900px) {\n", 1)[1].split("\n}\n", 1)[0]
+        tools = re.findall(r"#accounts \.tools \{([^}]*)\}", narrow)
+        self.assertTrue(tools)
+        self.assertFalse(any("display:none" in t for t in tools))     # search, scope, Unread only, Refresh
+        self.assertIn("header .tabs { max-width:100%; overflow-x:auto; }", narrow)
+
     def test_accounts_are_links_and_enter_opens_a_focused_row(self):
         self.assertEqual(len(re.findall(r'<a href="#" data-id=', JS)), 2)
         self.assertIn('e.target?.matches?.(".row[data-i], td.who[data-peek]")', JS)
