@@ -253,18 +253,25 @@ ACTIONS = {"archive": {"removeLabelIds": ["INBOX"]}, "inbox": {"addLabelIds": ["
            "delete": None, "undelete": None}
 
 
+def _gmail_id(value):
+    """A Gmail thread or message id (hex) as sent in a request, else None: it goes into an API path."""
+    return value if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{6,32}", value) else None
+
+
 def action(d):
-    if d.get("action") not in ACTIONS or not re.fullmatch(r"[0-9a-f]{6,32}", d.get("threadId", "")):
+    act, tid, mid = d.get("action"), _gmail_id(d.get("threadId")), _gmail_id(d.get("id"))
+    if not isinstance(act, str) or act not in ACTIONS or not tid:
         raise ValueError("bad action")
-    ACC.row(d["account"])
-    if d["action"] == "delete":  # Trash (Gmail empties it after 30 days); gmail.modify cannot delete permanently
-        gmail(d["account"], f"/threads/{d['threadId']}/trash", "POST")
-    elif d["action"] == "undelete":
-        gmail(d["account"], f"/threads/{d['threadId']}/untrash", "POST")
-    elif d["action"] in ("star", "unstar") and re.fullmatch(r"[0-9a-f]{6,32}", d.get("id", "")):
-        gmail(d["account"], f"/messages/{d['id']}/modify", "POST", ACTIONS[d["action"]])  # Gmail stars one message
+    acc = d["account"]
+    ACC.row(acc)
+    if act == "delete":  # Trash (Gmail empties it after 30 days); gmail.modify cannot delete permanently
+        gmail(acc, f"/threads/{tid}/trash", "POST")
+    elif act == "undelete":
+        gmail(acc, f"/threads/{tid}/untrash", "POST")
+    elif act in ("star", "unstar") and mid:
+        gmail(acc, f"/messages/{mid}/modify", "POST", ACTIONS[act])  # Gmail stars one message
     else:
-        gmail(d["account"], f"/threads/{d['threadId']}/modify", "POST", ACTIONS[d["action"]])
-    for k in [k for k, (_, it) in list(_meta.items()) if it["threadId"] == d["threadId"] and k[0] == d["account"]]:
+        gmail(acc, f"/threads/{tid}/modify", "POST", ACTIONS[act])
+    for k in [k for k, (_, it) in list(_meta.items()) if it["threadId"] == tid and k[0] == acc]:
         _meta.pop(k, None)
     return {"ok": True}
