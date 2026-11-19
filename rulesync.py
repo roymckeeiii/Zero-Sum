@@ -192,11 +192,15 @@ def _sync_account(master, acc, mrules, incl, apply):
                 (r["systemType"] and t["systemType"] == r["systemType"]) or t["name"] == r["name"])]
             cand.sort(key=lambda t: t["systemType"] != r["systemType"])
             op, target = ("adopt", cand[0]["id"]) if cand else ("create", new_id())
-            clash = [t for t in trules.values() if t["name"] == r["name"] and t["id"] != target]
-            if clash:
-                ops.append({"op": "error", "account": acc["email"], "rule": r["name"],
-                            "detail": "another rule in this account already has this name; rename one of them"})
-                continue
+        # Inbox Zero allows one rule per name (and per system type) in an account: a master rule renamed to the name of
+        # another rule there would fail the whole account's transaction, so it is reported and skipped instead
+        clash = [t for t in trules.values() if t["id"] != target and (t["name"] == r["name"] or (
+            r["systemType"] and t["systemType"] == r["systemType"]))]
+        if clash:
+            same = "name" if clash[0]["name"] == r["name"] else "system type"
+            ops.append({"op": "error", "account": acc["email"], "rule": r["name"],
+                        "detail": f"another rule in this account already has this {same}; rename one of them"})
+            continue
         ops.append({"op": op, "account": acc["email"], "rule": r["name"],
                     "detail": ", ".join(a["type"] + (f" {a['label']}" if a.get("label") else "") for a in actions)})
         writes.append((op, mid, target, r, actions, h))

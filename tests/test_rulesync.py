@@ -137,6 +137,28 @@ class Sync(World):
         self.assertEqual([o["op"] for o in res["ops"]], ["error"])
         self.assertEqual(self.writes(), [])
 
+    def test_a_master_rule_renamed_onto_another_rule_there_is_reported_and_the_rest_still_sync(self):
+        self.rules["acc1"] = [rule("m1", "Bills"), rule("m2", "Travel")]
+        self.actions = {}
+        self.rules["acc2"] = [rule("t1", "Receipts"), rule("own", "Bills")]      # t1 was the copy of m1, as "Receipts"
+        self.map = [("m1", "acc2", "t1", "old")]
+        self.include = {("m1", "acc2"), ("m2", "acc2")}
+        res = rulesync.sync()
+        self.assertEqual(self.ops(res), [("error", "two@x.com", "Bills"), ("create", "two@x.com", "Travel")])
+        self.assertIn("name", res["ops"][0]["detail"])
+        self.assertFalse(self.db.said('UPDATE "Rule"'))                          # neither t1 nor "own" is touched
+        self.assertEqual([p[1][0] for p in self.db.said("INSERT INTO unified.rule_map")], ["m2"])
+
+    def test_a_system_type_already_held_by_another_rule_is_reported(self):
+        self.rules["acc1"] = [rule("m1", "Receipts", systemType="RECEIPT")]
+        self.rules["acc2"] = [rule("t1", "Receipts"), rule("own", "Mine", systemType="RECEIPT")]
+        self.map = [("m1", "acc2", "t1", "old")]
+        self.include = {("m1", "acc2")}
+        res = rulesync.sync()
+        self.assertEqual([o["op"] for o in res["ops"]], ["error"])
+        self.assertIn("system type", res["ops"][0]["detail"])
+        self.assertEqual(self.writes(), [])
+
     def test_unticking_deletes_only_the_copy_it_made(self):
         self.rules["acc2"] = [rule("t1", "Receipts"), rule("own", "My own rule")]
         self.map = [("m1", "acc2", "t1", "h")]
