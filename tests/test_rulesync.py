@@ -44,6 +44,8 @@ class World(unittest.TestCase):
             if b[1] == p[0] and b[3].startswith("adopted")])
         self.db.on("FROM unified.settings", lambda p: [(self.settings[p[0]],)] if p[0] in self.settings else [])
         self.db.on("FROM unified.rule_include", lambda p: sorted(self.include))
+        self.outbound = set()   # (master rule, account) where forward / send / reply / webhook may be copied
+        self.db.on("FROM unified.rule_include WHERE outbound", lambda p: sorted(self.outbound))
 
         def label_id(acc, name, create=True):
             self.events.append(("gmail", acc, name, self.db.open))
@@ -349,6 +351,57 @@ class Restore(World):
         with self.assertRaises(ValueError):
             rulesync.restore({"id": 5})
         self.assertEqual(self.writes(), [])
+
+
+class Outbound(World):
+    """Forward / send / reply / webhook actions point at the master's destinations: they are shown, and copied only
+    where that was allowed for the account."""
+
+    def setUp(self):
+        super().setUp()
+        fwd = {f: None for f in rulesync.ACTION_FIELDS} | {"type": "FORWARD", "to": "accountant@example.com", "cc": "boss@example.com"}
+        hook = {f: None for f in rulesync.ACTION_FIELDS} | {"type": "CALL_WEBHOOK", "url": "https://hooks.example.com/x"}
+        self.actions = {"m1": [action("m1"), ("m1", *[fwd[f] for f in rulesync.ACTION_FIELDS], None),
+                               ("m1", *[hook[f] for f in rulesync.ACTION_FIELDS], None)]}
+
+    def test_a_rule_that_forwards_is_not_copied_without_permission(self):
+        for res in (rulesync.sync(apply=False), rulesync.sync()):
+            (o,) = res["ops"]
+            self.assertEqual(o["op"], "outbound")
+            self.assertIn("forward to accountant@example.com, cc boss@example.com", o["detail"])
+            self.assertIn("webhook https://hooks.example.com/x", o["detail"])
+        self.assertEqual(self.writes(), [])
+
+    def test_an_existing_copy_is_not_updated_to_forward_without_permission(self):
+        self.rules["acc2"] = [rule("t1", "Receipts")]
+        self.map = [("m1", "acc2", "t1", "old")]
+        self.assertEqual([o["op"] for o in rulesync.sync()["ops"]], ["outbound"])
+        self.assertEqual(self.writes(), [])
+
+    def test_once_allowed_it_is_copied_and_the_destinations_are_in_the_plan(self):
+        self.outbound = {("m1", "acc2")}
+        (o,) = rulesync.sync()["ops"]
+        self.assertEqual(o["op"], "create")
+        self.assertIn("forward to accountant@example.com", o["detail"])
+        types = [p[-len(rulesync.ACTION_FIELDS)] for _, p in self.db.said('INSERT INTO "Action"')]
+        self.assertEqual(types, ["LABEL", "FORWARD", "CALL_WEBHOOK"])
+
+    def test_allowing_is_its_own_step_and_unticking_clears_it(self):
+        rulesync.set_include({"rule": "m1", "account": "acc2", "include": True})
+        self.assertNotIn("outbound", self.db.sql[-1][0])
+        rulesync.set_include({"rule": "m1", "account": "acc2", "include": True, "outbound": True})
+        self.assertIn("DO UPDATE SET outbound", self.db.sql[-1][0])
+        self.assertEqual(self.db.sql[-1][1], ("m1", "acc2", True))
+
+    def test_the_rules_tab_shows_where_each_rule_sends(self):
+        self.outbound = {("m1", "acc3")}
+        self.db.on("FROM unified.log", [])
+        with Patched(rulesync, setting=lambda k, d=None: d):
+            st = rulesync.state()
+        (r,) = st["rules"]
+        self.assertEqual(r["outbound"], ["forward to accountant@example.com, cc boss@example.com",
+                                         "webhook https://hooks.example.com/x"])
+        self.assertEqual(r["outboundAllowed"], {"acc2": False, "acc3": True})
 
 
 class InboxZeroV230(World):

@@ -22,6 +22,9 @@
     - by the automatic sync, at most AUTO_MAX_DELETES per run; the rest wait ("held") and are logged.
   When MASTER_EMAIL names another account than the last sync ran for, every copy looks orphaned: no copy is removed
   until a "Sync now" confirms the change ("master-change" in confirm).
+- Actions that send mail or data out of the account (FORWARD, SEND_EMAIL, REPLY, CALL_WEBHOOK) carry the master's
+  destinations. The Rules tab shows where each one goes, and a rule with any of them is copied to an account only after
+  that is allowed for it separately (unified.rule_include.outbound); until then it is reported, not copied.
 - Every backup can be restored from the Rules tab (backups() / restore()); backups of rules still mapped are kept.
 """
 import hashlib, json, os, threading
@@ -33,6 +36,8 @@ MASTER_HINT = bool(MASTER)
 
 # per-account action types (they reference the master's own messaging channel): never copied
 SKIP_ACTION_TYPES = {"DRAFT_MESSAGING_CHANNEL", "NOTIFY_MESSAGING_CHANNEL"}
+# actions that send mail or data somewhere: copied only where explicitly allowed (rule_include.outbound)
+OUTBOUND_ACTION_TYPES = {"FORWARD", "SEND_EMAIL", "REPLY", "CALL_WEBHOOK"}
 LOCK = threading.Lock()
 # Most copies the automatic sync deletes in one run; more wait for "Sync now". DEFAULT - Roy may change: 3
 AUTO_MAX_DELETES = int(os.environ.get("RULES_AUTO_MAX_DELETES", "3"))
@@ -74,6 +79,23 @@ def master_actions(master_id, rule):
     return out
 
 
+def outbound(actions):
+    """Where a rule's actions send mail or data, one plain line each ([] when nowhere)."""
+    out = []
+    for a in actions:
+        if a["type"] not in OUTBOUND_ACTION_TYPES:
+            continue
+        to = ", ".join(x for x in (a.get("to"), a.get("cc") and f"cc {a['cc']}", a.get("bcc") and f"bcc {a['bcc']}") if x)
+        out.append({"FORWARD": f"forward to {to or '(no address)'}", "SEND_EMAIL": f"send email to {to or '(no address)'}",
+                    "REPLY": "reply to the sender" + (f" ({to})" if to else ""),
+                    "CALL_WEBHOOK": f"webhook {a.get('url') or '(no URL)'}"}[a["type"]])
+    return out
+
+
+def _outbound_allowed(c):
+    return set(c.execute("SELECT master_rule_id, account_id FROM unified.rule_include WHERE outbound").fetchall())
+
+
 def digest(rule, actions):
     body = {f: rule[f] for f in RULE_FIELDS}
     return hashlib.sha256(json.dumps([body, actions], sort_keys=True, default=str).encode()).hexdigest()[:20]
@@ -91,13 +113,15 @@ def state():
         rmap = {(m, a): (t, h, s) for m, a, t, h, s in c.execute(
             "SELECT master_rule_id, account_id, target_rule_id, hash, synced_at FROM unified.rule_map").fetchall()}
         incl = set(c.execute("SELECT master_rule_id, account_id FROM unified.rule_include").fetchall())
+        allowed = _outbound_allowed(c)
         targets = {a["id"]: set(r[0] for r in c.execute('SELECT id FROM "Rule" WHERE "emailAccountId" = %s',
                                                          (a["id"],)).fetchall()) for a in accounts}
         logs = c.execute("SELECT at, kind, account, msg FROM unified.log WHERE kind LIKE 'rules%%' "
                          "ORDER BY id DESC LIMIT 40").fetchall()
     rules = []
     for r in mrules.values():
-        h = digest(r, master_actions(master["id"], r))
+        acts = master_actions(master["id"], r)
+        h = digest(r, acts)
         cells = {}
         for a in accounts:
             m = rmap.get((r["id"], a["id"]))
@@ -108,15 +132,23 @@ def state():
             else:
                 cells[a["id"]] = "synced" if m[1] == h else "changed"
         rules.append({"id": r["id"], "name": r["name"], "enabled": r["enabled"], "systemType": r["systemType"],
-                      "instructions": r["instructions"], "actions": [a["type"] for a in r["actions"]], "cells": cells})
+                      "instructions": r["instructions"], "actions": [a["type"] for a in r["actions"]], "cells": cells,
+                      "outbound": outbound(acts),
+                      "outboundAllowed": {a["id"]: (r["id"], a["id"]) in allowed for a in accounts}})
     return {"master": master, "accounts": accounts, "rules": rules, "auto": setting("rules_auto", "0") == "1",
             "log": [{"at": a.isoformat(), "kind": k, "account": acc, "msg": m} for a, k, acc, m in logs]}
 
 
 def set_include(d):
+    """Tick or untick a rule for an account. With "outbound", also allow (or stop allowing) its forward / send /
+    reply / webhook actions to be copied there."""
     with db() as c:
-        if d.get("include"):
-            c.execute("INSERT INTO unified.rule_include VALUES (%s, %s) ON CONFLICT DO NOTHING",
+        if d.get("include") and "outbound" in d:
+            c.execute("INSERT INTO unified.rule_include (master_rule_id, account_id, outbound) VALUES (%s, %s, %s) "
+                      "ON CONFLICT (master_rule_id, account_id) DO UPDATE SET outbound = EXCLUDED.outbound",
+                      (d["rule"], d["account"], bool(d["outbound"])))
+        elif d.get("include"):
+            c.execute("INSERT INTO unified.rule_include (master_rule_id, account_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
                       (d["rule"], d["account"]))
         else:
             c.execute("DELETE FROM unified.rule_include WHERE master_rule_id = %s AND account_id = %s",
@@ -176,10 +208,11 @@ def sync(apply=True, only_account=None, confirm=None, auto=False):
         with db() as c:
             mrules = load_rules(c, master["id"])
             incl = set(c.execute("SELECT master_rule_id, account_id FROM unified.rule_include").fetchall())
+            out_ok = _outbound_allowed(c)
             row = c.execute("SELECT v FROM unified.settings WHERE k = %s", (MASTER_KEY,)).fetchone()
         prev = row[0] if row else None
         changed = bool(prev) and prev != master["email"].lower()
-        allow = {"keys": confirm, "budget": AUTO_MAX_DELETES if auto else 0,
+        allow = {"keys": confirm, "budget": AUTO_MAX_DELETES if auto else 0, "outbound": out_ok,
                  "removals": not changed or (not auto and "master-change" in confirm)}
         for acc in [a for a in ACC.list() if not a["master"] and (not only_account or a["id"] == only_account)]:
             try:
@@ -233,6 +266,11 @@ def _sync_account(master, acc, mrules, incl, apply, allow=None):
         actions = master_actions(master["id"], r)
         h = digest(r, actions)
         cur = rmap.get(mid)
+        dest = outbound(actions)
+        if dest and (mid, acc["id"]) not in allow.get("outbound", ()):
+            ops.append({"op": "outbound", "account": acc["email"], "rule": r["name"],
+                        "detail": "; ".join(dest) + ": not copied until sending is allowed for this account"})
+            continue
         if cur and cur[0] in trules:
             if cur[1] == h:
                 continue
@@ -253,7 +291,8 @@ def _sync_account(master, acc, mrules, incl, apply, allow=None):
             continue
         adopted = op == "adopt" or (op == "update" and cur[2])
         ops.append({"op": op, "account": acc["email"], "rule": r["name"],
-                    "detail": ", ".join(a["type"] + (f" {a['label']}" if a.get("label") else "") for a in actions)})
+                    "detail": ", ".join(a["type"] + (f" {a['label']}" if a.get("label") else "") for a in actions)
+                    + (f" ({'; '.join(dest)})" if dest else "")})
         writes.append((op, mid, target, r, actions, h, adopted))
         mapped_targets.add(target)
     # copies whose master rule is gone or is no longer ticked for this account
@@ -322,7 +361,7 @@ def _sync_account(master, acc, mrules, incl, apply, allow=None):
         _prune_backups(c)
         c.commit()
     for o in ops:
-        if o["op"] not in ("error", "held"):
+        if o["op"] not in ("error", "held", "outbound"):
             log("rules", f"{o['op']} {o['rule']}" + (" (its previous version is saved in unified.rule_backup)"
                                                      if o["op"] == "adopt" else ""), acc["email"])
     return ops

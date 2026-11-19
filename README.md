@@ -262,6 +262,9 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
   deletes at most `RULES_AUTO_MAX_DELETES` (default 3) copies per run; the rest wait for "Sync now" and are logged.
   When `MASTER_EMAIL` names another account than the last sync, nothing is removed until "Sync now" confirms the
   change. Every saved rule can be put back from "Saved rules" on the Rules tab.
+- A rule that forwards, sends or replies by email, or calls a webhook, would do that from every account it is copied
+  to, with the master's destinations. The Rules tab shows each destination, and such a rule is copied to an account
+  only after you tick "allow sending" for that account (and confirm); until then the sync reports it and leaves it.
 
 ## Requirements
 
