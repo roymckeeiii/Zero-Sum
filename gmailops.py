@@ -6,7 +6,8 @@ import email.utils, os, re, threading
 
 from collector import CPOOL, SKIP, _store, qs
 from core import ACC, POOL, db, gmail, gmail_list, header, label_id, log
-from guard import frm, guard_sender, is_protected, protected_set, removes_mail, sender_addr, sender_matches, SENDER_KEY
+from guard import (frm, guard_sender, is_protected, own_address, protected_set, removes_mail, sender_addr,
+                   sender_matches, SENDER_KEY)
 from inbox import meta
 
 MAX_BULK = int(os.environ.get("MAX_BULK", "200000"))  # most messages one bulk action touches per account
@@ -255,9 +256,45 @@ def bulk_query(query):
 
 def _modify_existing(acc_id, query, add=(), remove=(), *, sender):
     """Apply label changes to every message matching `query` (batches of 1000). Returns the count. `sender` is whose
-    mail the query selects: _batch refuses a protected sender and the account's own address."""
-    return _batch(acc_id, [m["id"] for m in gmail_list(acc_id, qs(bulk_query(query)), "messages", MAX_BULK)], add, remove,
-                  sender=sender)
+    mail the query selects: _batch refuses a protected sender and the account's own address.
+
+    Gmail's `from:"addr"` is a token match, not an exact one: it also finds mail whose display name or a longer address
+    contains addr ("deals@shop.com" <alerts@bank.com>, deals@shop.com.au). So when the change takes mail out of view,
+    every message's real sender is looked up (senders_of, as Quarantine delete does) and only mail really from
+    `sender` is changed. The rest is left alone and counted in _ACTION.held: "protected" (a protected sender or one of
+    the user's own addresses) and "other" (someone else, or a sender that could not be told)."""
+    ids = [m["id"] for m in gmail_list(acc_id, qs(bulk_query(query)), "messages", MAX_BULK)]
+    if ids and removes_mail(add, remove):
+        prot = protected_set()
+        for s in ([sender] if isinstance(sender, str) else sorted(sender or ())):
+            guard_sender(s, prot)   # the sender itself first: refused outright, whatever the messages turn out to be
+        who = senders_of(acc_id, ids)
+        mine = [i for i in ids if who.get(i) == sender]
+        held = getattr(_ACTION, "held", None)
+        if held is not None:
+            for i in ids:
+                if who.get(i) != sender:
+                    w = who.get(i)
+                    held["protected" if w and (own_address(w) or is_protected(w, prot)) else "other"] += 1
+        ids = mine
+    return _batch(acc_id, ids, add, remove, sender=sender)
+
+
+def held_start():
+    """Start counting what _modify_existing leaves alone for this request (per account)."""
+    _ACTION.held = {"protected": 0, "other": 0}
+
+
+def held_note():
+    """'' or a note saying how many messages were left alone, and why; resets the count."""
+    h = getattr(_ACTION, "held", None) or {}
+    out = []
+    if h.get("protected"):
+        out.append(f"{h['protected']} from a protected sender or your own address left alone")
+    if h.get("other"):
+        out.append(f"{h['other']} sent by someone else (or sender unknown) left alone")
+    held_start()
+    return "; ".join(out)
 
 
 _ACTION = threading.local()   # .note: what the person asked for ("block deals@shop.com"), for the undo list

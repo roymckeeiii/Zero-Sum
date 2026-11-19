@@ -83,6 +83,39 @@ class ChokePoint(World):
         self.untouched()
 
 
+class RealSender(World):
+    """Gmail's from:"addr" also finds mail where addr is only in the display name, or part of a longer address: a
+    destructive sender action changes only mail really from addr, and says how much it left alone."""
+
+    def setUp(self):
+        super().setUp()
+        self.g.found["from:"] = ["aa11bb", "aa22cc", "aa33dd", "aa44ee", "aa55ff"]
+        self.g.meta = {"aa11bb": f"Deals <{JUNK}>", "aa22cc": f'"{JUNK}" <{BANK}>',     # a protected sender, spoofed name
+                       "aa33dd": f"Me <{ME}>", "aa44ee": "Deals AU <deals@shop.com.au>"}  # aa55ff: sender unknown
+
+    def test_block_trashes_only_mail_really_from_that_sender(self):
+        r = cleanup.sender_action({"addr": JUNK, "action": "block"})
+        self.assertEqual([c[3]["ids"] for c in self.g.changes("batchModify")], [["aa11bb"]])
+        self.assertEqual(self.db.said("INSERT INTO unified.action_log")[0][1][4], ["aa11bb"])
+        note = r["results"][0]["note"]
+        self.assertIn("1 moved to Trash", note)
+        self.assertIn("2 from a protected sender or your own address left alone", note)
+        self.assertIn("2 sent by someone else (or sender unknown) left alone", note)
+
+    def test_every_destructive_path_checks_the_real_sender(self):
+        for act in ("delete", "spam", "archive", "quarantine", "unsub_delete"):
+            self.g.calls.clear()
+            cleanup.sender_action({"addr": JUNK, "action": act})
+            self.assertEqual([c[3]["ids"] for c in self.g.changes("batchModify")], [["aa11bb"]], act)
+        self.g.calls.clear()
+        cleanup._plan_action("acc1", JUNK, "delete", {}, "", "Label_Q")
+        self.assertEqual([c[3]["ids"] for c in self.g.changes("batchModify")], [["aa11bb"]])
+
+    def test_starring_is_not_filtered(self):
+        cleanup.sender_action({"addr": JUNK, "action": "star"})
+        self.assertEqual(len(self.g.changes("batchModify")[0][3]["ids"]), 5)
+
+
 class EntryPoints(World):
     def test_every_destructive_sender_action_is_refused(self):
         for who in REFUSED:

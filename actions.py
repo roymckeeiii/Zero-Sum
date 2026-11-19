@@ -9,7 +9,7 @@ from collector import BACKFILL_DAYS, collect_status, qs
 from core import ACC, POOL, db, gmail_list, label_id, log, new_id
 from gmailops import (ARCHIVE_FILTER, AUTOMATION_KINDS, FOREIGN_NOTE, MAX_BULK, NEVER_SPAM_FILTER, QUARANTINE, STAR_FILTER,
                       TRASH_FILTER, _ACTION, _batch, _filter, _modify_existing, bulk_query, foreign_filters,
-                      remove_app_filters, senders_of)
+                      held_note, held_start, remove_app_filters, senders_of)
 from guard import (SENDER_KEY, frm, guard_sender, is_protected, keep_query, own_address, parse_protect_keys,
                    protected_set, sender_addr)
 from inbox import meta
@@ -249,6 +249,7 @@ def sender_action(d):
     results, manual = [], []
     for a in acc_ids:
         em = ACC.email(a)
+        held_start()
         try:
             note = []
             if act in FILTERING:  # a new action replaces the sender's earlier filters, it does not stack on them
@@ -322,9 +323,13 @@ def sender_action(d):
                 elif act == "reset":
                     c.execute('UPDATE "Newsletter" SET status = NULL, "updatedAt" = now() '
                               'WHERE lower(email) = %s AND "emailAccountId" = %s', (addr, a))
+            held = held_note()   # mail Gmail's from: search found that is not really from addr
+            if held:
+                note.append(held)
             results.append({"email": em, "ok": True, "note": "; ".join(note) or act})
         except Exception as e:  # noqa: BLE001
             results.append({"email": em, "ok": False, "note": str(e)[:200]})
+    _ACTION.held = None
     log("cleanup", f"{act} {addr}{' keep ' + kq if kq else ''}: " + "; ".join(f"{r['email']}: {r['note']}" for r in results))
     return {"results": results, "manual": manual}
 
@@ -593,11 +598,16 @@ def apply_plan(d):
             lid = label_id(a, QUARANTINE) if "quarantine" in destructive else None
             remove_app_filters(a, addr)  # a re-applied plan replaces the old one's filters (every kind), it doesn't add to them
             notes = []
+            held_start()
             for label, action, crit, extra in plan_steps(groups, default):
                 notes.append(f"{label}: {_plan_action(a, addr, action, crit, extra, lid)} {action}")
+            held = held_note()
+            if held:
+                notes.append(held)
             results.append({"email": em, "ok": True, "note": "; ".join(notes) or "nothing to do"})
         except Exception as e:  # noqa: BLE001
             results.append({"email": em, "ok": False, "note": str(e)[:200]})
+    _ACTION.held = None
     with db() as c:
         status = {"keep": "APPROVED", "archive": "AUTO_ARCHIVED", "quarantine": "AUTO_ARCHIVED", "delete": "AUTO_ARCHIVED"}[default]
         for a in acc_ids:
