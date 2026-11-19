@@ -1,6 +1,6 @@
 """app.py's gate, over a real loopback socket: who is signed in (verified Access token, or the plain header only with
 the explicit override), the custom header every POST needs, and the refusal to start without verified sign-in."""
-import contextlib, http.client, io, json, os, sys, threading, unittest
+import contextlib, http.client, io, json, os, socket, sys, threading, unittest
 from http.server import ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -155,6 +155,42 @@ class Gate(unittest.TestCase):
         self.assertEqual(self.raw_post("-5")[0], 400)          # read(-1) would hang until the client hung up
         self.assertEqual(self.raw_post("abc")[0], 400)
         self.assertEqual(len(self.ran), 1)
+
+
+class Limits(unittest.TestCase):
+    """Unauthenticated connections cannot tie the server up: an idle one is dropped, and threads are capped."""
+
+    def serve(self, **kw):
+        srv = app.Server(("127.0.0.1", 0), app.H, **kw)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(lambda: (srv.shutdown(), srv.server_close()))
+        return srv.server_address[1]
+
+    def test_the_handler_has_a_socket_timeout(self):
+        self.assertTrue(0 < app.H.timeout <= 60)
+        self.assertTrue(0 < app.MAX_THREADS <= 100)
+
+    def test_an_idle_connection_is_closed(self):
+        with Patched(app.H, timeout=0.3):
+            port = self.serve()
+            s = socket.create_connection(("127.0.0.1", port), timeout=5)
+            self.addCleanup(s.close)
+            self.assertEqual(s.recv(10), b"")                                 # the server hung up on it
+
+    def test_connections_beyond_the_cap_wait_their_turn(self):
+        port = self.serve(max_threads=1)
+        idle = socket.create_connection(("127.0.0.1", port), timeout=5)       # holds the only thread
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=0.5)
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(OSError):                                     # not served while the slot is taken
+                c.request("GET", "/healthz")
+                c.getresponse()
+            c.close()
+            idle.close()
+            c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            c.request("GET", "/healthz")
+            self.assertEqual(c.getresponse().status, 200)
+            c.close()
 
 
 class Startup(unittest.TestCase):

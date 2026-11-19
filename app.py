@@ -129,6 +129,7 @@ def check_upstream_schema():
 
 class H(BaseHTTPRequestHandler):
     server_version = "zero-sum"
+    timeout = 30   # seconds a connection may sit without sending: an idle or trickling client cannot hold a thread
 
     def log_message(self, fmt, *args):
         # failed requests only, and without their query strings: those carry search words, account and message ids
@@ -205,6 +206,33 @@ class H(BaseHTTPRequestHandler):
         except ValueError:
             return self.send(400, {"error": "bad json"})
         self.run(POST[self.path], d)
+
+
+MAX_THREADS = 32   # requests handled at once; more wait in the listen queue instead of each getting a thread
+
+
+class Server(ThreadingHTTPServer):
+    """ThreadingHTTPServer with at most `max_threads` request threads: one is taken before a connection is handed to
+    its thread and given back when that thread ends, so a flood of connections waits instead of exhausting memory."""
+    daemon_threads = True
+
+    def __init__(self, address, handler, max_threads=MAX_THREADS):
+        self.slots = threading.BoundedSemaphore(max_threads)
+        super().__init__(address, handler)
+
+    def process_request(self, request, client_address):
+        self.slots.acquire()
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
 
 
 def every(seconds, fn, first_delay):
@@ -294,4 +322,4 @@ if __name__ == "__main__":
           + (f"Cloudflare Access token ({access.TEAM})" if mode == "token" else
              f"UNVERIFIED: the {AUTH_HEADER} header as sent (ALLOW_HEADER_TRUST=1; local development only)"),
           flush=True)
-    ThreadingHTTPServer((LISTEN_HOST, port), H).serve_forever()
+    Server((LISTEN_HOST, port), H).serve_forever()
