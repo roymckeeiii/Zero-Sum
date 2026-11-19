@@ -384,9 +384,11 @@ def quarantine_action(d):
     if act == "delete" and sender:
         guard_sender(sender)
     chosen = {}
-    for it in d.get("items") or []:
-        if re.fullmatch(r"[0-9a-f]{6,32}", str(it.get("id", ""))):
-            chosen.setdefault(it.get("account"), []).append(it["id"])
+    items = d.get("items") or []
+    for it in items if isinstance(items, list) else []:   # anything not {account: str, id: hex} is left out
+        if isinstance(it, dict) and isinstance(it.get("account"), str) and isinstance(it.get("id"), str) \
+                and re.fullmatch(r"[0-9a-f]{6,32}", it["id"]):
+            chosen.setdefault(it["account"], []).append(it["id"])
     if not (chosen or sender or d.get("all")):
         raise ValueError("choose messages, a sender, or all")
     _ACTION.note = f"quarantine {act}" + (f" {sender}" if sender else " (all)" if d.get("all") else " (chosen)")

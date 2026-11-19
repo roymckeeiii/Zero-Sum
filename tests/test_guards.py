@@ -170,6 +170,13 @@ class Quarantine(World):
         with self.assertRaises(ValueError):
             cleanup.quarantine_action({"action": "delete", "sender": "x@y.com OR from:alerts@bank.com"})
 
+    def test_malformed_chosen_items_are_refused_not_crashed_on(self):
+        for items in (["aaaa01"], [5, None], [{"account": ["acc1"], "id": "aaaa01"}], [{"account": "acc1", "id": 123456}],
+                      [{"account": "acc1", "id": "aaaa01/trash"}], "aaaa01", {"account": "acc1", "id": "aaaa01"}):
+            with self.assertRaises(ValueError, msg=items):
+                cleanup.quarantine_action({"action": "delete", "items": items})
+        self.assertEqual(self.g.calls, [])
+
     def test_archive_and_release_still_work_for_everything(self):
         cleanup.quarantine_action({"action": "release", "all": True})
         self.assertEqual([len(c[3]["ids"]) for c in self.g.changes("batchModify")], [5])
