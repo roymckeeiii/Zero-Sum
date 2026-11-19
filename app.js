@@ -5,8 +5,13 @@ const fmt = (n) => (n == null ? "–" : Number(n).toLocaleString());
 const S = { tab: "inbox", account: "", limit: 30, items: [], sel: -1, accounts: [], images: false, slot: {} };
 
 async function api(path, body) {
-  const r = await fetch(path, body ? { method: "POST", headers: { "Content-Type": "application/json", "X-Requested-With": "zero-sum" },
-    body: JSON.stringify(body) } : {});
+  let r;
+  try {
+    r = await fetch(path, body ? { method: "POST", headers: { "Content-Type": "application/json", "X-Requested-With": "zero-sum" },
+      body: JSON.stringify(body) } : {});
+  } catch (e) {  // never reached the app: offline, or an expired sign-in redirected to the login page
+    throw new Error("Could not reach Zero Sum. Reload the page (your sign-in may have expired).");
+  }
   const d = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
   if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
   return d;
@@ -44,7 +49,8 @@ $("#tabs").onclick = (e) => {
 
 /* ------------------------------------------------------------------ inbox */
 async function loadAccounts() {
-  try { S.accounts = await api("/api/accounts"); } catch (e) { S.accounts = []; }
+  let failed = null;  // a failed load is not "no accounts": say what went wrong instead
+  try { S.accounts = await api("/api/accounts"); } catch (e) { S.accounts = []; failed = e.message; }
   setSlots(S.accounts);
   const total = S.accounts.reduce((n, a) => n + (a.unread || 0), 0);
   $("#accounts").innerHTML = `<a data-id="" class="${S.account ? "" : "on"}"><span>All accounts</span><span class="n">${total || ""}</span></a>` +
@@ -55,7 +61,8 @@ async function loadAccounts() {
         <option value="sent">Sent</option><option value="label">A label…</option><option value="spamtrash">Spam &amp; Trash</option></select>
       <input type="search" id="label" placeholder="Label name" hidden><label><input type="checkbox" id="unread"> Unread only</label>
       <button id="refresh">Refresh (r)</button></div>`;
-  if (!S.accounts.length) $("#accounts").innerHTML += `<div class="err">No linked accounts yet: add them in Inbox Zero.</div>`;
+  if (failed) $("#accounts").innerHTML += `<div class="err">Could not load your accounts: ${esc(failed)}</div>`;
+  else if (!S.accounts.length) $("#accounts").innerHTML += `<div class="err">No linked accounts yet: add them in Inbox Zero.</div>`;
   $("#q").value = S.q || ""; $("#unread").checked = !!S.unreadOnly;
   $("#scope").value = scopeOf(); $("#label").value = S.label || ""; $("#label").hidden = S.scope !== "label";
   $("#scope").onchange = (e) => { S.scope = e.target.value; S.limit = 30; $("#label").hidden = S.scope !== "label"; if (S.scope !== "label" || S.label) loadList(); };
