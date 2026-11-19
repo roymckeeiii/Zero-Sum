@@ -431,6 +431,32 @@ class AccessToken(unittest.TestCase):
         for tok in bad:
             self.assertIsNone(self.check(tok), str(tok)[:40])
 
+    def test_unknown_kids_and_a_down_cloudflare_cannot_make_every_request_fetch_keys(self):
+        a, fetched = self.access, []
+        saved = (a._fetch_keys, a._keys, a._fetched, a._retry_at)
+        self.addCleanup(lambda: setattr(a, "_fetch_keys", saved[0]) or setattr(a, "_keys", saved[1])
+                        or setattr(a, "_fetched", saved[2]) or setattr(a, "_retry_at", saved[3]))
+        a._fetch_keys = lambda: fetched.append(1) or {"k1": self.key.public_key()}
+        a._keys, a._fetched, a._retry_at = {}, 0.0, 0.0
+        tok = self.token(self.good(), kid="made-up")
+        for _ in range(30):   # a stream of tokens naming a kid Cloudflare never issued
+            self.assertIsNone(a.email_from(tok, team="t.cloudflareaccess.com", aud="AUD1", now=1000))
+        self.assertEqual(len(fetched), 1)          # the first fetch; the forced refetch waits a minute
+        a._fetched -= a.REFETCH_MIN + 1             # a minute on: a rotated key is still picked up
+        a.keys(force=True)
+        self.assertEqual(len(fetched), 2)
+
+        def down():
+            fetched.append(1)
+            raise OSError("cloudflare unreachable")
+        a._fetch_keys, a._keys, a._fetched, a._retry_at, fetched[:] = down, {}, 0.0, 0.0, []
+        for _ in range(30):   # nothing held and Cloudflare down: nobody gets in, and it is not asked 30 times
+            self.assertEqual(a.keys(), {})
+        self.assertEqual(len(fetched), 1)
+        a._retry_at = 0.0
+        a._fetch_keys = lambda: {"k1": self.key.public_key()}
+        self.assertIn("k1", a.keys())
+
     def test_off_unless_both_settings_are_present(self):
         self.assertFalse(self.access.ENABLED)   # the test environment sets neither: the header mode is unchanged
 
