@@ -318,13 +318,17 @@ def classify(rule, items):
 
 # ---------------------------------------------------------------- background analyst: plan every sender over time
 PLANS_PER_RUN = int(os.environ.get("AI_PLANS_PER_RUN", "4"))
+# Whether the background analyst runs before anyone has turned it on or off on the AI Cleanup tab. Off: it sends
+# senders' subject lines to the AI provider every collector run with no click, so it waits for an explicit "on".
+# DEFAULT - Roy may change: "0" (off)
+BACKGROUND_DEFAULT = "0"
 MIN_EMAILS = int(os.environ.get("AI_MIN_EMAILS", "5"))
 
 
 def background_plan():
     """Every collector run (when on): plan the biggest senders that have no plan yet, or whose mail grew by half since
     their plan, from the local history. Paced by AI_PLANS_PER_RUN and the daily AI call cap."""
-    if not KEY or setting("ai_background", "1") != "1" or _running["busy"]:
+    if not KEY or not background_on() or _running["busy"]:
         return
     prot = protected_set()
     with db() as c:
@@ -358,10 +362,15 @@ def progress(q=None):
         calls = c.execute("SELECT v FROM unified.settings WHERE k = %s",
                           (f"ai_calls:{datetime.datetime.utcnow():%Y-%m-%d}",)).fetchone()
     return {"collected": sum(coll.values()), "mailboxTotal": sum(totals.values()), "withSubject": with_subj,
-            "senders": senders, "planned": planned, "background": setting("ai_background", "1") == "1",
+            "senders": senders, "planned": planned, "background": background_on(),
             "callsToday": int(calls[0]) if calls else 0, "callCap": DAILY_CAP,
             "accounts": [{"email": a["email"], "collected": coll.get(a["id"], 0), "total": totals.get(a["id"], 0)}
                          for a in ACC.list()]}
+
+
+def background_on():
+    """Has the background analyst been turned on (AI Cleanup tab)? Unset means BACKGROUND_DEFAULT (off)."""
+    return setting("ai_background", BACKGROUND_DEFAULT) == "1"
 
 
 def set_background(d):

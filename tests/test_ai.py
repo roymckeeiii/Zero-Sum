@@ -208,5 +208,27 @@ class SortResume(unittest.TestCase):
         self.assertEqual(params, (["acc1"], ["m1"]))
 
 
+class BackgroundDefault(unittest.TestCase):
+    """The background analyst sends subject lines with no click, so it runs only once someone turned it on."""
+
+    def run_with(self, stored):
+        db, ran = Db(), []
+        with Patched(ai, db=db, KEY="k", _analyze=ran.append,
+                     setting=lambda k, d=None: stored.get(k, d), protected_set=lambda: set()):
+            db.on("FROM unified.msg m", [("big@shop.com", 50)])
+            ai.background_plan()
+        return ran
+
+    def test_with_a_key_but_never_turned_on_nothing_is_sent(self):
+        self.assertEqual(ai.BACKGROUND_DEFAULT, "0")
+        self.assertEqual(self.run_with({}), [])
+        with Patched(ai, setting=lambda k, d=None: d):
+            self.assertFalse(ai.background_on())
+
+    def test_turned_on_it_plans_and_turned_off_it_does_not(self):
+        self.assertEqual(self.run_with({"ai_background": "1"}), [["big@shop.com"]])
+        self.assertEqual(self.run_with({"ai_background": "0"}), [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -14,8 +14,9 @@ in one place** (one inbox, one cleanup list, one quarantine, one analytics dashb
 1. **Zero Sum reads your whole history, slowly.** Running on your own server, it reads a little more of every account
    every 15 minutes, all the way back to each account's first email, gently enough to stay inside Gmail's limits.
    A progress bar shows how far it has got.
-2. **The AI plans each sender.** As history comes in, a background analyst works through your senders, biggest first,
-   and proposes a plan for each: which emails to keep and what to do with the rest.
+2. **The AI plans each sender.** Click **Analyze now**, or turn on the background analyst (off until you do), which then
+   works through your senders as history comes in, biggest first. Each plan proposes which emails to keep and what to
+   do with the rest.
 3. **You review.** Each plan shows its reasoning and a preview of the sender's 20 most recent emails with the action each
    would get. Change anything you like; the preview updates as you edit.
 4. **You apply.** Existing mail is sorted across every folder and year, and future mail from that sender is handled the
@@ -148,8 +149,8 @@ docker compose -f docker-compose.yml -f zero-sum/compose.zero-sum.yml run --rm z
 docker compose -f docker-compose.yml -f zero-sum/compose.zero-sum.yml up -d
 ```
 
-Open it through your proxy, go to **AI Cleanup** and click **Analyze now**, or just let the background analyst work
-through your history. Full details are under [Install](#install-docker-compose) below.
+Open it through your proxy, go to **AI Cleanup** and click **Analyze now**, or tick "Analyze senders in the background"
+to let the background analyst work through your history (it is off until you turn it on). Full details are under [Install](#install-docker-compose) below.
 
 ## FAQ
 
@@ -162,7 +163,8 @@ deleting means Gmail's Trash (recoverable for 30 days), and protected senders ca
 **What does the AI see?** Only what it needs to judge mail: a sender's address and its emails' **subject lines and
 preview text** (the first ~200 characters Gmail shows), sent to the OpenAI-compatible API you configure (OpenRouter by
 default, using a small Claude model). Never full email bodies, attachments or your other accounts' details. Without an
-API key the AI features are simply off and everything else works.
+API key the AI features are simply off and everything else works. With a key, nothing is sent until you use an AI
+feature: the background analyst, which sends subject lines with no click, stays off until you turn it on.
 
 **How much does the AI cost?** Very little: a plan is one small request, and AI sort judges 40 emails per request.
 A daily cap (`AI_MAX_CALLS_PER_DAY`, 400 by default) limits the worst case to well under a dollar a day with the
@@ -196,7 +198,7 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
 |---|---|
 | **Inbox** | The newest inbox mail from every account in one list. Read, archive and delete (to Trash), each with undo, star, mark read/unread, search (Gmail syntax) every account at once in Inbox, All mail, Sent, a label or Spam & Trash (typing a search searches All mail; results show their folder, sent mail its recipients; "Load more" keeps one newest-first order across accounts), filter by account, and see which Inbox Zero rule handled each email. Keys: `j`/`k` move, `e` archive, `s` star, `#` delete, `u` unread, `/` search. Replies happen in Gmail ("Reply in Gmail" opens the thread): Zero Sum never sends mail. |
 | **Cleanup** | Every sender across every account, with volume, read rate and which accounts get it. Click a sender for its 20 most recent emails. The **Clean up…** menu applies to every account that receives the sender: **Unsubscribe** (only that: RFC 8058 one-click where offered, otherwise links to open), **Unsubscribe & archive / quarantine / delete**, **Quarantine**, **Auto-archive** (Gmail `from:` filter + Inbox Zero's sender status), **Archive**, **Delete all** (to Trash), **Block** (to Trash now and in future), **Spam** (report, which also trains Gmail). Each asks first and can keep emails whose subject contains chosen words (kept ones are starred, now and in future). Also **Auto-star** / **Un-star**, **Keep**, **Protect** and **✨ AI suggest**. Date range up to all time. |
-| **✨ AI Cleanup** | Per-sender plans from the AI, in two modes: **word groups** (subject words → keep & star / archive / quarantine / delete, plus an action for everything else, applied as Gmail filters) or **AI sort** (a plain-English rule the AI applies to each email's subject and preview, for existing mail and new mail every 15 minutes, with progress and Stop). Edit, preview the 20 most recent emails, apply, skip or re-analyze. A background analyst plans senders as history arrives; a progress panel shows mail read and senders analyzed. |
+| **✨ AI Cleanup** | Per-sender plans from the AI, in two modes: **word groups** (subject words → keep & star / archive / quarantine / delete, plus an action for everything else, applied as Gmail filters) or **AI sort** (a plain-English rule the AI applies to each email's subject and preview, for existing mail and new mail every 15 minutes, with progress and Stop). Edit, preview the 20 most recent emails, apply, skip or re-analyze. An optional background analyst (off until you turn it on) plans senders as history arrives; a progress panel shows mail read and senders analyzed. |
 | **Quarantine** | Mail held by Quarantine actions and plans, under a `Quarantine` label (`QUARANTINE_LABEL`), grouped by sender across all accounts: tick messages or senders, then **Archive** or **Delete** (to Trash), or **Archive all** / **Delete all**; **Release sender** puts their mail back in the inbox and removes the filter. A ticked message is only acted on if Gmail still shows it under the label (the result counts any that were not and left them alone). |
 | **Analytics** | Mail per day (calendar days in your browser's time zone), read rate, top senders and domains, what Inbox Zero's rules did and cleanup totals, merged with a per-account breakdown. |
 | **Rules** | Write rules in Inbox Zero on a *master* account and share chosen ones with chosen accounts (opt-in: tick a rule under an account). Label actions are matched by label name; preview, sync now, and optional automatic sync. Nothing is shared by default, since each address usually gets different mail. |
@@ -323,7 +325,7 @@ All settings are environment variables; see [`.env.example`](.env.example).
 | `RULES_AUTO_MAX_DELETES` | `3` | most rule copies the automatic sync deletes in one run; the rest wait for "Sync now" |
 | `BACKFILL_DAYS`, `BACKFILL_STEP` | `0` (all history), `2000` | how far back the collector reads (days; 0 = to the account's first email), and how much per run per account |
 | `MAX_BULK` | `200000` | most emails one bulk action touches per account |
-| `OPENROUTER_API_KEY`, `AI_MODEL`, `AI_BASE_URL` | empty, `anthropic/claude-haiku-5.5`, OpenRouter | all AI features: AI Cleanup, AI sort, AI suggest, background analyst (off without a key) |
+| `OPENROUTER_API_KEY`, `AI_MODEL`, `AI_BASE_URL` | empty, `anthropic/claude-haiku-5.5`, OpenRouter | all AI features: AI Cleanup, AI sort, AI suggest, background analyst (off without a key; the background analyst is also off until turned on in AI Cleanup) |
 | `AI_MAX_CALLS_PER_DAY`, `AI_PLANS_PER_RUN`, `AI_MIN_EMAILS` | `400`, `4`, `5` | daily AI call cap; senders the background analyst plans per run; minimum emails before a sender is planned |
 | `QUARANTINE_LABEL`, `QUARANTINE_SHOW` | `Quarantine`, `600` | Gmail label for held mail; messages per account listed on the Quarantine tab |
 | `GMAIL_UNITS_PER_SEC` | `50` | Gmail quota units per second per account |
