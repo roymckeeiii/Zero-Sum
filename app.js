@@ -2,7 +2,7 @@
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const fmt = (n) => (n == null ? "–" : Number(n).toLocaleString());
-const S = { tab: "inbox", account: "", limit: 30, items: [], sel: -1, accounts: [], images: false, slot: {} };
+const S = { tab: "inbox", account: "", limit: 30, items: [], sel: -1, accounts: [], imagesFor: null, slot: {} };
 
 async function api(path, body) {
   let r;
@@ -165,8 +165,10 @@ function toast(html, label, fn) {
   clearTimeout(toast.t); toast.t = setTimeout(() => { t.style.display = "none"; }, 8000);
 }
 
-function frameDoc(m) {
-  const imgs = S.images ? "img-src https: data:;" : "img-src data:;";
+// remote images load only for the one message they were allowed on (S.imagesFor): never for the next one opened,
+// where a tracking pixel would tell its sender when and from where it was read
+function frameDoc(m, images) {
+  const imgs = images ? "img-src https: data:;" : "img-src data:;";
   return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy"
     content="default-src 'none'; style-src 'unsafe-inline'; ${imgs} font-src data:"><base target="_blank">
     <style>body{font:14px/1.5 system-ui,sans-serif;margin:16px;color:#1d2330;word-wrap:break-word}img{max-width:100%;height:auto}</style>
@@ -185,24 +187,25 @@ async function open(i) {
   try { m = await api(`/api/message?account=${encodeURIComponent(it.account)}&id=${encodeURIComponent(it.id)}`); }
   catch (e) { if (req === S.openReq) r.innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
   if (req !== S.openReq) return;
+  const images = S.imagesFor === `${it.account}/${it.id}`;
   const gmailUrl = `https://mail.google.com/mail/?authuser=${encodeURIComponent(m.email)}#all/${encodeURIComponent(m.threadId)}`;
   r.innerHTML = `<div class="hd"><h2>${esc(m.subject || "(no subject)")}</h2>
     <div class="meta"><b>${esc(m.from)}</b><br>to ${esc(m.to)}${m.cc ? `, cc ${esc(m.cc)}` : ""}<br>${esc(m.date)} · ${acctChip(it.account, m.email)}</div>
     <div class="tools"><button id="r-archive">Archive (e)</button><button id="r-star">${it.starred ? "Unstar" : "Star"} (s)</button>
       <button id="r-unread">Mark unread (u)</button><button id="r-delete">Delete (#)</button>
       <a href="${gmailUrl}" target="_blank" rel="noopener"><button>Reply in Gmail ↗</button></a>
-      ${m.kind === "html" ? `<button id="r-img">${S.images ? "Hide" : "Show"} images</button>` : ""}
+      ${m.kind === "html" ? `<button id="r-img">${images ? "Hide" : "Show"} images</button>` : ""}
       <button id="r-close" class="mobile">Close</button></div></div>` +
     (m.kind === "html" ? `<iframe sandbox="allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer" title="Email body"></iframe>`
       : `<pre>${esc(m.body)}</pre>`);
-  if (m.kind === "html") r.querySelector("iframe").srcdoc = frameDoc(m);
+  if (m.kind === "html") r.querySelector("iframe").srcdoc = frameDoc(m, images);
   $("#r-archive").onclick = () => act(S.sel, "archive");
   $("#r-unread").onclick = () => act(S.sel, "unread");
   $("#r-delete").onclick = () => act(S.sel, "delete");
   $("#r-star").onclick = () => act(S.sel, S.items[S.sel].starred ? "unstar" : "star");
   $("#r-close").onclick = () => document.body.classList.remove("reading");
   const img = $("#r-img");
-  if (img) img.onclick = () => { S.images = !S.images; open(S.sel); };
+  if (img) img.onclick = () => { S.imagesFor = images ? null : `${it.account}/${it.id}`; open(S.sel); };
   if (it.unread) { it.unread = false; redraw();
     api("/api/action", { account: it.account, threadId: it.threadId, action: "read" }).then(loadAccounts).catch(() => {}); }
 }
