@@ -716,11 +716,21 @@ function hbars(rows, label, value, title) {
     <span class="track"><div class="fill" style="width:${(100 * value(r)) / max}%"></div></span><span class="val">${fmt(value(r))}</span></div>`).join("");
 }
 
-function dailyChart(daily, days) {
+// YYYY-MM-DD of a moment as a calendar day in the time zone the server grouped the days by
+function dayIn(tz, ms) {
+  let f;
+  try { f = new Intl.DateTimeFormat("en-US", { timeZone: tz || "UTC", year: "numeric", month: "2-digit", day: "2-digit" }); }
+  catch { f = new Intl.DateTimeFormat("en-US", { timeZone: "UTC", year: "numeric", month: "2-digit", day: "2-digit" }); }
+  const p = Object.fromEntries(f.formatToParts(new Date(ms)).map((x) => [x.type, x.value]));
+  return `${p.year}-${p.month}-${p.day}`;
+}
+function viewerZone() { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch { return ""; } }
+function dailyChart(daily, days, tz) {
   const byDay = {};
   for (const d of daily) { (byDay[d.day] ||= { total: 0, parts: {} }); byDay[d.day].total += d.count; byDay[d.day].parts[d.email] = d.count; }
-  const list = [];
-  for (let i = days - 1; i >= 0; i--) { const dt = new Date(Date.now() - i * 864e5).toISOString().slice(0, 10); list.push({ day: dt, ...(byDay[dt] || { total: 0, parts: {} }) }); }
+  // today in that zone, then whole calendar days back from it (counted on UTC dates: no daylight-saving gaps)
+  const today = Date.parse(dayIn(tz, Date.now()) + "T00:00:00Z"), list = [];
+  for (let i = days - 1; i >= 0; i--) { const dt = new Date(today - i * 864e5).toISOString().slice(0, 10); list.push({ day: dt, ...(byDay[dt] || { total: 0, parts: {} }) }); }
   const W = 900, H = 200, L = 40, B = 22, T = 8, max = Math.max(1, ...list.map((x) => x.total));
   const raw = max / 4, mag = Math.pow(10, Math.floor(Math.log10(raw))), step = [1, 2, 5, 10].map((m) => m * mag).find((v) => v >= raw);
   const top = Math.ceil(max / step) * step, nt = Math.round(top / step);
@@ -742,11 +752,11 @@ function dailyChart(daily, days) {
 async function loadAnalytics() {
   const days = +$("#a-days").value;
   let d;
-  try { d = await api(`/api/analytics?days=${days}`); } catch (e) { $("#a-body").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
+  try { d = await api(`/api/analytics?days=${days}&tz=${encodeURIComponent(viewerZone())}`); } catch (e) { $("#a-body").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
   const t = d.totals, cv = d.coverage;
   $("#a-cover").textContent = `Mail history: ${cv.backfilled}/${cv.accounts} accounts fully collected${cv.since ? `, since ${cv.since.slice(0, 10)}` : ""}.`;
   const tile = (v, k) => `<div class="tile"><div class="v">${v}</div><div class="k">${k}</div></div>`;
-  const chart = dailyChart(d.daily, days);
+  const chart = dailyChart(d.daily, days, d.tz);
   $("#a-body").innerHTML = `<div class="tiles">${tile(fmt(t.received), "emails received")}${tile(t.readPct == null ? "–" : t.readPct + "%", "read")}
       ${tile(fmt(t.inboxNow), "in inboxes now")}${tile(fmt(t.senders), "senders")}${tile(fmt(t.ruleActions), "rule actions by Inbox Zero")}
       ${tile(fmt(t.unsubscribed + t.autoArchived), "senders unsubscribed / auto-archived")}</div>

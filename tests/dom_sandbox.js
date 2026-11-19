@@ -19,7 +19,7 @@ function load(exportNames) {
   const document = new Proxy({}, { get: (t, k) => (k === "querySelector" ? el : k === "querySelectorAll" ? () => []
     : k === "hidden" ? false : stub()) });
   const ctx = {
-    console, URLSearchParams, setTimeout, clearTimeout, setInterval: (fn) => intervals.push(fn), clearInterval: () => {}, Promise, JSON, Math, Date, Set, Map, String, Number, Error,
+    console, URLSearchParams, setTimeout, clearTimeout, setInterval: (fn) => intervals.push(fn), clearInterval: () => {}, Promise, JSON, Math, Date, Intl, Set, Map, String, Number, Error,
     document, window: stub(), localStorage: stub(), location: stub(), navigator: stub(), history: stub(), alert: () => {},
     matchMedia: () => stub(), addEventListener: () => {}, requestAnimationFrame: () => 0, encodeURIComponent,
     fetch: (url, opts) => new Promise((resolve) => pending.push({ url: String(url), body: opts && opts.body ? JSON.parse(opts.body) : null, resolve })),
