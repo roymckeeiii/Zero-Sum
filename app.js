@@ -157,9 +157,13 @@ async function open(i) {
   const it = S.items[i], r = $("#reader");
   document.body.classList.add("reading");
   r.innerHTML = `<div class="empty">Loading…</div>`;
+  // only the message opened last may fill the reader: its buttons and e/#/s/u act on the selection (S.sel), so an
+  // older message answering late would be shown while the keys act on another one
+  const req = (S.openReq = (S.openReq || 0) + 1);
   let m;
   try { m = await api(`/api/message?account=${encodeURIComponent(it.account)}&id=${encodeURIComponent(it.id)}`); }
-  catch (e) { r.innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
+  catch (e) { if (req === S.openReq) r.innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
+  if (req !== S.openReq) return;
   const gmailUrl = `https://mail.google.com/mail/?authuser=${encodeURIComponent(m.email)}#all/${encodeURIComponent(m.threadId)}`;
   r.innerHTML = `<div class="hd"><h2>${esc(m.subject || "(no subject)")}</h2>
     <div class="meta"><b>${esc(m.from)}</b><br>to ${esc(m.to)}${m.cc ? `, cc ${esc(m.cc)}` : ""}<br>${esc(m.date)} · ${acctChip(it.account, m.email)}</div>
