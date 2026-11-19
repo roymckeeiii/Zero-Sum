@@ -89,7 +89,7 @@ async function loadList(keepSel, page) {
     d.errors = [...errs.values()];
   }
   S.items = d.items; S.errors = d.errors; S.next = d.next || "";
-  S.more = !!S.next;
+  S.more = !!S.next; S.paged = !!page;  // pages added with Load more: the 2-minute refresh leaves them alone
   S.sel = selId ? S.items.findIndex((i) => i.id === selId) : -1;
   redraw();
 }
@@ -805,4 +805,6 @@ $("#r-matrix").onchange = async (e) => {
 api("/api/config").then((c) => { S.izUrl = c.inboxZeroUrl; S.ai = !!c.ai; if (c.inboxZeroUrl) { const a = $("#iz-link"); a.href = c.inboxZeroUrl; a.hidden = false; } }).catch(() => {});
 loadAccounts().then(() => loadList());
 api("/api/quarantine").then((d) => { $("#q-count").textContent = d.total || ""; }).catch(() => {});
-setInterval(() => { if (!document.hidden && S.tab === "inbox") { loadAccounts(); loadList(true); } }, 120000);
+// every 2 minutes: account counts, and the list unless Load more was used (reloading would drop those pages and the
+// selection in them; r, a new search or another account starts from page one again)
+setInterval(() => { if (!document.hidden && S.tab === "inbox") { loadAccounts(); if (!S.paged) loadList(true); } }, 120000);
