@@ -104,6 +104,32 @@ class Gate(unittest.TestCase):
             status, body = self.call("POST", "/api/sender", tok, {})
             self.assertEqual((status, body["error"]), (code, str(exc)))
 
+    def raw_post(self, length_header, body=b""):
+        c = http.client.HTTPConnection("127.0.0.1", self.srv.server_address[1], timeout=5)
+        try:
+            c.putrequest("POST", "/api/sender")
+            for k, v in (("Cf-Access-Jwt-Assertion", "good"), ("X-Requested-With", "zero-sum"), ("Content-Length", length_header)):
+                c.putheader(k, v)
+            c.endheaders(body)
+            r = c.getresponse()
+            return r.status, json.loads(r.read() or b"{}")
+        finally:
+            c.close()
+
+    def test_a_long_paste_is_read_whole_and_an_oversized_or_bad_body_is_refused_not_cut(self):
+        self.mode(token=True, header=False)
+        tok = {"Cf-Access-Jwt-Assertion": "good", "X-Requested-With": "zero-sum"}
+        text = "\n".join(f"sender{i}@example{i}.com, a note about why it is kept" for i in range(2000))   # ~100 KB
+        self.assertGreater(len(text), 20000)
+        self.assertEqual(self.call("POST", "/api/sender", tok, {"text": text}), (200, {"ok": "ran"}))
+        self.assertEqual(self.ran, [{"text": text}])
+        status, body = self.raw_post(str(app.MAX_BODY + 1), b"{}")
+        self.assertEqual(status, 413)
+        self.assertIn("too large", body["error"])
+        self.assertEqual(self.raw_post("-5")[0], 400)          # read(-1) would hang until the client hung up
+        self.assertEqual(self.raw_post("abc")[0], 400)
+        self.assertEqual(len(self.ran), 1)
+
 
 class Startup(unittest.TestCase):
     def test_it_refuses_to_start_without_verified_sign_in(self):

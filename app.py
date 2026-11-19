@@ -28,6 +28,9 @@ AUTH_HEADER = os.environ.get("AUTH_EMAIL_HEADER", "Cf-Access-Authenticated-User-
 HEADER_TRUST = os.environ.get("ALLOW_HEADER_TRUST", "").strip() == "1"  # local development only: see sign_in_mode
 LISTEN_HOST = os.environ.get("LISTEN_HOST", "").strip() or "127.0.0.1"
 INBOX_ZERO_URL = os.environ.get("INBOX_ZERO_URL", "").rstrip("/")
+# Largest POST body read. Protect-many takes up to 2000 pasted senders (with CSV notes), far more than the 20 KB once
+# read here: a longer paste was cut short and failed as "bad json".
+MAX_BODY = 512 * 1000
 STATIC = {"/": ("index.html", "text/html; charset=utf-8"), "/app.js": ("app.js", "text/javascript; charset=utf-8")}
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
        "font-src https://fonts.gstatic.com; img-src 'self' data: https:; "
@@ -182,7 +185,14 @@ class H(BaseHTTPRequestHandler):
             return
         if self.path not in POST or self.headers.get("X-Requested-With") != "zero-sum":
             return self.send(400, {"error": "bad request"})
-        n = min(int(self.headers.get("Content-Length") or 0), 20000)
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = -1
+        if n < 0:            # read(-1) would wait for the client to close the connection
+            return self.send(400, {"error": "bad request"})
+        if n > MAX_BODY:     # refused, never cut short: a truncated body only ever read as "bad json"
+            return self.send(413, {"error": f"request too large (at most {MAX_BODY // 1000} KB)"})
         try:
             d = json.loads(self.rfile.read(n) or b"{}")
         except ValueError:
