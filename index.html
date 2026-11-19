@@ -8,9 +8,9 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&display=swap">
 <style>
 :root { color-scheme:light; /* Inbox Zero / shadcn-ui slate theme */
-  --bg:#ffffff; --panel:#ffffff; --side:#fafafa; --line:#e2e8f0; --text:#0f172a; --muted:#64748b; --faint:#94a3b8;
+  --bg:#ffffff; --panel:#ffffff; --side:#fafafa; --line:#e2e8f0; --text:#0f172a; --muted:#5d6b7f; --faint:#94a3b8;
   --accent:#0f172a; --accent-t:#f8fafc; --link:#2563eb; --hover:#f1f5f9; --chip:#f1f5f9; --rule:#dbeafe; --rule-t:#1e40af;
-  --err:#dc2626; --danger:#ef4444; --ok:#15803d; --bar:#3b82f6; --grid:#e2e8f0; --ring:#94a3b8;
+  --err:#b91c1c; --danger:#dc2626; --ok:#15803d; --bar:#3b82f6; --grid:#e2e8f0; --ring:#94a3b8;
   --shadow:0 1px 2px rgba(15,23,42,.05); --radius:8px;
   --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a; --s4:#eda100; --s5:#e87ba4; --s6:#008300; --s7:#6250d6; --s8:#e34948; --s9:#94a3b8; }
 @media (prefers-color-scheme: dark) { :root { color-scheme:dark;
@@ -102,7 +102,8 @@ td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
 .row .snip { color:var(--muted); }
 .row.unread .from, .row.unread .subj { font-weight:650; }
 .row .acts { grid-column:3; grid-row:1; display:none; gap:4px; }
-.row:hover .acts { display:flex; } .row:hover .when { display:none; }
+.row:hover .acts, .row:focus-within .acts { display:flex; } .row:hover .when, .row:focus-within .when { display:none; }
+.row:focus-visible, td.who:focus-visible, #accounts a:focus-visible { outline:2px solid var(--ring); outline-offset:-2px; }
 .row .acts button { padding:1px 6px; font-size:12px; }
 #more { margin:12px; }
 #reader { background:var(--panel); display:flex; flex-direction:column; }
@@ -118,7 +119,7 @@ td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
 .st { font-size:11px; padding:1px 8px; border-radius:9999px; font-weight:500; }
 .st.synced { background:var(--rule); color:var(--rule-t); }
 .st.pending, .st.changed { background:#fff1d6; color:#7a4b00; }
-.st.removing { background:var(--chip); color:var(--faint); }
+.st.removing { background:var(--chip); color:var(--muted); }  /* --faint is below 4.5:1 for small text */
 @media (prefers-color-scheme: dark) { .st.pending, .st.changed { background:#3a2c0f; color:#f3c26b; } }
 .ops li { margin:2px 0; }
 .qgroup { background:var(--panel); border:1px solid var(--line); border-radius:8px; margin-bottom:10px; }
@@ -191,7 +192,7 @@ select.cleanup { padding:3px 6px; font-size:12px; }
 <header>
   <h1><span class="logo" aria-hidden="true">Σ</span>Zero Sum</h1>
   <nav class="tabs" id="tabs">
-    <button data-tab="inbox" class="on">Inbox</button><button data-tab="cleanup">Cleanup</button>
+    <button data-tab="inbox" class="on" aria-current="page">Inbox</button><button data-tab="cleanup">Cleanup</button>
     <button data-tab="ai">✨ AI Cleanup</button>
     <button data-tab="quarantine">Quarantine <span id="q-count" class="n"></span></button>
     <button data-tab="analytics">Analytics</button><button data-tab="rules">Rules</button>
@@ -207,12 +208,12 @@ select.cleanup { padding:3px 6px; font-size:12px; }
   </section>
   <section class="view" id="v-cleanup"><div class="page">
     <div class="bar-row">
-      <input type="search" id="c-q" placeholder="Filter senders">
-      <select id="c-days"><option value="30">Last 30 days</option><option value="90" selected>Last 90 days</option>
+      <input type="search" id="c-q" placeholder="Filter senders" aria-label="Filter senders">
+      <select id="c-days" aria-label="Period"><option value="30">Last 30 days</option><option value="90" selected>Last 90 days</option>
         <option value="180">Last 180 days</option><option value="365">Last year</option>
         <option value="1825">Last 5 years</option><option value="3650">Last 10 years</option><option value="36500">All time</option></select>
       <label><input type="checkbox" id="c-handled"> Show handled</label>
-      <input type="search" id="c-protect" placeholder="Protect name@x.com or @x.com"><button id="c-protect-btn">Protect</button><button id="c-protect-many" title="Paste a list of senders to protect">Protect many…</button>
+      <input type="search" id="c-protect" placeholder="Protect name@x.com or @x.com" aria-label="Sender or domain to protect"><button id="c-protect-btn">Protect</button><button id="c-protect-many" title="Paste a list of senders to protect">Protect many…</button>
       <span class="spacer"></span><button id="c-collect">Collect now</button>
     </div>
     <div id="c-status" class="note"></div>
@@ -223,7 +224,7 @@ select.cleanup { padding:3px 6px; font-size:12px; }
   </div></section>
   <section class="view" id="v-ai"><div class="page">
     <div class="bar-row">
-      <select id="ai-limit"><option value="10">Top 10 senders</option><option value="25" selected>Top 25 senders</option>
+      <select id="ai-limit" aria-label="How many senders"><option value="10">Top 10 senders</option><option value="25" selected>Top 25 senders</option>
         <option value="50">Top 50 senders</option></select>
       <button id="ai-run" class="primary">✨ Analyze now</button><span id="ai-status" class="note"></span>
     </div>
@@ -245,7 +246,7 @@ select.cleanup { padding:3px 6px; font-size:12px; }
   </div></section>
   <section class="view" id="v-analytics"><div class="page">
     <div class="bar-row">
-      <select id="a-days"><option value="7">Last 7 days</option><option value="30" selected>Last 30 days</option>
+      <select id="a-days" aria-label="Period"><option value="7">Last 7 days</option><option value="30" selected>Last 30 days</option>
         <option value="90">Last 90 days</option><option value="180">Last 180 days</option></select>
       <span id="a-cover" class="note"></span>
     </div>

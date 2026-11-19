@@ -42,7 +42,7 @@ $("#tabs").onclick = (e) => {
   const b = e.target.closest("button[data-tab]");
   if (!b) return;
   S.tab = b.dataset.tab;
-  document.querySelectorAll("#tabs button").forEach((x) => x.classList.toggle("on", x === b));
+  document.querySelectorAll("#tabs button").forEach((x) => { x.classList.toggle("on", x === b); x.setAttribute("aria-current", x === b ? "page" : "false"); });
   document.querySelectorAll(".view").forEach((v) => v.classList.toggle("on", v.id === `v-${S.tab}`));
   if (!loaded[S.tab]) { loaded[S.tab] = true; ({ cleanup: loadSenders, ai: loadPlans, quarantine: loadQuarantine, analytics: loadAnalytics, rules: loadRules })[S.tab]?.(); }
 };
@@ -53,13 +53,13 @@ async function loadAccounts() {
   try { S.accounts = await api("/api/accounts"); } catch (e) { S.accounts = []; failed = e.message; }
   setSlots(S.accounts);
   const total = S.accounts.reduce((n, a) => n + (a.unread || 0), 0);
-  $("#accounts").innerHTML = `<a data-id="" class="${S.account ? "" : "on"}"><span>All accounts</span><span class="n">${total || ""}</span></a>` +
-    S.accounts.map((a) => `<a data-id="${esc(a.id)}" class="${a.id === S.account ? "on" : ""} ${a.ok ? "" : "bad"}" title="${esc(a.ok ? a.email : a.error)}">
+  $("#accounts").innerHTML = `<a href="#" data-id="" class="${S.account ? "" : "on"}" aria-current="${S.account ? "false" : "true"}"><span>All accounts</span><span class="n">${total || ""}</span></a>` +
+    S.accounts.map((a) => `<a href="#" data-id="${esc(a.id)}" class="${a.id === S.account ? "on" : ""} ${a.ok ? "" : "bad"}" aria-current="${a.id === S.account ? "true" : "false"}" title="${esc(a.ok ? a.email : a.error)}">
       <span><span class="dot" style="background:${slotOf(a.id)}"></span>${esc(a.email)}</span><span class="n">${a.ok ? a.unread || "" : "!"}</span></a>`).join("") +
-    `<div class="tools"><input type="search" id="q" placeholder="Search (Gmail syntax)">
+    `<div class="tools"><input type="search" id="q" placeholder="Search (Gmail syntax)" aria-label="Search all accounts (Gmail syntax)">
       <select id="scope" title="Where to search"><option value="inbox">Inbox</option><option value="all">All mail</option>
         <option value="sent">Sent</option><option value="label">A label…</option><option value="spamtrash">Spam &amp; Trash</option></select>
-      <input type="search" id="label" placeholder="Label name" hidden><label><input type="checkbox" id="unread"> Unread only</label>
+      <input type="search" id="label" placeholder="Label name" aria-label="Label name" hidden><label><input type="checkbox" id="unread"> Unread only</label>
       <button id="refresh">Refresh (r)</button></div>`;
   if (failed) $("#accounts").innerHTML += `<div class="err">Could not load your accounts: ${esc(failed)}</div>`;
   else if (!S.accounts.length) $("#accounts").innerHTML += `<div class="err">No linked accounts yet: add them in Inbox Zero.</div>`;
@@ -104,7 +104,8 @@ async function loadList(keepSel, page) {
 function row(it, i) {
   const chips = (it.rules || []).map((r) => `<span class="chip rule" title="Inbox Zero rule (${esc(r.status)})">${esc(r.name)}</span>`).join("") +
     it.labels.map((l) => `<span class="chip">${esc(l)}</span>`).join("");
-  return `<div class="row ${it.unread ? "unread" : ""} ${i === S.sel ? "sel" : ""}" data-i="${i}">
+  return `<div class="row ${it.unread ? "unread" : ""} ${i === S.sel ? "sel" : ""}" data-i="${i}" tabindex="0" aria-current="${i === S.sel ? "true" : "false"}"
+    aria-label="${esc(`${it.unread ? "Unread. " : ""}${it.folder === "Sent" && it.to ? `To ${it.to}` : `From ${it.from}`}: ${it.subject}, ${when(it.ts)}`)}">
     <span class="dot" style="background:${slotOf(it.account)}"></span>
     <span class="from" title="${esc(it.folder === "Sent" && it.to ? `To: ${it.to}` : it.fromAddr)}">${it.starred ? '<span class="star" title="Starred">★</span> ' : ""}${it.protected ? '<span class="chip prot" title="Protected sender">protected</span>' : ""}${it.folder === "Sent" && it.to ? `To: ${esc(it.to)}` : esc(it.from)}</span><span class="when">${when(it.ts)}</span>
     <span class="acts"><button data-act="archive" title="Archive (e)">Archive</button>
@@ -116,9 +117,11 @@ function row(it, i) {
 }
 
 function redraw() {
+  const focused = !!document.activeElement?.closest?.("#list .row");   // keep the keyboard where it was
   $("#list").innerHTML = (S.errors || []).map((e) => `<div class="err">${esc(e.email)}: ${esc(e.error)}</div>`).join("") +
     (S.items.length ? S.items.map(row).join("") : `<div class="empty">Nothing here.</div>`) +
     (S.more ? `<button id="more">Load more</button>` : "");
+  if (focused && S.sel >= 0) $("#list").querySelector(`.row[data-i="${S.sel}"]`)?.focus?.();
   const more = $("#more");
   if (more) more.onclick = () => {
     loadList(true, S.next);
@@ -200,6 +203,7 @@ async function open(i) {
 $("#accounts").onclick = (e) => {
   const a = e.target.closest("a[data-id]");
   if (!a) return;
+  e.preventDefault();
   S.account = a.dataset.id; S.limit = 30;
   loadAccounts(); loadList();
 };
@@ -210,6 +214,7 @@ $("#list").onclick = (e) => {
   if (b) { e.stopPropagation(); act(i, b.dataset.act); } else open(i);
 };
 document.onkeydown = (e) => {
+  if ((e.key === "Enter" || e.key === " ") && e.target?.matches?.(".row[data-i], td.who[data-peek]")) { e.preventDefault(); e.target.click(); return; }
   if (S.tab !== "inbox" || ["INPUT", "SELECT"].includes(e.target.tagName) || e.metaKey || e.ctrlKey || e.altKey) return;
   const n = S.items.length;
   if (e.key === "j" && n) open(Math.min(S.sel + 1, n - 1));
@@ -260,7 +265,7 @@ async function loadSenders() {
   S.senders = d.senders;
   $("#c-table").innerHTML = `<table><thead><tr><th>Sender</th><th class="num">Emails</th><th class="num">Read</th>
     <th class="num">In inbox</th><th>Accounts</th><th>Last</th><th>Apply to every account</th></tr></thead><tbody>` +
-    d.senders.map((s, i) => `<tr data-row="${i}"><td class="who" data-peek="${i}" title="Show the 20 most recent emails">
+    d.senders.map((s, i) => `<tr data-row="${i}"><td class="who" data-peek="${i}" title="Show the 20 most recent emails" tabindex="0" role="button" aria-label="${esc(`Show the 20 most recent emails from ${s.name || s.addr}`)}">
       <span class="caret">▸</span> <b>${esc(s.name || s.addr)}</b><br><span class="note">${esc(s.addr)}</span></td>
       <td class="num">${fmt(s.count)}</td><td class="num">${s.readPct}%</td><td class="num">${fmt(s.inbox)}</td>
       <td>${s.accounts.map((a) => `${acctChip(a.id, a.email)}${a.status ? `<span class="note">${STATUS[a.status] || a.status}</span> ` : ""}`).join("")}</td>
@@ -545,14 +550,14 @@ function planCard(p, i) {
     (ai ? `<div class="groups"><label class="rule">Keep emails like this (plain English, edit freely)
         <textarea data-f="rule" rows="2" placeholder="e.g. keep travel articles, guides and trip ideas; sales, deals and booking promos are junk">${esc(p.keep_rule || "")}</textarea></label>
       <div class="g"><span class="gl note">Emails the rule doesn't keep</span><span class="gw note">judged one by one by the AI</span>
-        ${gactSel(p.default, 'data-f="default"')}<span></span></div></div>
+        ${gactSel(p.default, 'data-f="default" aria-label="What happens to everything else"')}<span></span></div></div>
       <details data-i="${i}"><summary>Preview the 20 most recent emails, tagged by the AI with this rule</summary><div class="pv"></div></details>` :
     `<div class="groups">${p.groups.map((g, gi) => `<div class="g" data-gi="${gi}">
-        <input data-f="label" value="${esc(g.label)}" placeholder="Name" class="gl">
-        <input data-f="words" value="${esc(g.words.join(", "))}" placeholder="subject words, comma-separated" class="gw">
-        ${gactSel(g.action, 'data-f="action"')}<button data-pa="del-g" data-i="${i}" data-gi="${gi}" title="Remove group">×</button></div>`).join("")}
+        <input data-f="label" value="${esc(g.label)}" placeholder="Name" class="gl" aria-label="Group name">
+        <input data-f="words" value="${esc(g.words.join(", "))}" placeholder="subject words, comma-separated" class="gw" aria-label="Subject words, comma-separated">
+        ${gactSel(g.action, `data-f="action" aria-label="${esc(`What happens to ${g.label || "this group"}`)}"`)}<button data-pa="del-g" data-i="${i}" data-gi="${gi}" title="Remove group">×</button></div>`).join("")}
       <div class="g"><span class="gl note">Everything else</span><span class="gw note">mail that matches no group above</span>
-        ${gactSel(p.default, 'data-f="default"')}<span></span></div>
+        ${gactSel(p.default, 'data-f="default" aria-label="What happens to everything else"')}<span></span></div>
       <button data-pa="add-g" data-i="${i}">+ Add group</button>
       <span class="note">In the sample of ${p.sampled}: ${Object.entries(sampleCounts).map(([k, n]) => `${esc(k)}: ${n}`).join(" · ")}</span></div>
       <details data-i="${i}"><summary>Preview the 20 most recent emails and what each would get</summary><div class="pv"></div></details>`)}</div>`;
@@ -656,12 +661,12 @@ function renderQuarantine() {
     : `Nothing in "${d.label}". Use Clean up… > Quarantine on the Cleanup tab to hold a sender's mail here.`;
   $("#q-body").innerHTML = (d.errors || []).map((e) => `<div class="err">${esc(e.email)}: ${esc(e.error)}</div>`).join("") +
     d.senders.map((g, gi) => `<div class="qgroup"><div class="qh">
-      <label><input type="checkbox" data-group="${gi}"></label>
+      <label><input type="checkbox" data-group="${gi}" aria-label="${esc(`Select every listed email from ${g.name || g.addr}`)}"></label>
       <span class="who"><b>${esc(g.name || g.addr)}</b> <span class="note">${esc(g.addr)} · ${g.count}${d.shown < d.total ? "+" : ""} email(s)</span><br>
         ${g.accounts.map((a) => acctChip(a.id, a.email)).join("")}</span>
       <button data-qa="release" data-g="${gi}" title="Back to the inbox, and stop quarantining this sender">Release sender</button>
       <button data-qa="archive" data-g="${gi}">Archive</button><button data-qa="delete" data-g="${gi}" class="danger">Delete</button></div>` +
-      g.items.slice(0, g.open ? 1000 : 5).map((it, ii) => `<div class="qm"><input type="checkbox" data-g="${gi}" data-ii="${ii}">
+      g.items.slice(0, g.open ? 1000 : 5).map((it, ii) => `<div class="qm"><input type="checkbox" data-g="${gi}" data-ii="${ii}" aria-label="${esc(`Select: ${it.subject}`)}">
         ${acctChip(it.account, it.email)}<span class="s">${esc(it.subject)} <span class="note">${esc(it.snippet)}</span></span>
         <span class="note">${when(it.ts)}</span></div>`).join("") +
       (g.items.length > 5 && !g.open ? `<div class="qm"><span></span><span></span><a href="#" data-more="${gi}">Show all ${g.count}</a><span></span></div>` : "") +
@@ -794,7 +799,7 @@ async function loadRules() {
     d.rules.map((r) => `<tr><td><b>${esc(r.name)}</b>${r.enabled ? "" : ' <span class="note">(off)</span>'}<br>
       <span class="note">${esc(r.actions.join(", ").toLowerCase())}</span></td>` +
       d.accounts.map((a) => { const st = r.cells[a.id];
-        return `<td class="cell"><label title="Copy this rule to ${esc(a.email)}"><input type="checkbox" data-r="${esc(r.id)}" data-a="${esc(a.id)}" ${st === "off" || st === "removing" ? "" : "checked"}>
+        return `<td class="cell"><label title="Copy this rule to ${esc(a.email)}"><input type="checkbox" data-r="${esc(r.id)}" data-a="${esc(a.id)}" aria-label="${esc(`Copy ${r.name} to ${a.email}`)}" ${st === "off" || st === "removing" ? "" : "checked"}>
           ${st === "off" ? "" : `<span class="st ${st}">${st}</span>`}</label></td>`; }).join("") + "</tr>").join("") + "</tbody></table>"
     : `<div class="empty">The master account has no rules yet: create them in Inbox Zero.</div>`;
   $("#r-log").innerHTML = d.log.length ? `<div class="card"><h3>Recent sync activity</h3><ul class="ops">` +

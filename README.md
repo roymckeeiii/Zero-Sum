@@ -75,7 +75,9 @@ how many senders are analyzed, with a daily cap on AI calls to keep costs predic
 ### One unified inbox for every account
 Every account's newest mail in a single list, newest first, colour-coded by account. Read, archive and delete
 (each with undo), star, mark read/unread, search with Gmail syntax across all accounts at once (Inbox, All mail, Sent, one label, or Spam & Trash), and see which Inbox Zero rule
-handled each email. Keyboard shortcuts included: `j`/`k`, `e` archive, `s` star, `#` delete, `/` search.
+handled each email. Keyboard shortcuts included: `j`/`k`, `e` archive, `s` star, `#` delete, `/` search. Without a
+mouse, Tab reaches each message (Enter opens it, and its buttons show while it has focus), each account and each
+sender in Cleanup; fields and tick boxes are named for screen readers.
 
 ### Cross-account cleanup, one sender at a time
 A single list of **every sender across every account**, with volume, read rate and which mailboxes they hit. Click a
