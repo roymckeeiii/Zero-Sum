@@ -184,10 +184,17 @@ def gmail(account_id, path, method="GET", body=None, retry=True):
             detail = e.read()[:300].decode("utf-8", "replace")
             low = detail.lower()
             limited = e.code == 429 or (e.code == 403 and ("ratelimit" in low.replace(" ", "") or "quota exceeded" in low))
-            if (limited or e.code in (500, 503)) and attempt < 5:  # quota is per minute: back off up to a minute
+            if (limited or e.code in (500, 502, 503, 504)) and attempt < 5:  # quota is per minute: back off up to a minute
                 time.sleep(min(60, 4 * 2 ** attempt) if limited else 2 ** attempt)
                 continue
             raise RuntimeError(f"Gmail {method} {path.split('?')[0]}: {e.code} {detail}") from None
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            # no answer at all (reset, timeout, DNS): a read is simply asked again; a change is not, since Gmail may
+            # have applied it before the connection dropped, and the caller decides what to do about that
+            if method == "GET" and attempt < 5:
+                time.sleep(2 ** attempt)
+                continue
+            raise
 
 
 def gmail_list(account_id, path, key_, limit):
