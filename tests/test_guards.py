@@ -265,6 +265,17 @@ class Quarantine(World):
         cleanup.quarantine_action({"action": "delete", "sender": JUNK})   # Gmail's from: search returned b2 too
         self.assertEqual(self.trashed(), [["aaaa01"]])
 
+    def test_one_senders_action_leaves_mail_gmails_search_matched_from_other_senders(self):
+        # from:"deals@shop.com" also finds deals@shop.com.au and display names holding the address
+        self.g.found = {"labelIds=Label_Q": ["aaaa01", "ffff06", "abcd07", "eeee05"]}
+        self.db.on("SELECT id, from_addr FROM unified.msg", [("aaaa01", JUNK), ("ffff06", JUNK + ".au")])
+        self.g.meta = {"abcd07": f'"{JUNK}" <other@else.org>'}   # e5 cannot be read: unknown
+        for act in ("delete", "archive", "release"):
+            self.g.calls.clear()
+            r = cleanup.quarantine_action({"action": act, "sender": JUNK})
+            self.assertEqual([c[3]["ids"] for c in self.g.changes("batchModify")], [["aaaa01"]], act)
+            self.assertIn("3 from another sender (or sender unknown) left in Quarantine", r["results"][0]["note"], act)
+
     def test_the_sender_is_an_address_never_a_search(self):
         with self.assertRaises(ValueError):
             cleanup.quarantine_action({"action": "delete", "sender": "x@y.com OR from:alerts@bank.com"})

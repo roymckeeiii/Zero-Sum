@@ -450,9 +450,14 @@ def quarantine_action(d):
                                     "note": f"0 {QACTIONS[act]}; {refused} not in {QUARANTINE}, left alone"})
                 continue
             add = {"delete": ["TRASH"], "archive": [], "release": ["INBOX"]}[act]
-            senders, left = None, 0
+            senders, left, other = None, 0, 0
+            if act == "delete" or sender:
+                who = senders_of(a["id"], ids)
+            if sender:   # Gmail's from: search is a token match (deals@shop.com.au, display names): only mail really
+                mine = [i for i in ids if who.get(i) == sender]   # from this sender, as its group on the page shows
+                other, ids = len(ids) - len(mine), mine
             if act == "delete":  # "all", ticked messages and one sender alike: every message's real sender is
-                who = senders_of(a["id"], ids)  # looked up, and protected, own and unknown ones stay in Quarantine
+                # looked up, and protected, own and unknown ones stay in Quarantine
                 prot, own = protected_set(), own_set()
                 ok = [i for i in ids if who.get(i) and not own_address(who[i], own) and not is_protected(who[i], prot)]
                 left, ids, senders = len(ids) - len(ok), ok, {who[i] for i in ok}
@@ -462,6 +467,8 @@ def quarantine_action(d):
                 note += f"; {refused} not in {QUARANTINE}, left alone"
             if left:
                 note += f"; {left} left in {QUARANTINE} (protected sender, your own address, or sender unknown)"
+            if other:
+                note += f"; {other} from another sender (or sender unknown) left in {QUARANTINE}"
             if act == "release" and sender and remove_app_filters(a["id"], sender, kinds=("quarantine",), exact=True):
                 note += ", quarantine filter removed"
             results.append({"email": a["email"], "ok": True, "note": note})
