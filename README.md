@@ -211,7 +211,8 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
   it touched before Gmail is called. **Cleanup > Undo a bulk action** lists the last 28 days and puts a change's
   messages back where they were. Undo does not remove filters: use Keep or Reset on the sender for that. The one
   exception: mail from a sender protected since the change (or your own address) is never put back out of view, so
-  undoing a delete from Quarantine brings that mail out of Trash into the inbox instead, and the result says how many.
+  undoing a delete from Quarantine brings that mail out of Trash into the inbox instead, and the result says how many. The local history is updated
+  at once: mail that is back in the inbox shows as in the inbox, and deleted mail is read back so its sender shows up.
 - Every Clean up action and every word plan asks for confirmation with the real number of emails per account: the
   server counts them in Gmail with the same searches the action then runs (`POST /api/sender/preview`; up to
   `PREVIEW_MAX`, default 20,000, per account and step, shown as "or more" beyond that). Where the action takes mail

@@ -297,8 +297,18 @@ def undo_action(d):
         with db() as c:   # nothing (or not everything) was put back: let the person try again
             c.execute("UPDATE unified.action_log SET undone_at = NULL WHERE id = %s", (aid,))
         raise
-    try:  # Delete/Block dropped these messages from the local history: read them back so the sender shows up again
-        _store(acc, (list(ids) + held)[:5000])   # the held ones too: they are in the inbox now
+    try:
+        # rows still in the local history only skip _store, so where the mail is now is written to them directly:
+        # the held ones are in the inbox now, and so is the rest when the undo put INBOX back on (or took it off)
+        inbox = held + (ids if "INBOX" in back_add else [])
+        out = ids if "INBOX" in back_rem else []
+        with db() as c:
+            for flag, which in ((True, inbox), (False, out)):
+                for i in range(0, len(which), 5000):
+                    c.execute("UPDATE unified.msg SET inbox = %s WHERE account_id = %s AND id = ANY(%s)",
+                              (flag, acc, which[i:i + 5000]))
+        # Delete/Block dropped these messages from the local history: read them back so the sender shows up again
+        _store(acc, (list(ids) + held)[:5000])
     except Exception as e:  # noqa: BLE001 - the mail itself is restored; the collector fills the rest
         log("cleanup-error", f"undo #{aid}: history not refreshed: {e}"[:300], ACC.email(acc))
     note = (f"{len(held)} from a protected sender or your own address went back to the inbox, not to where the "
