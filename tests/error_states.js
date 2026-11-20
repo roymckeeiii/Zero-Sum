@@ -3,7 +3,7 @@
 // which fetch reports as a bare network error) gets a message that says what to do.
 "use strict";
 const { load } = require("./dom_sandbox");
-const { t: { S, loadAccounts, api }, els, pending, settle } = load(["S", "loadAccounts", "api"]);
+const { t: { S, loadAccounts, api, previewText }, els, pending, settle } = load(["S", "loadAccounts", "api", "previewText"]);
 const fail = (why) => { console.log(`ERROR-STATES FAIL ${why}`); process.exit(1); };
 (async () => {
   await settle();
@@ -30,6 +30,12 @@ const fail = (why) => { console.log(`ERROR-STATES FAIL ${why}`); process.exit(1)
   msg = "";
   try { await p4; } catch (e) { msg = e.message; }
   if (!/may still be running/.test(msg) || !/Undo/.test(msg)) fail(`a 524 is not explained: ${msg}`);
+  // the per-action limit counts the messages whose sender was not looked up too ("up to")
+  const step = { what: "delete", total: 150, unchecked: 100, capped: false, failed: false,
+    accounts: [{ email: "a@b.c", count: 150, unchecked: 100 }] };
+  if (!previewText({ steps: [step], max: 200 }).includes("at most 200 per account")) fail("limit warning ignores unchecked");
+  if (previewText({ steps: [{ ...step, unchecked: 0, accounts: [{ email: "a@b.c", count: 150, unchecked: 0 }] }], max: 200 })
+    .includes("at most")) fail("limit warning shown under the limit");
   await settle();
   console.log("ERROR-STATES OK");
   process.exit(0);

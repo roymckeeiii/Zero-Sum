@@ -362,7 +362,7 @@ function previewText(r) {
   const main = r.steps[0], kept = r.steps.find((x) => x.what === "kept and starred");
   return `In Gmail right now this touches ${stepText(main)}, in every folder and year` +
     (kept ? `; ${stepText(kept)} kept and starred.` : ".") +
-    (main.accounts.some((x) => x.count > r.max) ? ` One action handles at most ${fmt(r.max)} per account.` : "");
+    (main.accounts.some((x) => x.count + (x.unchecked || 0) > r.max) ? ` One action handles at most ${fmt(r.max)} per account.` : "");
 }
 async function runSender(s, a, b, ai) {
   const ok = await askDialog(a, s, ai);
