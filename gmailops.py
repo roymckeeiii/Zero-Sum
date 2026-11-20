@@ -234,8 +234,20 @@ def undo_action(d):
     if not row:
         raise ValueError("already undone" if seen and seen[0] else "no such action (older than %d days?)" % UNDO_DAYS)
     acc, add, rem, ids = row
+    back_add, back_rem, ids, held = list(rem), list(add), list(ids), []
+    if ids and removes_mail(back_add, back_rem):
+        # putting mail back somewhere out of view (Quarantine, after a delete from Quarantine) would be refused by
+        # _batch for a sender protected since: those messages still come out of Trash / Spam, into the inbox
+        prot, own = protected_set(), own_set()
+        with db() as c:
+            known = c.execute("SELECT id, from_addr FROM unified.msg WHERE account_id = %s AND id = ANY(%s)",
+                              (acc, ids)).fetchall()
+        mine = {i for i, frm in known if own_address(frm, own) or is_protected(frm, prot)}
+        held, ids = [i for i in ids if i in mine], [i for i in ids if i not in mine]
     try:
-        n = _batch(acc, list(ids), add=list(rem), remove=list(add), record=False)
+        n = _batch(acc, ids, add=back_add, remove=back_rem, record=False)
+        if held:
+            n += _batch(acc, held, add=["INBOX"], remove=[x for x in back_rem if x != "INBOX"], record=False)
     except Exception:
         with db() as c:   # nothing (or not everything) was put back: let the person try again
             c.execute("UPDATE unified.action_log SET undone_at = NULL WHERE id = %s", (aid,))
@@ -244,8 +256,10 @@ def undo_action(d):
         _store(acc, list(ids)[:5000])
     except Exception as e:  # noqa: BLE001 - the mail itself is restored; the collector fills the rest
         log("cleanup-error", f"undo #{aid}: history not refreshed: {e}"[:300], ACC.email(acc))
-    log("cleanup", f"undo #{aid}: {n} messages restored", ACC.email(acc))
-    return {"ok": True, "restored": n}
+    note = (f"{len(held)} from a protected sender or your own address went back to the inbox, not to where the "
+            "change had taken them from") if held else ""
+    log("cleanup", f"undo #{aid}: {n} messages restored" + (f"; {note}" if note else ""), ACC.email(acc))
+    return {"ok": True, "restored": n, **({"held": len(held), "note": note} if held else {})}
 
 
 def bulk_query(query):

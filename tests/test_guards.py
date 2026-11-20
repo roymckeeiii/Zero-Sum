@@ -201,6 +201,19 @@ class EntryPoints(World):
         self.assertEqual([c[3]["ids"] for c in self.g.changes("batchModify")], [["aa11bb"]])
         self.assertEqual(judged, [("Sale", "")])                       # the others are not even sent to the AI
 
+    def test_undoing_a_quarantine_delete_brings_a_since_protected_senders_mail_out_of_trash_too(self):
+        # Quarantine "Delete all" took the bank's mail too; the bank was protected afterwards, then Undo pressed
+        self.db.on("UPDATE unified.action_log SET undone_at = now()",
+                   [("acc1", ["TRASH"], ["Label_Q"], ["aa11bb", "aa22cc"])])
+        self.db.on("SELECT id, from_addr FROM unified.msg", [("aa11bb", JUNK), ("aa22cc", BANK)])
+        with Patched(cleanup, _store=lambda *a, **k: 0):
+            r = cleanup.undo_action({"id": 7})
+        bodies = [c[3] for c in self.g.changes("batchModify")]
+        self.assertEqual(bodies, [{"ids": ["aa11bb"], "addLabelIds": ["Label_Q"], "removeLabelIds": ["TRASH"]},
+                                  {"ids": ["aa22cc"], "addLabelIds": ["INBOX"], "removeLabelIds": ["TRASH"]}])
+        self.assertEqual((r["restored"], r["held"]), (2, 1))
+        self.assertIn("protected", r["note"])
+
     def test_batch_with_a_sender_leaves_out_mail_the_history_says_is_someone_elses(self):
         self.db.on("SELECT id, from_addr FROM unified.msg", [("m1", JUNK), ("m2", BANK), ("m3", "x@y.org")])
         self.assertEqual(cleanup._batch("acc1", ["m1", "m2", "m3", "m4"], add=["TRASH"], sender=JUNK), 2)

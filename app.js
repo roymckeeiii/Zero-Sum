@@ -396,7 +396,7 @@ $("#c-undo").onclick = async (e) => {
   const id = e.target.dataset && e.target.dataset.undo;
   if (!id || !confirm("Put these messages back where they were?")) return;
   e.target.disabled = true;
-  try { const r = await api("/api/undo", { id: Number(id) }); $("#c-result").innerHTML = `<div class="card">${fmt(r.restored)} messages restored.</div>`; }
+  try { const r = await api("/api/undo", { id: Number(id) }); $("#c-result").innerHTML = `<div class="card">${fmt(r.restored)} messages restored${r.note ? `; ${esc(r.note)}` : ""}.</div>`; }
   catch (err) { $("#c-result").innerHTML = `<div class="err">${esc(err.message)}</div>`; }
   loadUndo(); loadSenders();
 };
