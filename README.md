@@ -242,7 +242,11 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
   may have made it already. A dropped connection (reset, timeout) is asked again only for reads: a change that lost
   its connection fails, and the action says so. If a request repeated after a 500 or 503 finds its filter already
   there, and that filter was not there before the first try, it is recorded as Zero Sum's, so Protect, Keep and Reset
-  can still remove it; a matching filter made by hand is left alone.
+  can still remove it; a matching filter made by hand is left alone. The same goes for a new filter whose connection
+  dropped: the filters are listed again, and one that matches exactly and was not there before is recorded. Filters
+  for one sender are made one at a time, so two actions at once never claim each other's filter. An expired token
+  (401) is refreshed once and the request asked again, keeping track of whether an earlier try may have done the
+  work.
 - It uses its own database role (`grants.sql`): read access to a few columns of `Account`, `EmailAccount` and
   `ExecutedRule`; write access only to `Rule`, `Action`, `Newsletter` and its own `unified` schema.
 - The Inbox Zero tables, columns and enums it depends on are declared once, in `izdb.py`. `grants.sql` grants exactly

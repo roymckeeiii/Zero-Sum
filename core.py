@@ -179,15 +179,19 @@ def gmail(account_id, path, method="GET", body=None, retry=True):
                                  headers={"Authorization": f"Bearer {ACC.token(account_id, force=not retry)}",
                                           "Content-Type": "application/json"})
     maybe_applied = False   # an earlier try got an answer that does not say whether Gmail did the work
-    for attempt in range(6):
+    attempt, refreshed = 0, not retry
+    while True:
         bucket.take(_cost(method, path))
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 raw = resp.read()
                 return json.loads(raw) if raw else {}
         except urllib.error.HTTPError as e:
-            if e.code == 401 and retry:
-                return gmail(account_id, path, method, body, retry=False)
+            if e.code == 401 and not refreshed:
+                # asked again here with a fresh token, so what the earlier tries may have done (maybe_applied) is kept
+                refreshed = True
+                req.add_header("Authorization", f"Bearer {ACC.token(account_id, force=True)}")
+                continue
             detail = e.read()[:300].decode("utf-8", "replace")
             low = detail.lower()
             limited = e.code == 429 or (e.code == 403 and ("ratelimit" in low.replace(" ", "") or "quota exceeded" in low))
@@ -198,6 +202,7 @@ def gmail(account_id, path, method="GET", body=None, retry=True):
                 # a rate limit is a refusal (nothing was done); a 5xx may come after the work was done
                 maybe_applied = maybe_applied or busy
                 time.sleep(min(60, 4 * 2 ** attempt) if limited else 2 ** attempt)
+                attempt += 1
                 continue
             err = RuntimeError(f"Gmail {method} {path.split('?')[0]}: {e.code} {detail}")
             err.retried = maybe_applied   # this answer came to a repeat of a try that may have been applied
@@ -207,6 +212,7 @@ def gmail(account_id, path, method="GET", body=None, retry=True):
             # have applied it before the connection dropped, and the caller decides what to do about that
             if method == "GET" and attempt < 5:
                 time.sleep(2 ** attempt)
+                attempt += 1
                 continue
             raise
 

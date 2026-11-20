@@ -2,7 +2,7 @@
 and only those are ever removed), label changes on existing mail (_batch: recorded with the messages they touch
 before Gmail is called, refused for protected senders and own addresses), and the undo journal built from that
 record (unified.action_log)."""
-import email.utils, os, re, threading
+import email.utils, os, re, threading, urllib.error
 
 from collector import CPOOL, SKIP, _store, qs
 from core import ACC, POOL, db, gmail, gmail_list, header, label_id, log
@@ -59,7 +59,27 @@ def _filter(acc_id, addr, action, kind, keep=None, query=None, negated=None, sou
         crit["query"] = query
     if keep or negated:
         crit["negatedQuery"] = keep or negated
-    # the filters there before: a repeated POST answered "exists" may only claim one that was not among them
+    with _sender_lock(acc_id, addr):   # one at a time per sender: another action's new filter is not claimed here
+        return _create_filter(acc_id, addr, action, kind, crit, source)
+
+
+_filter_locks, _filter_locks_guard = {}, threading.Lock()
+
+
+def _sender_lock(acc_id, addr):
+    with _filter_locks_guard:
+        return _filter_locks.setdefault((acc_id, (addr or "").lower()), threading.Lock())
+
+
+def _claim_new(acc_id, before, crit, action):
+    """The filter matching `crit` -> `action` exactly that was not there before the POST, or None."""
+    return next((x for x in gmail(acc_id, "/settings/filters").get("filter", [])
+                 if x.get("id") not in before and (x.get("criteria") or {}) == crit
+                 and _same_action(x.get("action") or {}, action)), None)
+
+
+def _create_filter(acc_id, addr, action, kind, crit, source):
+    # the filters there before: a POST whose outcome is unknown may only claim one that was not among them
     before = {x.get("id") for x in gmail(acc_id, "/settings/filters").get("filter", [])}
     try:
         f = gmail(acc_id, "/settings/filters", "POST", {"criteria": crit, "action": action})
@@ -71,9 +91,16 @@ def _filter(acc_id, addr, action, kind, keep=None, query=None, negated=None, sou
         # "exists" answered a repeat of this request: the first try may have made it before its answer was lost. A
         # matching filter that was not there before the POST is this app's, so it is found and recorded like any other
         # (else Protect, Keep and Reset could never remove it); one that was there before is left alone
-        f = next((x for x in gmail(acc_id, "/settings/filters").get("filter", [])
-                  if x.get("id") not in before and (x.get("criteria") or {}) == crit
-                  and _same_action(x.get("action") or {}, action)), None)
+        f = _claim_new(acc_id, before, crit, action)
+    except (urllib.error.URLError, TimeoutError, ConnectionError):
+        # no answer at all: Gmail may have made the filter before the connection dropped. Look, and record it if so
+        # (a new filter matching exactly); if it is not there, nothing was made and the error stands
+        try:
+            f = _claim_new(acc_id, before, crit, action)
+        except Exception:  # noqa: BLE001 - cannot look now: report the original error
+            f = None
+        if not f:
+            raise
     fid = (f or {}).get("id")
     if not fid:
         return None

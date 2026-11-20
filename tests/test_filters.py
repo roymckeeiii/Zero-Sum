@@ -101,6 +101,67 @@ class Recorded(World):
         self.assertEqual(self.live(), ["H1"])
 
 
+class Dropped(World):
+    """The POST that makes a filter gets no answer at all (reset, timeout): Gmail may have made it."""
+
+    def dropping(self, made):
+        real = self.g
+
+        def gmail(acc, path, method="GET", body=None, retry=True):
+            if path == "/settings/filters" and method == "POST":
+                if made:
+                    real(acc, path, method, body)
+                raise TimeoutError("read timed out")
+            return real(acc, path, method, body)
+        return Patched(cleanup, gmail=gmail)
+
+    def test_a_filter_made_before_the_connection_dropped_is_recorded(self):
+        with self.dropping(made=True):
+            fid = cleanup._filter("acc1", S, cleanup.TRASH_FILTER, "trash")
+        self.assertEqual(fid, "F1")
+        self.assertEqual([(f[1], f[2], f[3]) for f in self.db.filters], [("F1", S, "trash")])
+        self.assertEqual(cleanup.remove_app_filters("acc1", S), 1)   # so Protect, Keep and Reset can remove it
+        self.assertEqual(self.live(), [])
+
+    def test_nothing_made_means_the_error_stands_and_nothing_is_recorded(self):
+        with self.dropping(made=False), self.assertRaises(TimeoutError):
+            cleanup._filter("acc1", S, cleanup.TRASH_FILTER, "trash")
+        self.assertEqual(self.db.filters, [])
+
+    def test_a_matching_filter_that_was_there_before_is_not_claimed(self):
+        self.g.filters["acc1"] = [dict(HAND_MADE)]
+        with self.dropping(made=False), self.assertRaises(TimeoutError):
+            cleanup._filter("acc1", S, cleanup.TRASH_FILTER, "trash")
+        self.assertEqual(self.db.filters, [])
+
+    def test_a_filter_with_other_criteria_is_not_claimed(self):
+        real = self.g
+
+        def gmail(acc, path, method="GET", body=None, retry=True):
+            if path == "/settings/filters" and method == "POST":   # someone else's filter appears meanwhile
+                real(acc, path, method, {"criteria": {"from": S, "query": "x"}, "action": body["action"]})
+                raise ConnectionResetError()
+            return real(acc, path, method, body)
+        with Patched(cleanup, gmail=gmail), self.assertRaises(ConnectionResetError):
+            cleanup._filter("acc1", S, cleanup.TRASH_FILTER, "trash")
+        self.assertEqual(self.db.filters, [])
+
+
+class OneAtATime(World):
+    def test_filters_for_one_sender_are_made_one_at_a_time(self):
+        import gmailops
+        real, held = self.g, []
+
+        def gmail(acc, path, method="GET", body=None, retry=True):
+            if method == "POST":
+                held.append((gmailops._sender_lock(acc, S.upper()).locked(),
+                             gmailops._sender_lock(acc, "other@x.com").locked()))
+            return real(acc, path, method, body)
+        with Patched(cleanup, gmail=gmail):
+            cleanup._filter("acc1", S, cleanup.TRASH_FILTER, "trash")
+        self.assertEqual(held, [(True, False)])
+
+
 class Removed(World):
     def setUp(self):
         super().setUp()

@@ -18,6 +18,9 @@ class Token:
 
 
 class Retry(unittest.TestCase):
+    def setUp(self):
+        core._buckets.pop("acc-retry", None)   # a full quota bucket each time: its waits would show in `slept`
+
     def call(self, answers, method="GET", path="/labels/INBOX"):
         """core.gmail with urlopen answering from `answers` in turn (an exception, or a JSON reply)."""
         seen, slept = [], []
@@ -60,6 +63,38 @@ class Retry(unittest.TestCase):
         out, _, _ = self.call([self.http(503), urllib.error.HTTPError("u", 400, "x", {}, io.BytesIO(b"exists"))],
                               method="POST", path="/settings/filters")
         self.assertTrue(out.retried)
+
+    def test_a_401_during_the_back_off_keeps_the_repeat_mark(self):
+        # 500 may mean the filter was made; the repeat meets an expired token, is asked again with a fresh one and
+        # gets "exists": that must still say it answered a repeat, so the filter is claimed
+        tokens = []
+
+        class Fresh:
+            def token(self, account_id, force=False):
+                tokens.append(force)
+                return "tok2" if force else "tok"
+        auth = []
+
+        def urlopen(req, timeout=None):
+            auth.append(req.get_header("Authorization"))
+            a = answers.pop(0)
+            if isinstance(a, Exception):
+                raise a
+            return io.BytesIO(a.encode())
+        answers = [self.http(500), self.http(401), urllib.error.HTTPError("u", 400, "x", {}, io.BytesIO(b"exists"))]
+        with Patched(core.urllib.request, urlopen=urlopen), Patched(core.time, sleep=lambda s: None), \
+                Patched(core, ACC=Fresh()):
+            with self.assertRaises(RuntimeError) as cm:
+                core.gmail("acc-401", "/settings/filters", "POST", {})
+        self.assertTrue(cm.exception.retried)
+        self.assertEqual(auth, ["Bearer tok", "Bearer tok", "Bearer tok2"])
+        self.assertEqual(tokens, [False, True])
+
+    def test_a_second_401_is_not_asked_again(self):
+        out, seen, _ = self.call([self.http(401), self.http(401), '{"ok": 1}'])
+        self.assertIsInstance(out, RuntimeError)
+        self.assertIn("401", str(out))
+        self.assertEqual(len(seen), 2)
 
     def test_an_error_after_a_rate_limit_is_not_marked_as_a_repeat(self):
         # 429 and a 403 rate limit are refusals: Gmail did nothing, so "exists" on the next try is not this app's
