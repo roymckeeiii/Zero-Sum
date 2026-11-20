@@ -30,6 +30,15 @@ class PhoneCleanup(unittest.TestCase):
             self.assertIn(f'data-k="{k}"', js)
 
 
+class PhoneAiPlans(unittest.TestCase):
+    def test_plan_group_rows_fit_a_narrow_card(self):
+        # plain 1fr columns keep their inputs' minimum width, so at 390 px the row ran past the card's edge
+        m = re.search(r"@media \(max-width: 900px\) \{ \.plan \.g \{([^}]*)\}(.*?)\}\n", read("index.html"))
+        self.assertTrue(m, "no narrow layout for plan groups")
+        self.assertIn("grid-template-columns:minmax(0,1fr) minmax(0,1fr);", m.group(1))
+        self.assertIn(".plan .g > * { min-width:0; }", m.group(2))
+
+
 class PhoneOtherTabs(unittest.TestCase):
     """At 390 and 320 px: peek and Quarantine rows give the subject its own line, the Quarantine toolbar is two even
     columns, Analytics' By account table becomes named numbers per account, and the reader's buttons are compact."""
