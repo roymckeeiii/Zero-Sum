@@ -364,11 +364,13 @@ class Undo(unittest.TestCase):
         cleanup.gmail = lambda acc, path, method="GET", body=None: self.calls.append((path, body)) or {}
         cleanup._store, cleanup.log = (lambda *a, **k: 0), (lambda *a, **k: None)
         self.old_list, cleanup.gmail_list = cleanup.gmail_list, lambda *a, **k: []
+        self.old_bg, cleanup._background = cleanup._background, lambda fn, *a: None   # no read-back after the test
 
     def tearDown(self):
         cleanup.db, cleanup.gmail, cleanup._store, cleanup.log = self.old
         cleanup.gmail_list = self.old_list
         cleanup.ACC = self.old_acc
+        cleanup._background = self.old_bg
 
     def test_a_bulk_change_is_recorded_before_gmail_is_called(self):
         cleanup._ACTION.note = "block deals@shop.com"

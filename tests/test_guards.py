@@ -549,6 +549,18 @@ class Background(unittest.TestCase):
         self.assertEqual(used, [])
         self.assertEqual(gmailops.BACKGROUND._max_workers, 2)
 
+    def test_whatever_a_background_job_raises_is_logged(self):
+        import gmailops
+        logged = []
+
+        def job():
+            raise LookupError("account gone")
+        with Patched(gmailops, log=lambda *a, **k: logged.append(a)):
+            gmailops._background(job).result(5)
+        self.assertEqual(len(logged), 1)
+        self.assertEqual(logged[0][0], "cleanup-error")
+        self.assertIn("account gone", logged[0][1])
+
 
 if __name__ == "__main__":
     unittest.main()

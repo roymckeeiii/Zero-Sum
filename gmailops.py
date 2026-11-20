@@ -2,7 +2,7 @@
 and only those are ever removed), label changes on existing mail (_batch: recorded with the messages they touch
 before Gmail is called, refused for protected senders and own addresses), and the undo journal built from that
 record (unified.action_log)."""
-import contextlib, email.utils, os, re, threading, time, urllib.error
+import contextlib, email.utils, os, re, threading, time, traceback, urllib.error
 from concurrent.futures import ThreadPoolExecutor
 
 from collector import CPOOL, SKIP, _store, qs
@@ -439,8 +439,17 @@ BACKGROUND = ThreadPoolExecutor(max_workers=2, thread_name_prefix="background")
 
 
 def _background(fn, *args):
-    """Run fn(*args) on the background threads, after the current request has answered."""
-    return BACKGROUND.submit(fn, *args)
+    """Run fn(*args) on the background threads, after the current request has answered. Nobody waits for the
+    result, so anything it raises (even from its own last log line) is logged here instead of vanishing."""
+    def job():
+        try:
+            fn(*args)
+        except Exception as e:  # noqa: BLE001
+            try:
+                log("cleanup-error", f"background {getattr(fn, '__name__', 'job')} failed: {e}"[:300])
+            except Exception:  # noqa: BLE001 - logging itself failed: at least the container log has it
+                traceback.print_exc()
+    return BACKGROUND.submit(job)
 
 
 def _undo_read_back(aid, acc, check, rest):
