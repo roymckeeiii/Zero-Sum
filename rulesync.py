@@ -19,9 +19,13 @@
   "adopted" backup) is put back as it was from unified.rule_backup ("restore"), or, with no backup, left in place and
   no longer managed ("detach"). Only copies this app created are deleted, and only
     - on "Sync now", for the deletes the user confirmed after seeing them (confirm=[op["key"], ...]);
-    - by the automatic sync, at most AUTO_MAX_DELETES per run; the rest wait ("held") and are logged.
-  When MASTER_EMAIL names another account than the last sync ran for, every copy looks orphaned: no copy is removed
-  until a "Sync now" confirms the change ("master-change" in confirm).
+    - by the automatic sync, at most AUTO_MAX_DELETES in total until someone runs "Sync now" (counted across runs in
+      unified.settings), and none in a run that would go over; the rest wait ("held") and are logged.
+  When the master looks like another account than the last sync ran for (another MASTER_EMAIL, the same e-mail under a
+  new Inbox Zero account id, or every master rule the copies came from gone at once), every copy looks orphaned: no
+  copy is removed until a "Sync now" confirms the change ("master-change" in confirm).
+- A copy is saved in unified.rule_backup before it is deleted, and before an update when it was changed in that
+  account since it was synced.
 - Actions that send mail or data out of the account (FORWARD, SEND_EMAIL, REPLY, CALL_WEBHOOK, and any action type not
   known to stay inside the account) carry the master's destinations. The Rules tab shows where each one goes, and a
   rule with any of them is copied to an account only after that is allowed for it separately
@@ -46,9 +50,15 @@ LOCAL_ACTION_TYPES = {"LABEL", "ARCHIVE", "MARK_READ", "MARK_SPAM", "DRAFT_EMAIL
                       "TRACK_THREAD"}
 OUTBOUND_ACTION_TYPES = {"FORWARD", "SEND_EMAIL", "REPLY", "CALL_WEBHOOK"}   # the known ones, described by name
 LOCK = threading.Lock()
-# Most copies the automatic sync deletes in one run; more wait for "Sync now". DEFAULT - Roy may change: 3
+# Most copies the automatic sync deletes, in total, until someone runs "Sync now" (not per run); a run that would
+# delete more than is left deletes none, and they wait for "Sync now". DEFAULT - Roy may change: 3
 AUTO_MAX_DELETES = int(os.environ.get("RULES_AUTO_MAX_DELETES", "3"))
 MASTER_KEY = "rules_master"   # unified.settings: the master account's e-mail the last confirmed sync ran for
+MASTER_ID_KEY = "rules_master_id"   # and its Inbox Zero account id (re-linking the same e-mail gives a new one)
+AUTO_USED_KEY = "rules_auto_deleted"   # copies the automatic sync deleted since someone last ran Sync now
+
+
+NOW = "now() AT TIME ZONE 'UTC'"   # Inbox Zero (Prisma) keeps "updatedAt" as UTC in a timestamp without time zone
 
 
 def q(col):
@@ -205,13 +215,19 @@ def set_include(d):
     return {"ok": True}
 
 
-def _backup_rule(c, target_id, account_id, reason):
-    """Save a target rule and its actions, every column as it is now, before it is overwritten."""
+def _backup_rule(c, target_id, account_id, reason, edited_since=None):
+    """Save a target rule and its actions, every column as it is now, before it is overwritten. With edited_since (a
+    master rule id), only when the rule was changed after its copy was last synced (Rule."updatedAt", which Inbox
+    Zero keeps in UTC, against rule_map.synced_at)."""
+    since = ""
+    if edited_since is not None:
+        since = (' AND r."updatedAt" > (SELECT m.synced_at AT TIME ZONE \'UTC\' FROM unified.rule_map m WHERE '
+                 'm.master_rule_id = %s AND m.account_id = %s)')
     c.execute('INSERT INTO unified.rule_backup (account_id, rule_id, reason, rule, actions) '
               'SELECT r."emailAccountId", r.id, %s, to_jsonb(r), '
               '(SELECT coalesce(jsonb_agg(to_jsonb(a) ORDER BY a."createdAt", a.id), \'[]\'::jsonb) FROM "Action" a '
-              'WHERE a."ruleId" = r.id) FROM "Rule" r WHERE r.id = %s AND r."emailAccountId" = %s',
-              (reason, target_id, account_id))
+              'WHERE a."ruleId" = r.id) FROM "Rule" r WHERE r.id = %s AND r."emailAccountId" = %s' + since,
+              (reason, target_id, account_id, *((edited_since, account_id) if since else ())))
 
 
 def _write_rule(c, target_id, account_id, rule, actions, insert, lids, action_account=None):
@@ -223,10 +239,10 @@ def _write_rule(c, target_id, account_id, rule, actions, insert, lids, action_ac
     casts = [f'%s::"{ENUM[f]}"' if f in ENUM else "%s" for f in cols]
     if insert:
         c.execute(f'INSERT INTO "Rule" (id, "updatedAt", "emailAccountId", {", ".join(q(f) for f in cols)}) '
-                  f'VALUES (%s, now(), %s, {", ".join(casts)})', [target_id, account_id, *vals])
+                  f'VALUES (%s, {NOW}, %s, {", ".join(casts)})', [target_id, account_id, *vals])
     else:
         sets = ", ".join(f"{q(f)} = {cast}" for f, cast in zip(cols, casts))
-        c.execute(f'UPDATE "Rule" SET {sets}, "updatedAt" = now() WHERE id = %s AND "emailAccountId" = %s',
+        c.execute(f'UPDATE "Rule" SET {sets}, "updatedAt" = {NOW} WHERE id = %s AND "emailAccountId" = %s',
                   [*vals, target_id, account_id])
     c.execute('DELETE FROM "Action" WHERE "ruleId" = %s', (target_id,))
     if action_account is None:
@@ -239,15 +255,41 @@ def _write_rule(c, target_id, account_id, rule, actions, insert, lids, action_ac
             lid = a["labelId"]
         else:
             lid = lids[a["label"]] if a["type"] == "LABEL" and a.get("label") else None
-        c.execute(f'INSERT INTO "Action" (id, "updatedAt", {cols}) VALUES (%s, now(), %s, {"%s, " * len(extra)}%s, '
+        c.execute(f'INSERT INTO "Action" (id, "updatedAt", {cols}) VALUES (%s, {NOW}, %s, {"%s, " * len(extra)}%s, '
                   f"{acasts})", [new_id(), target_id, *([account_id] if extra else []), lid,
                                  *[a[f] for f in ACTION_FIELDS]])
+
+
+def _setting(c, k):
+    row = c.execute("SELECT v FROM unified.settings WHERE k = %s", (k,)).fetchone()
+    return row[0] if row else None
+
+
+def _put(c, k, v):
+    c.execute("INSERT INTO unified.settings (k, v) VALUES (%s, %s) ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v",
+              (k, str(v)))
+
+
+def _master_change(prev, prev_id, master, mapped, mrules):
+    """Why the copies may belong to another master than the one linked now (None when they do not):
+    another e-mail, the same e-mail under a new Inbox Zero account id (re-linked), or every master rule the copies
+    were made from gone at once (rules reset or recreated)."""
+    if prev and prev != master["email"].lower():
+        return f"MASTER_EMAIL changed from {prev} to {master['email']}"
+    if prev_id and prev_id != master["id"]:
+        return f"the master account {master['email']} was linked again in Inbox Zero (it has a new account id)"
+    if len(mapped) >= 2 and not mapped & set(mrules):
+        return (f"none of the {len(mapped)} master rules the copies were made from exist any more (were the master's "
+                "rules reset or recreated?)")
+    return None
 
 
 def sync(apply=True, only_account=None, confirm=None, auto=False):
     """Plan (apply=False) or run the sync. Returns {"ops", "applied", "masterChanged"}.
     confirm: the delete keys (op["key"]) the user saw and confirmed, plus "master-change" to accept a new master.
-    auto: the background run, which may delete up to AUTO_MAX_DELETES copies without confirmation."""
+    auto: the background run. It may delete copies without confirmation only while the automatic runs together have
+    deleted fewer than AUTO_MAX_DELETES since the last Sync now (unified.settings rules_auto_deleted), and only when
+    every delete it plans fits in what is left; otherwise every delete waits for Sync now."""
     master = ACC.master()
     if not master:
         raise PermissionError("master account not linked in Inbox Zero")
@@ -258,22 +300,47 @@ def sync(apply=True, only_account=None, confirm=None, auto=False):
             mrules = load_rules(c, master["id"])
             incl = set(c.execute("SELECT master_rule_id, account_id FROM unified.rule_include").fetchall())
             out_ok = _outbound_allowed(c)
-            row = c.execute("SELECT v FROM unified.settings WHERE k = %s", (MASTER_KEY,)).fetchone()
-        prev = row[0] if row else None
-        changed = bool(prev) and prev != master["email"].lower()
-        allow = {"keys": confirm, "budget": AUTO_MAX_DELETES if auto else 0, "outbound": out_ok,
-                 "removals": not changed or (not auto and "master-change" in confirm)}
-        for acc in [a for a in ACC.list() if not a["master"] and (not only_account or a["id"] == only_account)]:
+            mapped = {m for m, in c.execute("SELECT DISTINCT master_rule_id FROM unified.rule_map").fetchall()}
+            prev, prev_id = _setting(c, MASTER_KEY), _setting(c, MASTER_ID_KEY)
+            used = int(_setting(c, AUTO_USED_KEY) or 0)
+        why = _master_change(prev, prev_id, master, mapped, mrules)
+        accounts = [a for a in ACC.list() if not a["master"] and (not only_account or a["id"] == only_account)]
+        allow = {"keys": confirm, "budget": 0, "outbound": out_ok, "changed": why,
+                 "removals": not why or (not auto and "master-change" in confirm)}
+        if auto and apply and allow["removals"]:
+            left = max(0, AUTO_MAX_DELETES - used)
+            planned = 0
+            for acc in accounts:   # look first: a run that would delete more than is left deletes nothing
+                try:
+                    planned += sum(o["op"] == "delete" for o in _sync_account(master, acc, mrules, incl, False, allow))
+                except Exception:  # noqa: BLE001 - reported by the real pass below
+                    pass
+            allow["budget"] = left if planned <= left else 0
+            allow["used"] = used
+        budget = allow["budget"]
+        for acc in accounts:
             try:
                 ops += _sync_account(master, acc, mrules, incl, apply, allow)
             except Exception as e:  # noqa: BLE001 - one account must not stop the others
                 ops.append({"op": "error", "account": acc["email"], "rule": "", "detail": str(e)[:300]})
                 log("rules-error", str(e)[:500], acc["email"])
-        if apply and allow["removals"] and prev != master["email"].lower():
-            with db() as c:   # remember whose rules these copies are, so a later MASTER_EMAIL change is noticed
-                c.execute("INSERT INTO unified.settings (k, v) VALUES (%s, %s) ON CONFLICT (k) DO UPDATE SET v = "
-                          "EXCLUDED.v", (MASTER_KEY, master["email"].lower()))
-        return {"ops": ops, "applied": apply, "masterChanged": {"from": prev, "to": master["email"]} if changed else None}
+        if apply:
+            put = []
+            if allow["removals"]:   # remember whose rules these copies are, so a later change is noticed
+                if prev != master["email"].lower():
+                    put.append((MASTER_KEY, master["email"].lower()))
+                if prev_id != master["id"]:
+                    put.append((MASTER_ID_KEY, master["id"]))
+            if auto and budget - allow["budget"]:
+                put.append((AUTO_USED_KEY, used + budget - allow["budget"]))
+            elif not auto and used and not any(o["op"] == "held" for o in ops):
+                put.append((AUTO_USED_KEY, 0))   # someone ran Sync now and nothing is left waiting
+            if put:
+                with db() as c:
+                    for k, v in put:
+                        _put(c, k, v)
+        return {"ops": ops, "applied": apply,
+                "masterChanged": {"from": prev, "to": master["email"], "detail": why} if why else None}
 
 
 def _adopted_backups(c, account_id):
@@ -379,17 +446,20 @@ def _sync_account(master, acc, mrules, incl, apply, allow=None):
         if op == "delete":
             o["key"] = f"{acc['id']}:{target}"
         if apply and not allow["removals"]:
-            o = {**o, "op": "held", "detail": f"{op} waits: MASTER_EMAIL changed since the last sync; confirm with Sync now"}
+            o = {**o, "op": "held", "detail": f"{op} waits: {allow.get('changed') or 'the master changed'}; "
+                                              "confirm with Sync now"}
         elif apply and op == "delete":
             if o["key"] in allow["keys"]:
                 pass
             elif allow["budget"] > 0:
                 allow["budget"] -= 1
             else:
-                o = {**o, "op": "held", "detail": f"delete waits for confirmation (Sync now); {why}"}
+                o = {**o, "op": "held", "detail": f"delete waits for confirmation (Sync now); {why}" + (
+                    f" (the automatic sync deletes at most {AUTO_MAX_DELETES} copies between two Sync now)"
+                    if "used" in allow else "")}
         ops.append(o)
         if o["op"] != "held":
-            removals.append((o["op"], mid, target, b))
+            removals.append((o["op"], mid, target, b, why))
     if apply:
         for o in ops:
             if o["op"] == "held":
@@ -409,14 +479,18 @@ def _sync_account(master, acc, mrules, incl, apply, allow=None):
                 _backup_rule(c, target, acc["id"], f"adopted as a copy of master rule {r['name']}"[:200])
             elif op == "stop-sending":
                 _backup_rule(c, target, acc["id"], "before its sending actions were removed (sending not allowed)")
+            elif op == "update":   # a copy someone changed in that account since it was synced: keep their version
+                _backup_rule(c, target, acc["id"], "changed in this account since the last sync; overwritten by the "
+                             "master's version", edited_since=mid)
             _write_rule(c, target, acc["id"], r, actions, insert=(op == "create"), lids=lids,
                         action_account=action_account)
             c.execute("INSERT INTO unified.rule_map (master_rule_id, account_id, target_rule_id, hash, synced_at, "
                       "adopted) VALUES (%s, %s, %s, %s, now(), %s) ON CONFLICT (master_rule_id, account_id) DO UPDATE "
                       "SET target_rule_id = EXCLUDED.target_rule_id, hash = EXCLUDED.hash, synced_at = now(), "
                       "adopted = EXCLUDED.adopted", (mid, acc["id"], target, h, adopted))
-        for op, mid, target, b in removals:
-            if op == "delete":
+        for op, mid, target, b, why in removals:
+            if op == "delete":   # kept in the backups, so it can be put back from the Rules tab
+                _backup_rule(c, target, acc["id"], f"deleted: {why}"[:200])
                 c.execute('DELETE FROM "Rule" WHERE id = %s AND "emailAccountId" = %s', (target, acc["id"]))
             elif op == "restore":
                 _restore(c, acc["id"], target, b[1], b[2], True, f"replaced by its pre-sync version (backup {b[0]})",

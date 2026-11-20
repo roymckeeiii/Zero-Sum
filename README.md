@@ -263,9 +263,13 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
 - Removing a copy (unticked, or its master rule deleted) never deletes a rule the account had before: an adopted rule is
   put back as it was from its backup, or, with no backup, left as it is and no longer managed. Only copies Zero Sum
   created are deleted, and only after you confirm them: "Sync now" lists every delete first. The automatic sync
-  deletes at most `RULES_AUTO_MAX_DELETES` (default 3) copies per run; the rest wait for "Sync now" and are logged.
-  When `MASTER_EMAIL` names another account than the last sync, nothing is removed until "Sync now" confirms the
-  change. Every saved rule can be put back from "Saved rules" on the Rules tab.
+  deletes at most `RULES_AUTO_MAX_DELETES` (default 3) copies in total until someone runs "Sync now" (the count is
+  kept across runs), and none at all in a run that would go over; the rest wait for "Sync now" and are logged.
+  When the master looks like another account than at the last sync (`MASTER_EMAIL` changed, the same address linked
+  again in Inbox Zero under a new account id, or every master rule the copies came from gone at once), nothing is
+  removed until "Sync now" confirms the change. A copy is saved in "Saved rules" before it is deleted, and before an
+  update when someone had changed it in that account. Every saved rule can be put back from "Saved rules" on the
+  Rules tab.
 - A rule that forwards, sends or replies by email, or calls a webhook, would do that from every account it is copied
   to, with the master's destinations. Any action type Zero Sum does not know to stay inside the account is treated
   the same way. The Rules tab shows each destination, and such a rule is copied to an account only after you tick
@@ -331,7 +335,7 @@ All settings are environment variables; see [`.env.example`](.env.example).
 | `ADMIN_DATABASE_URL` | | only for `init-db` |
 | `PORT` | `8080` | inside the container |
 | `COLLECT_EVERY_MIN`, `RULES_EVERY_MIN` | `15`, `10` | background jobs |
-| `RULES_AUTO_MAX_DELETES` | `3` | most rule copies the automatic sync deletes in one run; the rest wait for "Sync now" |
+| `RULES_AUTO_MAX_DELETES` | `3` | most rule copies the automatic sync deletes between two "Sync now" (counted across runs); the rest wait for "Sync now" |
 | `BACKFILL_DAYS`, `BACKFILL_STEP` | `0` (all history), `2000` | how far back the collector reads (days; 0 = to the account's first email), and how much per run per account |
 | `MAX_BULK` | `200000` | most emails one bulk action touches per account |
 | `OPENROUTER_API_KEY`, `AI_MODEL`, `AI_BASE_URL` | empty, `anthropic/claude-haiku-5.5`, OpenRouter | all AI features: AI Cleanup, AI sort, AI suggest, background analyst (off without a key; the background analyst is also off until turned on in AI Cleanup) |

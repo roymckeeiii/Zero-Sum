@@ -849,7 +849,7 @@ $("#r-backups").onclick = async (e) => {
 function showOps(res) {
   const ops = res.ops.filter((o) => o.op !== "same");
   $("#r-ops").innerHTML = `<div class="card"><h3>${res.applied ? "Synced" : "Preview"}: ${ops.length ? `${ops.length} change(s)` : "everything is up to date"}</h3>` +
-    (res.masterChanged ? `<div class="err">MASTER_EMAIL changed from ${esc(res.masterChanged.from)} to ${esc(res.masterChanged.to)}: copies of the old master's rules are only removed after you confirm with Sync now.</div>` : "") +
+    (res.masterChanged ? `<div class="err">${esc(res.masterChanged.detail || `MASTER_EMAIL changed from ${res.masterChanged.from} to ${res.masterChanged.to}`)}: copies of the old master's rules are only removed after you confirm with Sync now.</div>` : "") +
     (ops.length ? `<ul class="ops">` + ops.map((o) => `<li class="${o.op === "error" ? "err" : ""}"><b>${esc(OPS[o.op] || o.op)}</b> ${esc(o.rule)}
       <span class="note">on ${esc(o.account)}${o.detail ? ` · ${esc(o.detail)}` : ""}</span></li>`).join("") + "</ul>" : "") + "</div>";
 }
@@ -860,7 +860,7 @@ $("#r-sync").onclick = async (e) => { e.target.disabled = true;
     const plan = await api("/api/rules/preview"), dels = plan.ops.filter((o) => o.op === "delete");
     const confirmed = dels.map((o) => o.key);
     if (plan.masterChanged) confirmed.push("master-change");
-    const ask = (plan.masterChanged ? `MASTER_EMAIL changed from ${plan.masterChanged.from} to ${plan.masterChanged.to}. Copies made from the old master's rules will be removed.\n\n` : "") +
+    const ask = (plan.masterChanged ? `${plan.masterChanged.detail || `MASTER_EMAIL changed from ${plan.masterChanged.from} to ${plan.masterChanged.to}`}. Copies made from the old master's rules will be removed.\n\n` : "") +
       (dels.length ? `Delete ${dels.length} rule(s) that sync made?\n\n${dels.map((o) => `• ${o.rule} on ${o.account} (${o.detail})`).join("\n")}\n\nRules an account had before sync are put back, never deleted.` : "Continue?");
     if ((dels.length || plan.masterChanged) && !confirm(ask)) { showOps(plan); return; }
     showOps(await api("/api/rules/sync", { confirm: confirmed }));

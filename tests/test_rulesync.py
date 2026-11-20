@@ -43,6 +43,7 @@ class World(unittest.TestCase):
             (b[0], b[2], b[4], b[5]) for b in sorted(self.backup, reverse=True)
             if b[1] == p[0] and b[3].startswith("adopted")])
         self.db.on("FROM unified.settings", lambda p: [(self.settings[p[0]],)] if p[0] in self.settings else [])
+        self.db.on("SELECT DISTINCT master_rule_id FROM unified.rule_map", lambda p: sorted({(e[0],) for e in self.map}))
         self.db.on("FROM unified.rule_include", lambda p: sorted(self.include))
         # (master rule, account) where forward / send / reply / webhook may be copied: OK'd for the destinations the
         # master rule has now, unless ok_keys names the destinations the OK was given for
@@ -117,7 +118,7 @@ class Sync(World):
         self.assertEqual((self.ops(res), res["applied"]), ([("create", "two@x.com", "Receipts")], False))
         self.assertEqual((self.writes(), self.events, self.db.commits), ([], [], 0))
 
-    def test_an_unchanged_copy_is_left_alone_and_a_changed_one_is_updated_without_backup(self):
+    def test_an_unchanged_copy_is_left_alone_and_a_changed_one_is_updated(self):
         self.rules["acc2"] = [rule("t1", "Receipts")]
         self.map = [("m1", "acc2", "t1", self.digest())]
         self.assertEqual(rulesync.sync()["ops"], [])
@@ -126,7 +127,19 @@ class Sync(World):
         self.assertEqual(self.ops(rulesync.sync()), [("update", "two@x.com", "Receipts")])
         upd = self.db.said('UPDATE "Rule"')[0]
         self.assertEqual(upd[1][-2:], ["t1", "acc2"])
-        self.assertFalse(self.db.said("INSERT INTO unified.rule_backup"))        # its own copy: no backup needed
+
+    def test_an_update_saves_the_copy_first_only_when_it_was_changed_in_that_account(self):
+        self.rules["acc2"] = [rule("t1", "Receipts")]
+        self.map = [("m1", "acc2", "t1", "old")]
+        rulesync.sync()
+        w = [s for s, _ in self.writes()]
+        self.assertIn("INSERT INTO unified.rule_backup", w[0])                   # before the overwrite
+        self.assertIn('UPDATE "Rule"', w[1])
+        sql, params = self.db.said("INSERT INTO unified.rule_backup")[0]
+        # only a copy edited after it was synced (Inbox Zero keeps updatedAt in UTC) is saved, not every update
+        self.assertIn('r."updatedAt" > (SELECT m.synced_at AT TIME ZONE \'UTC\' FROM unified.rule_map m', sql)
+        self.assertEqual(params[1:], ("t1", "acc2", "m1", "acc2"))
+        self.assertIn("now() AT TIME ZONE 'UTC'", self.db.said('UPDATE "Rule"')[0][0])  # and so is ours
 
     def test_adopting_a_pre_existing_rule_saves_it_first(self):
         self.rules["acc2"] = [rule("old1", "Receipts", instructions="hand-written before the sync")]
@@ -280,16 +293,78 @@ class Removals(World):
         rulesync.sync()
         self.assertIs(self.db.said("INSERT INTO unified.rule_map")[0][1][-1], True)
 
-    def test_the_automatic_sync_deletes_at_most_the_cap_and_holds_the_rest(self):
+    def keep_settings(self):
+        def put(p):
+            self.settings[p[0]] = p[1]
+            return []
+        self.db.on("INSERT INTO unified.settings", put)
+
+    def test_the_automatic_sync_deletes_nothing_when_it_would_delete_more_than_the_cap(self):
         n = rulesync.AUTO_MAX_DELETES + 2
-        self.rules["acc1"] = []
+        self.rules["acc1"] = [rule("keep", "Kept")]
         self.rules["acc2"] = [rule(f"t{i}", f"R{i}") for i in range(n)]
-        self.map = [(f"m{i}", "acc2", f"t{i}", "h") for i in range(n)]
+        self.map = [(f"m{i}", "acc2", f"t{i}", "h") for i in range(n)] + [("keep", "acc2", "tk", "h")]
         res = rulesync.sync(auto=True)
         self.assertEqual(rulesync.AUTO_MAX_DELETES, 3)
-        self.assertEqual(len(self.db.said('DELETE FROM "Rule"')), 3)
-        self.assertEqual([o["op"] for o in res["ops"]].count("held"), 2)
-        self.assertEqual([k for k, _, _ in self.logged].count("rules-pending"), 2)
+        self.assertFalse(self.db.said('DELETE FROM "Rule"'))
+        self.assertEqual([o["op"] for o in res["ops"]].count("held"), n)
+        self.assertEqual([k for k, _, _ in self.logged].count("rules-pending"), n)
+
+    def test_the_cap_counts_across_automatic_runs_until_sync_now(self):
+        self.keep_settings()
+        self.rules["acc1"] = [rule("keep", "Kept")]
+        self.rules["acc2"] = [rule(f"t{i}", f"R{i}") for i in range(10)]
+        self.map = [("keep", "acc2", "tk", "h")]
+        deleted = []
+        for i in range(5):   # one copy removed between each run: never more than the cap in one run
+            self.map.append((f"m{i}", "acc2", f"t{i}", "h"))
+            self.db.sql.clear()
+            rulesync.sync(auto=True)
+            for _, p in self.db.said('DELETE FROM "Rule"'):
+                deleted.append(p[0])
+                self.map = [e for e in self.map if e[2] != p[0]]
+        self.assertEqual(deleted, ["t0", "t1", "t2"])                             # 3 in total, then they wait
+        self.assertEqual(self.settings["rules_auto_deleted"], "3")
+        self.db.sql.clear()
+        res = rulesync.sync(confirm=["acc2:t3", "acc2:t4"])                      # someone looks and confirms
+        self.assertEqual([o["key"] for o in res["ops"] if o["op"] == "delete"], ["acc2:t3", "acc2:t4"])
+        self.assertEqual(self.settings["rules_auto_deleted"], "0")
+
+    def test_a_deleted_copy_is_saved_in_the_backups_first(self):
+        self.rules["acc2"] = [rule("t1", "Receipts")]
+        self.map, self.include = [("m1", "acc2", "t1", "h")], set()
+        rulesync.sync(confirm=["acc2:t1"])
+        w = [s for s, _ in self.writes()]
+        self.assertIn("INSERT INTO unified.rule_backup", w[0])
+        self.assertIn('DELETE FROM "Rule"', w[1])
+        self.assertTrue(self.db.said("INSERT INTO unified.rule_backup")[0][1][0].startswith("deleted: "))
+
+    def test_a_master_relinked_under_the_same_email_holds_every_removal(self):
+        self.settings = {"rules_master": "master@x.com", "rules_master_id": "acc-before"}
+        self.rules["acc1"] = []
+        self.rules["acc2"] = [rule("t1", "Receipts")]
+        self.map = [("m1", "acc2", "t1", "h")]
+        res = rulesync.sync(auto=True)
+        self.assertEqual([o["op"] for o in res["ops"]], ["held"])
+        self.assertIn("new account id", res["masterChanged"]["detail"])
+        self.assertFalse(self.db.said('DELETE FROM "Rule"'))
+
+    def test_every_master_rule_gone_at_once_holds_every_removal(self):
+        self.settings = {"rules_master": "master@x.com", "rules_master_id": "acc1"}
+        self.rules["acc1"] = [rule("new1", "Receipts")]                         # rules recreated with new ids
+        self.rules["acc2"] = [rule("t1", "Old 1"), rule("t2", "Old 2")]
+        self.map = [("m1", "acc2", "t1", "h"), ("m2", "acc2", "t2", "h")]
+        res = rulesync.sync(auto=True)
+        self.assertEqual([o["op"] for o in res["ops"]], ["held", "held"])
+        self.assertIn("none of the 2 master rules", res["masterChanged"]["detail"])
+        self.assertFalse(self.db.said('DELETE FROM "Rule"'))
+        res = rulesync.sync(confirm=["acc2:t1", "acc2:t2", "master-change"])
+        self.assertEqual([o["op"] for o in res["ops"]], ["delete", "delete"])
+
+    def test_the_master_account_id_is_recorded(self):
+        self.settings = {"rules_master": "master@x.com"}
+        rulesync.sync()
+        self.assertEqual(self.db.said("INSERT INTO unified.settings")[0][1], ("rules_master_id", "acc1"))
 
     def test_a_master_change_holds_every_removal_until_sync_now_confirms_it(self):
         self.settings = {"rules_master": "old-master@x.com"}

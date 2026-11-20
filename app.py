@@ -250,7 +250,7 @@ def every(seconds, fn, first_delay):
 def auto_rules():
     from core import setting
     if setting("rules_auto", "0") == "1":
-        res = rulesync.sync(apply=True, auto=True)   # deletes at most rulesync.AUTO_MAX_DELETES copies per run
+        res = rulesync.sync(apply=True, auto=True)   # deletes at most rulesync.AUTO_MAX_DELETES copies between two Sync now
         changed = [o for o in res["ops"] if o["op"] not in ("same", "held")]
         held = [o for o in res["ops"] if o["op"] == "held"]
         if changed or held:
