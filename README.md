@@ -231,7 +231,7 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
   check are left alone and the result says **Partly done: run it again** to continue. The senders it read are
   remembered (`unified.sender_seen`, 30 days; a message with no sender, or deleted since, is tried again after an
   hour), so the next run picks up where this one stopped instead of reading the same messages again. A read Gmail
-  could not answer just then (rate limit, server error, timeout) is not remembered: that message counts as not done
+  could not answer just then (rate limit, server error, a login error, timeout) is not remembered: that message counts as not done
   yet, not as someone else's mail, and the next run reads it again. One Gmail refuses for good (a bad id, a 403 that
   is not a rate limit) is remembered as sender unknown for an hour, like a deleted one, and left alone. A run that changed nothing and learned no sender
   does not say "run it again": it says what stopped it (Gmail not answering the look-ups, or no look-ups left). If the page still gets no answer in time, it says the action may

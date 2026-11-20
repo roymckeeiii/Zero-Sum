@@ -410,7 +410,8 @@ class LookupBudget(World):
                   "ab0005": RuntimeError('Gmail GET /messages/ab0005: 403 {"reason": "userRateLimitExceeded"}'),
                   "ab0006": RuntimeError("Gmail GET /messages/ab0006: 503 Backend Error"),
                   "ab0007": TimeoutError("timed out"),
-                  "ab0008": OSError("connection reset")}
+                  "ab0008": OSError("connection reset"),
+                  "ab0009": RuntimeError("Gmail GET /messages/ab0009: 401 Invalid Credentials")}   # after a refresh
 
         def gmail(acc, path, method="GET", body=None, retry=True):
             raise errors[path.split("?")[0].rsplit("/", 1)[-1]]
