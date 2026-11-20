@@ -349,10 +349,15 @@ All settings are environment variables; see [`.env.example`](.env.example).
   link-local or cloud-metadata addresses, nor IPv6 spellings of them: NAT64, 6to4, Teredo, IPv4-compatible or
   site-local), the connection goes to the address that was checked, redirects are not
   followed, and it gives up after 10 seconds. Anything else is left as a link for you to open.
-- Sender addresses in requests must be plain addresses and are quoted in every Gmail search. A sender action only
-  changes mail whose real sender is that address (Gmail's `from:` search also matches display names), and never mail
-  from a protected sender or from a linked account's own address, in any spelling that reaches it (`+tags`, Gmail's
-  dots, `googlemail.com`). Gmail "send as" aliases on other domains are not known to Zero Sum: protect them.
+- Sender addresses in requests must be plain addresses and are quoted in every Gmail search. On mail already in the
+  account, a sender action, a plan and AI sort (the background pass and new mail) change only messages whose real
+  sender is that address: Gmail's `from:` search also matches display names and longer addresses, so each message's
+  sender is looked up first, and the rest is left alone. They never change mail from a protected sender or from a
+  linked account's own address, in any spelling that reaches it (`+tags`, Gmail's dots, `googlemail.com`). Gmail
+  "send as" aliases on other domains are not known to Zero Sum: protect them.
+- Future mail is different: Block, Quarantine, Auto-archive, the unsubscribe-and-… actions and plans add Gmail filters
+  on `from:`, and Gmail applies those itself with the same loose match, so a filter can also catch mail that only
+  shows the address in its sender name. Zero Sum cannot check those messages; the confirmations say so.
 - Email text sent to the AI is treated as untrusted: prompts say so, and answers are reduced to a fixed set of actions,
   cleaned keywords and message numbers before anything is shown. Nothing the AI returns runs without your confirmation.
 - The container runs read-only as an unprivileged user with all capabilities dropped.

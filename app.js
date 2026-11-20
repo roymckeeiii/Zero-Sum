@@ -254,15 +254,19 @@ const TIPS = { unsubscribe: "Unsubscribe only (one-click where offered); mail al
   spam: "Report all mail from this sender as spam (also trains Gmail's spam filter)" };
 const CONFIRM = { unsub_delete: "Unsubscribe and move ALL mail from", delete: "Move ALL mail from", block: "Move ALL mail from",
   spam: "Report ALL mail from" };
+// Future mail is handled by a Gmail filter on from:, which Gmail matches loosely (a display name or a longer address
+// containing it matches too); only mail already there is checked message by message. The confirm says so.
+const LOOSE = "\n\nFuture mail is matched by Gmail's own from: filter, which can also catch mail that only shows this address in its sender name.";
 function confirmText(a, s) {  // every removal action asks first (Roy, 11-07)
   const n = `${s.addr} (${s.accounts.length} account(s))`;  // how many emails: counted in Gmail, shown under the text
   if (CONFIRM[a]) return `${CONFIRM[a]} ${n}` + (a === "spam" ? " as spam?" : " to Trash?") +
-    (["block", "unsub_delete"].includes(a) ? " Future mail from this sender will go straight to Trash." : "");
+    (["block", "unsub_delete"].includes(a) ? " Future mail from this sender will go straight to Trash." + LOOSE : "");
   if (a === "protect") return `Protect ${s.addr}? Zero Sum will refuse to unsubscribe, archive, delete or block anything from it, now and in future, and Gmail will never send it to Spam (in every account).`;
-  return { unsubscribe: `Unsubscribe from ${n}?`, unsub_archive: `Unsubscribe from ${n} and archive their mail? Future mail skips the inbox.`,
+  const t = { unsubscribe: `Unsubscribe from ${n}?`, unsub_archive: `Unsubscribe from ${n} and archive their mail? Future mail skips the inbox.`,
     unsub_quarantine: `Unsubscribe from ${n} and move their mail to Quarantine? Future mail goes there too.`,
     quarantine: `Move mail from ${n} to Quarantine? Future mail goes there too.`,
     autoarchive: `Archive mail from ${n}? Future mail skips the inbox.`, archive: `Archive what is in the inbox from ${n}?` }[a];
+  return t && ["unsub_archive", "unsub_quarantine", "quarantine", "autoarchive"].includes(a) ? t + LOOSE : t;
 }
 async function loadSenders() {
   const p = new URLSearchParams({ q: $("#c-q").value, days: $("#c-days").value, hide: $("#c-handled").checked ? "0" : "1" });
@@ -638,7 +642,7 @@ $("#ai-body").onclick = async (e) => {
       } catch (err) { counted = `\n\n(Could not count what this will touch: ${err.message})`; }
     }
     if (!confirm(isAi ? `AI-sort mail from ${p.addr} in ${p.accounts.length} account(s)? The AI judges every existing email (every folder, every year; runs in the background) and each new one every 15 minutes:\n\n${lines.join("\n")}`
-      : `Apply this plan to ${p.addr} in ${p.accounts.length} account(s)? It sorts existing mail (every folder, every year) and adds Gmail filters for future mail:\n\n${lines.join("\n")}${counted}`)) return;
+      : `Apply this plan to ${p.addr} in ${p.accounts.length} account(s)? It sorts existing mail (every folder, every year) and adds Gmail filters for future mail:\n\n${lines.join("\n")}${counted}${LOOSE}`)) return;
     b.disabled = true; b.textContent = "Applying…";
     try {
       const r = await api("/api/ai/apply", { addr: p.addr, groups: p.groups, default: p.default, mode: p.mode || "words", rule: p.keep_rule || "" });

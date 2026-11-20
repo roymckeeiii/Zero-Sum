@@ -316,13 +316,19 @@ def _batch(acc_id, ids, add=(), remove=(), record=True, sender=None):
 
     Every bulk change ends here, so this is where a protected sender and the user's own address are refused, whatever
     the entry point checked. `sender` is the address (or addresses) the ids belong to. Without it, a change that takes
-    mail out of view leaves out the messages the local history attributes to a protected or own address."""
+    mail out of view leaves out the messages the local history attributes to a protected or own address; with it, the
+    messages the local history attributes to anyone else are left out (callers look the real sender up first)."""
     ids = list(ids)
     if ids and removes_mail(add, remove):
         prot = protected_set()
         if sender is not None:
-            for s in ([sender] if isinstance(sender, str) else sorted(sender)):
+            whose = {sender} if isinstance(sender, str) else set(sender)
+            for s in sorted(whose):
                 guard_sender(s, prot)
+            with db() as c:
+                other = {i for i, frm in c.execute("SELECT id, from_addr FROM unified.msg WHERE account_id = %s AND "
+                                                   "id = ANY(%s)", (acc_id, ids)).fetchall() if frm not in whose}
+            ids = [i for i in ids if i not in other]
         else:
             with db() as c:
                 known = c.execute("SELECT id, from_addr FROM unified.msg WHERE account_id = %s AND id = ANY(%s)",

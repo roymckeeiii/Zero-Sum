@@ -182,9 +182,29 @@ class EntryPoints(World):
         with Patched(cleanup, is_protected=lambda addr, prot=None: False), \
                 Patched(ai, classify=lambda rule, items: [False] * len(items)):   # the pass's own check knocked out
             self.db.on("SELECT account_id, id, subject", [("acc1", "m1", "Sale", "")])
+            self.g.meta["m1"] = ME
             with self.assertRaises(PermissionError):
                 cleanup._ai_sort_ids(ME, "keep news", "delete", [(self.acc.list()[0], "m1")])
         self.assertEqual(self.g.changes("batchModify"), [])
+
+    def test_ai_sort_acts_only_on_mail_really_from_the_sender(self):
+        # Gmail's from:"deals@shop.com" also finds mail from the protected bank that uses it as a display name
+        import ai
+        self.db.on("FROM unified.ai_sort WHERE addr", [("keep receipts", "delete")])
+        self.db.on("SELECT account_id, id, subject", [("acc1", "aa11bb", "Sale", ""), ("acc1", "aa22cc", "Statement", ""),
+                                                      ("acc1", "aa33dd", "Hi", "")])
+        self.g.meta = {"aa11bb": f"Deals <{JUNK}>", "aa22cc": f'"{JUNK}" <{BANK}>', "aa33dd": f'"{JUNK}" <x@y.org>'}
+        judged = []
+        with Patched(ai, classify=lambda rule, items: judged.extend(items) or [False] * len(items)):
+            a1 = self.acc.list()[0]
+            cleanup._ai_sort_ids(JUNK, "keep receipts", "delete", [(a1, "aa11bb"), (a1, "aa22cc"), (a1, "aa33dd")])
+        self.assertEqual([c[3]["ids"] for c in self.g.changes("batchModify")], [["aa11bb"]])
+        self.assertEqual(judged, [("Sale", "")])                       # the others are not even sent to the AI
+
+    def test_batch_with_a_sender_leaves_out_mail_the_history_says_is_someone_elses(self):
+        self.db.on("SELECT id, from_addr FROM unified.msg", [("m1", JUNK), ("m2", BANK), ("m3", "x@y.org")])
+        self.assertEqual(cleanup._batch("acc1", ["m1", "m2", "m3", "m4"], add=["TRASH"], sender=JUNK), 2)
+        self.assertEqual([c[3]["ids"] for c in self.g.changes("batchModify")], [["m1", "m4"]])
 
     def test_new_mail_of_a_sender_protected_after_its_sort_was_set_up_is_left_alone(self):
         self.db.on("FROM unified.ai_sort", [(BANK, "keep news", "delete", 0), (ME, "keep news", "archive", 0)])

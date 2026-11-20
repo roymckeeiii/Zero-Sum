@@ -8,7 +8,7 @@ import psycopg
 import ai
 from collector import SKIP, qs
 from core import ACC, db, gmail_list, label_id, log
-from gmailops import MAX_BULK, QUARANTINE, _ACTION, _batch, sender_recent
+from gmailops import MAX_BULK, QUARANTINE, _ACTION, _batch, sender_recent, senders_of
 from guard import frm, is_protected, own_address, sender_matches
 from inbox import meta
 
@@ -40,7 +40,12 @@ def start_ai_sort(addr, rule, action):
 
 
 def _ai_sort_ids(addr, rule, action, pairs, token=None):
-    """Classify (account, message id) pairs by the rule in batches and apply `action` to the ones not kept."""
+    """Classify (account, message id) pairs by the rule in batches and apply `action` to the ones not kept.
+
+    The pairs come from Gmail's `from:"addr"` search, a token match that also finds mail whose display name or a
+    longer address contains addr ("deals@shop.com" <alerts@bank.com>). So, as for sender actions, each message's real
+    sender is looked up first (senders_of) and only mail really from `addr` is judged and acted on; the rest is left
+    alone and not sent to the AI. Returns how many were kept."""
     kept = 0
     for i in range(0, len(pairs), 40):
         chunk = pairs[i:i + 40]
@@ -52,6 +57,11 @@ def _ai_sort_ids(addr, rule, action, pairs, token=None):
             raise RuntimeError("stopped: a newer pass took over")
         if action != "keep" and is_protected(addr):
             raise PermissionError(f"{addr} is protected: AI sort paused")
+        n_chunk = len(chunk)
+        if action != "keep":
+            accs = {a["id"]: a for a, _ in chunk}
+            real = {acc_id: senders_of(acc_id, [mid for a, mid in chunk if a["id"] == acc_id]) for acc_id in accs}
+            chunk = [(a, mid) for a, mid in chunk if real[a["id"]].get(mid) == addr]
         with db() as c:  # local history first: no Gmail call for mail the collector already has
             local = {(acc, mid): (sub, snip) for acc, mid, sub, snip in c.execute(
                 "SELECT account_id, id, subject, coalesce(snippet, '') FROM unified.msg "
@@ -81,7 +91,7 @@ def _ai_sort_ids(addr, rule, action, pairs, token=None):
                 _batch(acc_id, ids, add=add, remove=rem, sender=addr)
         with db() as c:
             c.execute("UPDATE unified.ai_sort SET done = done + %s, kept = kept + %s, updated_at = now() WHERE addr = %s",
-                      (len(chunk), sum(1 for (_, _m), k in zip(metas, verdicts) if k), addr))
+                      (n_chunk, sum(1 for (_, _m), k in zip(metas, verdicts) if k), addr))
     return kept
 
 
