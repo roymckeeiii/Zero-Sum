@@ -43,7 +43,10 @@ class World(unittest.TestCase):
             (b[0], b[2], b[4], b[5]) for b in sorted(self.backup, reverse=True)
             if b[1] == p[0] and b[3].startswith("adopted")])
         self.db.on("FROM unified.settings", lambda p: [(self.settings[p[0]],)] if p[0] in self.settings else [])
-        self.db.on("SELECT DISTINCT master_rule_id FROM unified.rule_map", lambda p: sorted({(e[0],) for e in self.map}))
+        self.db.on("SELECT DISTINCT master_rule_id FROM unified.rule_map", lambda p: sorted(
+            {(e[0],) for e in self.map if not p or e[1] in p[0]}))
+        self.db.on("DELETE FROM unified.rule_map WHERE account_id = %s", lambda p: setattr(
+            self, "map", [e for e in self.map if e[1] != p[0]]) or [])
         self.db.on("FROM unified.rule_include", lambda p: sorted(self.include))
         # (master rule, account) where forward / send / reply / webhook may be copied: OK'd for the destinations the
         # master rule has now, unless ok_keys names the destinations the OK was given for
@@ -385,6 +388,31 @@ class Removals(World):
         self.assertFalse(self.db.said('DELETE FROM "Rule"'))
         res = rulesync.sync(confirm=["acc2:t1", "acc2:t2", "master-change"])
         self.assertEqual([o["op"] for o in res["ops"]], ["delete", "delete"])
+
+    def test_leftover_rows_of_accounts_not_synced_do_not_report_a_master_change(self):
+        # copies once made in the account that is the master now, and in one no longer linked, are never processed:
+        # they must not make "none of the master rules exist any more" true forever, nor hold an ordinary delete
+        self.settings = {"rules_master": "master@x.com", "rules_master_id": "acc1"}
+        self.rules["acc1"] = [rule("m2", "Other")]
+        self.rules["acc2"] = [rule("t1", "Receipts")]
+        self.include = set()
+        self.map = [("m1", "acc2", "t1", "h"), ("a1", "acc1", "c1", "h"), ("a2", "acc1", "c2", "h"),
+                    ("a3", "gone-acc", "x3", "h")]
+        res = rulesync.sync(auto=True)
+        self.assertIsNone(res["masterChanged"])
+        self.assertEqual([o["op"] for o in res["ops"]], ["delete"])
+
+    def test_a_confirmed_master_change_drops_the_new_masters_own_rows(self):
+        self.settings = {"rules_master": "two@x.com", "rules_master_id": "acc2"}   # acc1 used to be a target
+        self.rules["acc1"] = [rule("c1", "R1")]
+        self.include = set()
+        self.map = [("a1", "acc1", "c1", "h")]
+        res = rulesync.sync(auto=True)
+        self.assertTrue(res["masterChanged"])
+        self.assertEqual(self.map, [("a1", "acc1", "c1", "h")])                # not before it is confirmed
+        rulesync.sync(confirm=["master-change"])
+        self.assertEqual(self.map, [])
+        self.assertEqual(self.db.said("DELETE FROM unified.rule_map WHERE account_id = %s")[-1][1], ("acc1",))
 
     def test_the_master_account_id_is_recorded(self):
         self.settings = {"rules_master": "master@x.com"}

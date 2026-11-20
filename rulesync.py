@@ -299,15 +299,19 @@ def sync(apply=True, only_account=None, confirm=None, auto=False):
     confirm = set(confirm or ())
     with LOCK:
         ops = []
+        targets = [a for a in ACC.list() if not a["master"]]
         with db() as c:
             mrules = load_rules(c, master["id"])
             incl = set(c.execute("SELECT master_rule_id, account_id FROM unified.rule_include").fetchall())
             out_ok = _outbound_allowed(c)
-            mapped = {m for m, in c.execute("SELECT DISTINCT master_rule_id FROM unified.rule_map").fetchall()}
+            # only the copies in the accounts synced now say whose rules they are: rows of an account that is the
+            # master now, or no longer listed, are never processed and would keep reporting a master change
+            mapped = {m for m, in c.execute("SELECT DISTINCT master_rule_id FROM unified.rule_map WHERE account_id = "
+                                            "ANY(%s)", ([a["id"] for a in targets],)).fetchall()}
             prev, prev_id = _setting(c, MASTER_KEY), _setting(c, MASTER_ID_KEY)
             used = int(_setting(c, AUTO_USED_KEY) or 0)
         why = _master_change(prev, prev_id, master, mapped, mrules)
-        accounts = [a for a in ACC.list() if not a["master"] and (not only_account or a["id"] == only_account)]
+        accounts = [a for a in targets if not only_account or a["id"] == only_account]
         allow = {"keys": confirm, "budget": 0, "outbound": out_ok, "changed": why,
                  "removals": not why or (not auto and "master-change" in confirm)}
         if auto and apply and allow["removals"]:
@@ -338,10 +342,12 @@ def sync(apply=True, only_account=None, confirm=None, auto=False):
                 put.append((AUTO_USED_KEY, used + budget - allow["budget"]))
             elif not auto and used and not any(o["op"] == "held" for o in ops):
                 put.append((AUTO_USED_KEY, 0))   # someone ran Sync now and nothing is left waiting
-            if put:
+            if put or (why and allow["removals"]):
                 with db() as c:
                     for k, v in put:
                         _put(c, k, v)
+                    if why and allow["removals"]:   # confirmed: the new master's rules are no longer copies
+                        c.execute("DELETE FROM unified.rule_map WHERE account_id = %s", (master["id"],))
         return {"ops": ops, "applied": apply,
                 "masterChanged": {"from": prev, "to": master["email"], "detail": why} if why else None}
 
