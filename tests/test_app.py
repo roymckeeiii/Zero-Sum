@@ -1,6 +1,6 @@
 """app.py's gate, over a real loopback socket: who is signed in (verified Access token, or the plain header only with
 the explicit override), the custom header every POST needs, and the refusal to start without verified sign-in."""
-import contextlib, http.client, io, json, os, socket, sys, threading, unittest
+import contextlib, http.client, io, json, os, socket, sys, threading, time, unittest
 from http.server import ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -158,7 +158,8 @@ class Gate(unittest.TestCase):
 
 
 class Limits(unittest.TestCase):
-    """Unauthenticated connections cannot tie the server up: an idle one is dropped, and threads are capped."""
+    """Unauthenticated connections cannot tie the server up: an idle or slow one is dropped and holds no request slot,
+    requests worked on and connections open are capped, and /healthz answers while every request slot is busy."""
 
     def serve(self, **kw):
         srv = app.Server(("127.0.0.1", 0), app.H, **kw)
@@ -177,20 +178,69 @@ class Limits(unittest.TestCase):
             self.addCleanup(s.close)
             self.assertEqual(s.recv(10), b"")                                 # the server hung up on it
 
-    def test_connections_beyond_the_cap_wait_their_turn(self):
-        port = self.serve(max_threads=1)
-        idle = socket.create_connection(("127.0.0.1", port), timeout=5)       # holds the only thread
-        c = http.client.HTTPConnection("127.0.0.1", port, timeout=0.5)
+    def get(self, port, path="/healthz", timeout=5):
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+        self.addCleanup(c.close)
+        c.request("GET", path)
+        return c.getresponse().status
+
+    def test_trickling_clients_hold_no_slot_and_are_dropped_after_the_read_deadline(self):
+        port = self.serve(max_threads=2)
+        socks = []
+        with Patched(app.H, read_deadline=1.0, timeout=5), contextlib.redirect_stdout(io.StringIO()):
+            for _ in range(3):   # more slow clients than request slots, each sending a byte well inside the idle limit
+                s = socket.create_connection(("127.0.0.1", port), timeout=5)
+                self.addCleanup(s.close)
+                s.sendall(b"GET /healthz HTTP/1.1\r\n")
+                socks.append(s)
+            self.assertEqual(self.get(port), 200)                               # still answered
+            t = time.monotonic()
+            while time.monotonic() - t < 3:
+                try:
+                    for s in socks:
+                        s.sendall(b"X")
+                except OSError:
+                    break
+                if all(_closed(s) for s in socks):
+                    break
+                time.sleep(0.2)
+            self.assertLess(time.monotonic() - t, 2.5)
+            self.assertTrue(all(_closed(s) for s in socks))                     # dropped at the deadline
+
+    def test_a_request_waits_for_a_free_slot_but_healthz_does_not(self):
+        srv = app.Server(("127.0.0.1", 0), app.H, max_threads=1)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(lambda: (srv.shutdown(), srv.server_close()))
+        port = srv.server_address[1]
+        srv.slots.acquire()                                                      # every request slot is busy
+        self.addCleanup(srv.slots.release)
+        with Patched(app, SLOT_WAIT=0.2), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.get(port, "/"), 503)
+            self.assertEqual(self.get(port), 200)
+
+    def test_connections_beyond_the_connection_cap_are_turned_away_at_once(self):
+        port = self.serve(max_connections=1)
+        idle = socket.create_connection(("127.0.0.1", port), timeout=5)       # holds the only connection
+        self.addCleanup(idle.close)
+        time.sleep(0.2)
         with contextlib.redirect_stdout(io.StringIO()):
-            with self.assertRaises(OSError):                                     # not served while the slot is taken
-                c.request("GET", "/healthz")
-                c.getresponse()
-            c.close()
+            self.assertEqual(self.get(port, timeout=2), 503)
             idle.close()
-            c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-            c.request("GET", "/healthz")
-            self.assertEqual(c.getresponse().status, 200)
-            c.close()
+            time.sleep(0.2)
+            self.assertEqual(self.get(port), 200)
+
+
+def _closed(s):
+    """Has the server closed this socket (EOF, or reset)?"""
+    s.setblocking(False)
+    try:
+        return s.recv(100) == b"" or _closed(s)
+    except BlockingIOError:
+        return False
+    except OSError:
+        return True
+    finally:
+        s.setblocking(True)
 
 
 class Startup(unittest.TestCase):

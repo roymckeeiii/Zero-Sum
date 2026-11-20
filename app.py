@@ -16,7 +16,7 @@ be in ALLOWED_EMAILS, and every POST needs a custom header (no cross-site form p
 (default 127.0.0.1; the container image sets 0.0.0.0, where the published port decides who can reach it). Background jobs: collector every COLLECT_EVERY_MIN, rule sync every
 RULES_EVERY_MIN (only when auto sync is on in the Rules tab).
 """
-import json, os, re, secrets, sys, threading, time, traceback, urllib.parse
+import io, json, os, re, secrets, sys, threading, time, traceback, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import access, actions, ai, aisort, analytics, collector, core, gmailops, inbox, izdb, rulesync
@@ -31,6 +31,8 @@ INBOX_ZERO_URL = os.environ.get("INBOX_ZERO_URL", "").rstrip("/")
 # Largest POST body read. Protect-many takes up to 2000 pasted senders (with CSV notes), far more than the 20 KB once
 # read here: a longer paste was cut short and failed as "bad json".
 MAX_BODY = 512 * 1000
+READ_DEADLINE = 15   # seconds a client has to send its whole request, headers and body
+SLOT_WAIT = 60   # seconds a request read in full waits for a free request slot before it is answered 503
 STATIC = {"/": ("index.html", "text/html; charset=utf-8"), "/app.js": ("app.js", "text/javascript; charset=utf-8")}
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
        "font-src https://fonts.gstatic.com; img-src 'self' data: https:; "
@@ -127,9 +129,48 @@ def check_upstream_schema():
     return found
 
 
+class _Deadline(io.RawIOBase):
+    """The socket as a raw stream that gives up once `deadline` (time.monotonic()) has passed: each read may wait
+    only for what is left of it (and at most `idle` seconds), so a client sending a byte now and then cannot keep the
+    request open."""
+
+    def __init__(self, sock, deadline, idle):
+        self.sock, self.deadline, self.idle = sock, deadline, idle
+
+    def readable(self):
+        return True
+
+    def readinto(self, b):
+        left = self.deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("request not received in time")
+        self.sock.settimeout(min(left, self.idle))
+        return self.sock.recv_into(b)
+
+
 class H(BaseHTTPRequestHandler):
     server_version = "zero-sum"
     timeout = 30   # seconds a connection may sit without sending: an idle or trickling client cannot hold a thread
+    read_deadline = READ_DEADLINE   # and the whole request (headers and body) must arrive within this
+
+    def setup(self):
+        super().setup()
+        self.rfile.close()   # replaced: same socket, but every read counts against one deadline for the request
+        self.rfile = io.BufferedReader(_Deadline(self.connection, time.monotonic() + self.read_deadline,
+                                                 self.timeout))
+
+    def work(self, fn, *args):
+        """Run fn once the request has been read, in one of the server's request slots (the request cap). /healthz
+        does not take one, and a connection still sending its request holds none."""
+        slots = getattr(self.server, "slots", None)
+        if slots is None:
+            return fn(*args)
+        if not slots.acquire(timeout=SLOT_WAIT):
+            return self.send(503, {"error": "busy, try again"})
+        try:
+            return fn(*args)
+        finally:
+            slots.release()
 
     def log_message(self, fmt, *args):
         # failed requests only, and without their query strings: those carry search words, account and message ids
@@ -138,6 +179,7 @@ class H(BaseHTTPRequestHandler):
 
     def send(self, code, body, ctype="application/json"):
         b = body if isinstance(body, bytes) else json.dumps(body, default=str).encode()
+        self.connection.settimeout(self.timeout)   # the read deadline was for receiving; answering has its own
         self.send_response(code)
         for k, v in (("Content-Type", ctype), ("Content-Length", str(len(b))), ("Cache-Control", "no-store"),
                      ("Content-Security-Policy", CSP), ("X-Content-Type-Options", "nosniff"),
@@ -178,6 +220,9 @@ class H(BaseHTTPRequestHandler):
             if urllib.parse.parse_qs(u.query).get("deep", ["0"])[0] == "1":
                 return self.send(*deep_health())
             return self.send(200, {"ok": True})
+        self.work(self._get, u)
+
+    def _get(self, u):
         if not self.allowed():
             return
         if u.path in STATIC:
@@ -205,34 +250,45 @@ class H(BaseHTTPRequestHandler):
             d = json.loads(self.rfile.read(n) or b"{}")
         except ValueError:
             return self.send(400, {"error": "bad json"})
-        self.run(POST[self.path], d)
+        self.work(self.run, POST[self.path], d)
 
 
-MAX_THREADS = 32   # requests handled at once; more wait in the listen queue instead of each getting a thread
+MAX_THREADS = 32   # requests worked on at once (after they have been read); more wait for a slot, then get 503
+MAX_CONNECTIONS = 256   # connections open at once, including ones still sending their request; more get 503 at once
 
 
 class Server(ThreadingHTTPServer):
-    """ThreadingHTTPServer with at most `max_threads` request threads: one is taken before a connection is handed to
-    its thread and given back when that thread ends, so a flood of connections waits instead of exhausting memory."""
+    """ThreadingHTTPServer with bounds. A connection gets a thread only while fewer than `max_connections` are open
+    (otherwise it is answered 503 and closed, and the accept loop never waits); its request must arrive within
+    H.read_deadline; only then does it wait for one of `max_threads` request slots (H.work). /healthz takes no slot.
+    So a few slow or idle clients cannot stop the server: they are dropped after the deadline and hold no slot."""
     daemon_threads = True
 
-    def __init__(self, address, handler, max_threads=MAX_THREADS):
+    def __init__(self, address, handler, max_threads=MAX_THREADS, max_connections=MAX_CONNECTIONS):
         self.slots = threading.BoundedSemaphore(max_threads)
+        self.conns = threading.BoundedSemaphore(max_connections)
         super().__init__(address, handler)
 
     def process_request(self, request, client_address):
-        self.slots.acquire()
+        if not self.conns.acquire(blocking=False):
+            try:
+                request.settimeout(1)
+                request.sendall(b"HTTP/1.0 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
         try:
             super().process_request(request, client_address)
         except BaseException:
-            self.slots.release()
+            self.conns.release()
             raise
 
     def process_request_thread(self, request, client_address):
         try:
             super().process_request_thread(request, client_address)
         finally:
-            self.slots.release()
+            self.conns.release()
 
 
 def every(seconds, fn, first_delay):
