@@ -401,6 +401,23 @@ class LookupBudget(World):
         self.assertEqual([c[3]["ids"] for c in self.g.changes("batchModify")], [["ab0001", "ab0002"]])
         self.assertNotIn("not done", r["results"][0]["note"])
 
+    def test_a_read_gmail_refuses_for_good_is_remembered_as_unknown_a_passing_one_is_not(self):
+        errors = {"ab0001": RuntimeError("Gmail GET /messages/ab0001: 400 Invalid id value"),
+                  "ab0002": RuntimeError("Gmail GET /messages/ab0002: 403 Forbidden: insufficient permission"),
+                  "ab0003": RuntimeError("Gmail GET /messages/ab0003: 404 Not Found"),
+                  "ab0004": RuntimeError("Gmail GET /messages/ab0004: 429 Too Many Requests"),
+                  "ab0005": RuntimeError('Gmail GET /messages/ab0005: 403 {"reason": "userRateLimitExceeded"}'),
+                  "ab0006": RuntimeError("Gmail GET /messages/ab0006: 503 Backend Error"),
+                  "ab0007": TimeoutError("timed out"),
+                  "ab0008": OSError("connection reset")}
+
+        def gmail(acc, path, method="GET", body=None, retry=True):
+            raise errors[path.split("?")[0].rsplit("/", 1)[-1]]
+        with Patched(cleanup, gmail=gmail):
+            who = cleanup.senders_of("acc1", sorted(errors))
+        self.assertEqual(who, {"ab0001": None, "ab0002": None, "ab0003": None})
+        self.assertEqual(self.db.seen, {("acc1", "ab0001"): None, ("acc1", "ab0002"): None, ("acc1", "ab0003"): None})
+
     def test_a_message_deleted_since_it_was_listed_is_left_alone(self):
         self.acc.accs = self.acc.accs[:1]
         self.g.found = {"from:": ["ab0001", "ab0002"]}

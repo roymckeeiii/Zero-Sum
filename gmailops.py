@@ -19,10 +19,22 @@ UNDO_STEP = 20   # read back this many at a time, checking for spare quota befor
 
 # How long a sender read from Gmail is remembered (unified.sender_seen) for mail the local history does not hold, so that
 # a run that is "partly done" does not read the same messages again next time (a message's sender never changes). A
-# message with no From address (or deleted since) is remembered as unknown only for SEEN_UNKNOWN_MINUTES, then tried
-# again. A read Gmail refused or did not answer is not remembered at all.
+# message with no From address (or deleted since, or one Gmail refuses for good: a bad id, a 403 that is not a rate
+# limit) is remembered as unknown only for SEEN_UNKNOWN_MINUTES, then tried again. A read Gmail rate-limited, failed
+# with a server error or did not answer is not remembered at all.
 SEEN_DAYS, SEEN_UNKNOWN_MINUTES = 30, 60
 _FAILED = object()   # senders_of: a read that failed (not the same as a message without a sender)
+
+
+def _passing(e):
+    """Is this failed Gmail read worth asking again soon? A rate limit, a server error, a timeout or no answer at all
+    is: the message is not known yet. Any other refusal (404 deleted since it was listed, 400 bad id, 403 that is not
+    a rate limit) would be refused again on every run: it is remembered as unknown instead."""
+    m = re.search(r": (\d{3}) ", str(e)) if isinstance(e, RuntimeError) and str(e).startswith("Gmail ") else None
+    if not m:
+        return True
+    code, low = int(m.group(1)), str(e).lower().replace(" ", "")
+    return code == 429 or code >= 500 or (code == 403 and ("ratelimit" in low or "quotaexceeded" in low))
 
 
 def senders_of(acc_id, ids, budget=None):
@@ -47,9 +59,7 @@ def senders_of(acc_id, ids, budget=None):
             m = gmail(acc_id, f"/messages/{mid}?format=metadata&metadataHeaders=From")
             return email.utils.parseaddr(header(m.get("payload", {}).get("headers", []), "from"))[1].lower() or None
         except Exception as e:  # noqa: BLE001
-            if ": 404 " in str(e):   # deleted since it was listed: there is no sender to find
-                return None
-            return _FAILED   # quota, 5xx, timeout: not known, and not "unknown" either: asked again next run
+            return _FAILED if _passing(e) else None
     todo = [i for i in ids if i not in who]
     if budget is not None:
         todo = todo[:max(0, budget(len(todo)))]
