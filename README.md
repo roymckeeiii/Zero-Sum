@@ -355,8 +355,9 @@ All settings are environment variables; see [`.env.example`](.env.example).
 - Zero Sum can read every linked mailbox, as Inbox Zero can. Run it only behind authentication, for yourself.
 - Email bodies are shown in a sandboxed iframe with no scripts; remote images are blocked until you click "Show images", which applies to that message only.
 - POST requests need a custom header, so other sites cannot submit actions with your session.
-- A client has 15 seconds to send its whole request (and may pause at most 30 seconds between bytes); a slow one is
-  dropped. At most 32 requests are worked on at once, counted only once a request has arrived in full, and at most
+- A client has 15 seconds to send its whole request (and may pause at most 30 seconds between bytes); a large POST
+  body gets more time by its size (at least 8 KB a second, 90 seconds at most). A slow one is dropped, or answered
+  408 once its headers have arrived. At most 32 requests are worked on at once, counted only once a request has arrived in full, and at most
   256 connections are open at once (more are answered 503 straight away). `/healthz` needs no request slot.
 - Failed requests are logged by path only, without query strings (search words, account and message ids). An
   unexpected error reaches the page only as a short reference; its details are in the container log under it.

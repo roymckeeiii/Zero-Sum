@@ -32,6 +32,10 @@ INBOX_ZERO_URL = os.environ.get("INBOX_ZERO_URL", "").rstrip("/")
 # read here: a longer paste was cut short and failed as "bad json".
 MAX_BODY = 512 * 1000
 READ_DEADLINE = 15   # seconds a client has to send its whole request, headers and body
+# ... plus the time a body of Content-Length bytes takes at BODY_MIN_RATE bytes a second (a long paste on a slow
+# link), the whole request at most READ_DEADLINE_MAX seconds. DEFAULT - Roy may change: 8 KB/s, 90 s
+BODY_MIN_RATE = 8000
+READ_DEADLINE_MAX = 90
 SLOT_WAIT = 60   # seconds a request read in full waits for a free request slot before it is answered 503
 STATIC = {"/": ("index.html", "text/html; charset=utf-8"), "/app.js": ("app.js", "text/javascript; charset=utf-8")}
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
@@ -156,8 +160,9 @@ class H(BaseHTTPRequestHandler):
     def setup(self):
         super().setup()
         self.rfile.close()   # replaced: same socket, but every read counts against one deadline for the request
-        self.rfile = io.BufferedReader(_Deadline(self.connection, time.monotonic() + self.read_deadline,
-                                                 self.timeout))
+        self.started = time.monotonic()
+        self.deadline = _Deadline(self.connection, self.started + self.read_deadline, self.timeout)
+        self.rfile = io.BufferedReader(self.deadline)
 
     def work(self, fn, *args):
         """Run fn once the request has been read, in one of the server's request slots (the request cap). /healthz
@@ -246,8 +251,16 @@ class H(BaseHTTPRequestHandler):
             return self.send(400, {"error": "bad request"})
         if n > MAX_BODY:     # refused, never cut short: a truncated body only ever read as "bad json"
             return self.send(413, {"error": f"request too large (at most {MAX_BODY // 1000} KB)"})
+        # a large body gets more time, by its size: a slow link is not cut off half way, a small one gains nothing
+        self.deadline.deadline = max(self.deadline.deadline, self.started + min(
+            READ_DEADLINE_MAX, self.read_deadline + n / BODY_MIN_RATE))
         try:
-            d = json.loads(self.rfile.read(n) or b"{}")
+            raw = self.rfile.read(n)
+        except TimeoutError:   # answered, not dropped: the page can say what happened
+            self.close_connection = True
+            return self.send(408, {"error": "the request took too long to arrive"})
+        try:
+            d = json.loads(raw or b"{}")
         except (ValueError, RecursionError):   # RecursionError: nested too deep ("[[[[..."), not a ValueError
             d = None
         if not isinstance(d, dict):   # every handler takes an object: a list, string or number is refused here

@@ -163,6 +163,35 @@ class Gate(unittest.TestCase):
             self.assertEqual((status, out), (400, {"error": "bad json"}), body)
         self.assertEqual(self.ran, [])
 
+    def slow_post(self, body, chunks, pause):
+        """POST `body` in `chunks` pieces (then stop) with `pause` seconds between them; the raw answer."""
+        s = socket.create_connection(("127.0.0.1", self.srv.server_address[1]), timeout=5)
+        try:
+            s.sendall((f"POST /api/sender HTTP/1.1\r\nHost: x\r\nCf-Access-Jwt-Assertion: good\r\n"
+                       f"X-Requested-With: zero-sum\r\nContent-Length: {len(body)}\r\n\r\n").encode())
+            size = -(-len(body) // 10)
+            for i in range(chunks):
+                s.sendall(body[i * size:(i + 1) * size])
+                time.sleep(pause)
+            return s.recv(200)
+        except OSError as e:
+            return repr(e).encode()
+        finally:
+            s.close()
+
+    def test_a_large_body_gets_time_by_its_size_and_a_late_one_is_answered_408(self):
+        self.mode(token=True, header=False)
+        body = json.dumps({"text": "a" * 10000}).encode()
+        with Patched(app.H, read_deadline=0.4), Patched(app, BODY_MIN_RATE=10000), \
+                contextlib.redirect_stdout(io.StringIO()):
+            # ~10 KB over ~0.8 s: past the bare 0.4 s, inside 0.4 s + 10 KB at 10 KB/s
+            self.assertTrue(self.slow_post(body, 10, 0.08).startswith(b"HTTP/1.0 200"))
+            # the client stops half way: answered 408 at the deadline, not dropped
+            t = time.monotonic()
+            self.assertTrue(self.slow_post(body, 5, 0.01).startswith(b"HTTP/1.0 408"))
+            self.assertLess(time.monotonic() - t, 3)
+        self.assertEqual(len(self.ran), 1)
+
     def test_a_body_nested_too_deep_is_refused_not_dropped(self):
         self.mode(token=True, header=False)
         body = b"[" * 100000
