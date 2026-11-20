@@ -19,6 +19,8 @@ class World(unittest.TestCase):
         self.db.protected = {"@bank.com"}
         self.db.on("SELECT DISTINCT account_id FROM unified.msg", [("acc1",), ("acc2",)]).on("DISTINCT ON (account_id)", [])
         self.sizes = {"acc1": 3, "acc2": 2}
+        self.senders = {}   # message id -> its real sender, when not S
+        self.db.on("SELECT id, from_addr FROM unified.msg", lambda p: [(i, self.senders.get(i, S)) for i in p[1]])
 
         def gmail_list(acc, path, key, limit):
             self.searches.append((acc, urllib.parse.unquote(path.split("q=", 1)[1]), limit))
@@ -82,6 +84,13 @@ class Preview(World):
         self.assertEqual(self.g.calls, [])
         self.assertEqual(self.db.said("INSERT"), [])
         self.assertEqual(self.db.said("UPDATE"), [])
+
+    def test_only_mail_really_from_the_sender_is_counted_where_only_that_is_changed(self):
+        self.senders = {"acc1m0": "alerts@bank.com"}             # matched by from:"deals@shop.com", not from it
+        delete, kept = cleanup.preview({"addr": S, "action": "delete", "keep": ["order"]})["steps"]
+        self.assertEqual([a["count"] for a in delete["accounts"]], [2, 2])
+        self.assertEqual(kept["total"], 5)                        # starring is not limited to the real sender
+        self.assertEqual(cleanup.preview({"addr": S, "action": "star"})["steps"][0]["total"], 5)
 
     def test_a_count_at_the_limit_says_so_and_only_the_chosen_accounts_are_counted(self):
         self.sizes["acc1"] = 10 ** 6

@@ -540,7 +540,8 @@ PREVIEW_MAX = int(os.environ.get("PREVIEW_MAX", "20000"))  # a preview counts up
 def preview(d):
     """What a sender action ({addr, action, keep}) or a word plan ({addr, groups, default}) would change, per account
     and in total: counted in Gmail with the very searches the action runs (all folders, all years), not from the
-    recent local window. Nothing is changed. A count that reaches PREVIEW_MAX is reported as capped ("or more")."""
+    recent local window. Nothing is changed. A count that reaches PREVIEW_MAX is reported as capped ("or more").
+    Where the action takes mail out of view, only mail really from the sender is counted, as only that is changed."""
     if "groups" in d or "default" in d:
         addr, groups, default = plan_input(d)
         steps = [(label, action, plan_query(addr, action, extra)) for label, action, _, extra in plan_steps(groups, default)]
@@ -562,19 +563,25 @@ def preview(d):
     if d.get("accounts"):
         acc_ids = [a for a in acc_ids if a in set(d["accounts"])]
 
+    # a step that takes mail out of view changes only mail really from addr (_modify_existing): counted the same way
+    exact = {query for _, action, query in steps if action not in ("keep", "star", "unstar")}
+
     def count(job):
         a, query = job
         try:
-            return len(gmail_list(a, qs(bulk_query(query)), "messages", PREVIEW_MAX))
+            ids = [m["id"] for m in gmail_list(a, qs(bulk_query(query)), "messages", PREVIEW_MAX)]
+            n = len(ids)
+            if query in exact and ids:
+                who = senders_of(a, ids)
+                n = sum(who.get(i) == addr for i in ids)
+            return {"count": n, "capped": len(ids) >= PREVIEW_MAX}
         except Exception as e:  # noqa: BLE001 - shown per account; the other counts still help
-            return str(e)[:200]
+            return {"error": str(e)[:200]}
     jobs = [(a, query) for _, _, query in steps for a in acc_ids]
     counts = dict(zip(jobs, POOL.map(count, jobs)))
     out = []
     for label, action, query in steps:
-        per = [{"id": a, "email": ACC.email(a), **({"count": counts[(a, query)], "capped": counts[(a, query)] >= PREVIEW_MAX}
-                                                 if isinstance(counts[(a, query)], int) else {"error": counts[(a, query)]})}
-               for a in acc_ids]
+        per = [{"id": a, "email": ACC.email(a), **counts[(a, query)]} for a in acc_ids]
         out.append({"what": label, "action": action, "query": bulk_query(query), "accounts": per,
                     "total": sum(x.get("count", 0) for x in per),
                     "capped": any(x.get("capped") for x in per), "failed": any("error" in x for x in per)})
