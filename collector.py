@@ -33,7 +33,7 @@ def _store(acc_id, ids, refill=False):
         have = {r[0] for r in c.execute("SELECT id FROM unified.msg WHERE account_id = %s AND id = ANY(%s)",
                                         (acc_id, ids)).fetchall()}
     todo = [i for i in ids if i not in have]
-    if refill:  # mail collected before subjects were stored: fetch it again to fill subject + snippet
+    if refill:  # fetch them all again: fills subject + snippet, and sets inbox from the labels Gmail has now
         todo = list(ids)
 
     def fetch(mid):
@@ -49,7 +49,7 @@ def _store(acc_id, ids, refill=False):
         addr = (addr or "unknown").lower()
         lab = m.get("labelIds", [])
         return (acc_id, m["id"], m["threadId"], int(m.get("internalDate", 0)) / 1000, addr, name or None,
-                addr.rsplit("@", 1)[-1], "UNREAD" in lab, "INBOX" in lab, parse_unsub(header(hs, "list-unsubscribe")),
+                addr.rsplit("@", 1)[-1], "UNREAD" in lab, "INBOX" in lab and "TRASH" not in lab and "SPAM" not in lab, parse_unsub(header(hs, "list-unsubscribe")),
                 "one-click" in header(hs, "list-unsubscribe-post").lower(), header(hs, "subject")[:300],
                 (m.get("snippet") or "")[:300])
     got = [r for r in CPOOL.map(fetch, todo) if r]
@@ -58,7 +58,8 @@ def _store(acc_id, ids, refill=False):
         with c.cursor() as cur:
             cur.executemany("INSERT INTO unified.msg (account_id, id, thread_id, ts, from_addr, from_name, domain, unread, inbox, "
                             "unsub, unsub_post, subject, snippet) VALUES (%s, %s, %s, to_timestamp(%s), %s, %s, %s, %s, %s, %s, %s, %s, %s) "
-                            "ON CONFLICT (account_id, id) DO UPDATE SET subject = EXCLUDED.subject, snippet = EXCLUDED.snippet", rows)
+                            "ON CONFLICT (account_id, id) DO UPDATE SET subject = EXCLUDED.subject, snippet = EXCLUDED.snippet, "
+                            "inbox = EXCLUDED.inbox", rows)
     if failed:  # what was fetched is kept; the run stops here so newest/oldest stay put and the next run lists these again
         raise RuntimeError(f"{len(failed)} of {len(todo)} messages could not be read ({str(failed[0])[:160]})")
     return len(rows)

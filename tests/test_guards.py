@@ -207,11 +207,12 @@ class EntryPoints(World):
                    [("acc1", ["TRASH"], ["Label_Q"], ["aa11bb", "aa22cc"])])
         self.db.on("SELECT id, from_addr FROM unified.msg", [("aa11bb", JUNK), ("aa22cc", BANK)])
         self.db.on("SELECT id FROM unified.msg", [("aa22cc",)])   # the held one is still in the local history
-        self.g.meta = {"aa11bb": JUNK}
+        self.g.meta = {"aa11bb": JUNK, "aa22cc": BANK}
+        self.g.msg_labels = {"aa22cc": ["INBOX"]}
         r = cleanup.undo_action({"id": 7})   # the real _store, against the fake database
-        # the held one went back to the inbox: its local row says so (it is not fetched again, it is already there)
-        self.assertEqual(self.db.said("UPDATE unified.msg SET inbox")[0][1], (True, "acc1", ["aa22cc"]))
-        self.assertEqual([p[1][1] for p in self.db.said("INSERT INTO unified.msg")], ["aa11bb"])   # the other is read back
+        # the held one went back to the inbox: it is read back and its local row says so; the other is read back too
+        rows = {p[1]: p[8] for _, p in self.db.said("INSERT INTO unified.msg")}
+        self.assertEqual(rows, {"aa22cc": True, "aa11bb": False})
         bodies = [c[3] for c in self.g.changes("batchModify")]
         self.assertEqual(bodies, [{"ids": ["aa11bb"], "addLabelIds": ["Label_Q"], "removeLabelIds": ["TRASH"]},
                                   {"ids": ["aa22cc"], "addLabelIds": ["INBOX"], "removeLabelIds": ["TRASH"]}])
@@ -220,11 +221,33 @@ class EntryPoints(World):
 
     def test_undoing_an_archive_does_not_call_mail_trashed_since_in_the_inbox(self):
         self.db.on("UPDATE unified.action_log SET undone_at = now()", [("acc1", [], ["INBOX"], ["aa11bb", "aa22cc"])])
-        self.g.found = {"in:trash OR in:spam": ["aa22cc"]}     # deleted by hand after it was archived
+        self.g.meta = {"aa11bb": JUNK, "aa22cc": JUNK}
+        # aa22cc was deleted by hand after it was archived: Gmail now has INBOX on it, but in Trash
+        self.g.msg_labels = {"aa11bb": ["INBOX"], "aa22cc": ["INBOX", "TRASH"]}
         cleanup.undo_action({"id": 7})
         self.assertEqual([c[3] for c in self.g.changes("batchModify")],
                          [{"ids": ["aa11bb", "aa22cc"], "addLabelIds": ["INBOX"], "removeLabelIds": []}])
-        self.assertEqual(self.db.said("UPDATE unified.msg SET inbox")[0][1], (True, "acc1", ["aa11bb"]))
+        rows = {p[1]: p[8] for _, p in self.db.said("INSERT INTO unified.msg")}   # id -> inbox
+        self.assertEqual(rows, {"aa11bb": True, "aa22cc": False})
+
+    def test_undo_reads_back_only_the_restored_mail_not_the_whole_trash(self):
+        # after a big clean-up, undoing a 2-message archive must not page through every message in Trash and Spam
+        self.db.on("UPDATE unified.action_log SET undone_at = now()", [("acc1", [], ["INBOX"], ["aa11bb", "aa22cc"])])
+        self.g.meta = {"aa11bb": JUNK, "aa22cc": JUNK}
+        self.g.found = {"in:trash": [f"t{i}" for i in range(500)]}
+        cleanup.undo_action({"id": 7})
+        self.assertEqual([p for p in self.g.reads if p.startswith("/messages?")], [])
+        self.assertEqual(sorted(p.split("?")[0] for p in self.g.reads), ["/messages/aa11bb", "/messages/aa22cc"])
+
+    def test_undo_reads_back_at_most_undo_refresh_messages(self):
+        many = [f"m{i}" for i in range(12)]
+        self.db.on("UPDATE unified.action_log SET undone_at = now()", [("acc1", [], ["INBOX"], many)])
+        self.g.meta = {i: JUNK for i in many}
+        with Patched(cleanup, UNDO_REFRESH=5):
+            cleanup.undo_action({"id": 7})
+        self.assertEqual(len([p for p in self.g.reads if p.startswith("/messages/")]), 5)
+        # the rest are marked in the inbox, as the undo put INBOX back on them
+        self.assertEqual(self.db.said("UPDATE unified.msg SET inbox")[0][1], (True, "acc1", many[5:]))
 
     def test_batch_with_a_sender_leaves_out_mail_the_history_says_is_someone_elses(self):
         self.db.on("SELECT id, from_addr FROM unified.msg", [("m1", JUNK), ("m2", BANK), ("m3", "x@y.org")])

@@ -212,8 +212,10 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
   messages back where they were. Undo does not remove filters: use Keep or Reset on the sender for that. The one
   exception: mail from a sender protected since the change (or your own address) is never put back out of view, so
   undoing a delete from Quarantine brings that mail out of Trash into the inbox instead, and the result says how many. The local history is updated
-  at once: mail that is back in the inbox shows as in the inbox (unless Gmail says it is in Trash or Spam now, e.g.
-  an archive undone after the mail was deleted by hand), and deleted mail is read back so its sender shows up.
+  at once: the restored messages are read back from Gmail (only those, up to 5,000 per undo), so mail that is back
+  in the inbox shows as in the inbox unless Gmail has it in Trash or Spam now (e.g. an archive undone after the mail
+  was deleted by hand), and deleted mail shows its sender again. Past 5,000, the rest is marked as in the inbox and
+  the collector's 30-day refresh corrects it.
 - Every Clean up action and every word plan asks for confirmation with the real number of emails per account: the
   server counts them in Gmail with the same searches the action then runs (`POST /api/sender/preview`; up to
   `PREVIEW_MAX`, default 20,000, per account and step, shown as "or more" beyond that). Where the action takes mail

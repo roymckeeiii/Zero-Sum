@@ -11,6 +11,7 @@ from guard import (frm, guard_sender, is_protected, own_address, own_set, protec
 from inbox import meta
 
 MAX_BULK = int(os.environ.get("MAX_BULK", "200000"))  # most messages one bulk action touches per account
+UNDO_REFRESH = 5000  # most restored messages an undo reads back from Gmail (one metadata read each)
 
 
 # How long a sender read from Gmail is remembered (unified.sender_seen) for mail the local history does not hold, so that
@@ -367,38 +368,37 @@ def undo_action(d):
             c.execute("UPDATE unified.action_log SET undone_at = NULL WHERE id = %s", (aid,))
         raise
     try:
-        # rows still in the local history only skip _store, so where the mail is now is written to them directly:
-        # the held ones are in the inbox now, and so is the rest when the undo put INBOX back on (or took it off)
+        # Where the restored mail is now. Mail the undo took out of the inbox is out of it. Mail it put INBOX back on
+        # is read back from Gmail (only those ids, up to UNDO_REFRESH: the account's whole Trash is never listed),
+        # since INBOX goes back on even where the mail has been put in Trash or Spam since (an archive undone after a
+        # delete), and Gmail does not count that as in the inbox. _store(refill=True) sets the flag from the labels
+        # Gmail returns, and also reads back the rows Delete/Block dropped, so the sender shows up again.
         inbox = held + (ids if "INBOX" in back_add else [])
         out = ids if "INBOX" in back_rem else []
-        if inbox:
-            # INBOX goes back on even where the mail has been put in Trash or Spam since (an archive undone after a
-            # delete): Gmail does not count that as in the inbox, so neither may the local row
-            try:
-                gone = set(where_not_inbox(acc))
-                inbox = [i for i in inbox if i not in gone]
-            except Exception as e:  # noqa: BLE001 - not told where they are: left for the collector to say
-                log("cleanup-error", f"undo #{aid}: inbox flags not updated: {e}"[:300], ACC.email(acc))
-                inbox = []
+        check, guess = inbox[:UNDO_REFRESH], inbox[UNDO_REFRESH:]
         with db() as c:
-            for flag, which in ((True, inbox), (False, out)):
+            # beyond the cap: the undo did put INBOX on, so in the inbox (the collector's 30-day refresh corrects any
+            # of them that were trashed since)
+            for flag, which in ((True, guess), (False, out)):
                 for i in range(0, len(which), 5000):
                     c.execute("UPDATE unified.msg SET inbox = %s WHERE account_id = %s AND id = ANY(%s)",
                               (flag, acc, which[i:i + 5000]))
-        # Delete/Block dropped these messages from the local history: read them back so the sender shows up again
-        _store(acc, (list(ids) + held)[:5000])
+        seen = set(check)
+        rest = [i for i in list(ids) + held if i not in seen][:max(0, UNDO_REFRESH - len(check))]
+        failed = []
+        for part, refill in ((check, True), (rest, False)):
+            try:
+                _store(acc, part, refill=refill)
+            except Exception as e:  # noqa: BLE001 - one part failing must not skip the other
+                failed.append(e)
+        if failed:
+            raise failed[0]
     except Exception as e:  # noqa: BLE001 - the mail itself is restored; the collector fills the rest
         log("cleanup-error", f"undo #{aid}: history not refreshed: {e}"[:300], ACC.email(acc))
     note = (f"{len(held)} from a protected sender or your own address went back to the inbox, not to where the "
             "change had taken them from") if held else ""
     log("cleanup", f"undo #{aid}: {n} messages restored" + (f"; {note}" if note else ""), ACC.email(acc))
     return {"ok": True, "restored": n, **({"held": len(held), "note": note} if held else {})}
-
-
-def where_not_inbox(acc_id):
-    """The ids of the account's mail in Trash or Spam right now (up to MAX_BULK)."""
-    return [m["id"] for m in gmail_list(acc_id, qs("in:trash OR in:spam") + "&includeSpamTrash=true", "messages",
-                                        MAX_BULK)]
 
 
 def bulk_query(query):

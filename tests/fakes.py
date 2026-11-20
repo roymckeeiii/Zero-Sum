@@ -93,6 +93,8 @@ class Gmail:
     def __init__(self):
         self.filters, self.calls, self.found, self.n, self.labels = {}, [], {}, 0, {"Quarantine": "Label_Q"}
         self.meta = {}  # message id -> From header, for metadata reads
+        self.msg_labels = {}  # message id -> labelIds, for metadata reads (default none)
+        self.reads = []  # every GET path, in order
 
     def changes(self, part=""):
         return [c for c in self.calls if part in c[1]]
@@ -101,6 +103,8 @@ class Gmail:
         import urllib.parse
         if method != "GET":
             self.calls.append((acc, path, method, body))
+        else:
+            self.reads.append(path)
         fl = self.filters.setdefault(acc, [])
         if path == "/settings/filters" and method == "GET":
             return {"filter": [dict(f) for f in fl]}
@@ -129,7 +133,8 @@ class Gmail:
         if m:
             if m.group(1) not in self.meta:
                 raise RuntimeError(f"Gmail GET /messages/{m.group(1)}: 404 Not Found")
-            return {"id": m.group(1), "threadId": "t", "labelIds": [], "internalDate": "0",
+            return {"id": m.group(1), "threadId": "t", "labelIds": list(self.msg_labels.get(m.group(1), [])),
+                    "internalDate": "0",
                     "payload": {"headers": [{"name": "From", "value": self.meta[m.group(1)]}]}}
         return {}
 
