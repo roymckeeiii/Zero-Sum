@@ -287,9 +287,9 @@ async function loadSenders() {
     <th class="num">In inbox</th><th>Accounts</th><th>Last</th><th>Apply to every account</th></tr></thead><tbody>` +
     d.senders.map((s, i) => `<tr data-row="${i}"><td class="who" data-peek="${i}" title="Show the 20 most recent emails" tabindex="0" role="button" aria-label="${esc(`Show the 20 most recent emails from ${s.name || s.addr}`)}">
       <span class="caret">▸</span> <b>${esc(s.name || s.addr)}</b><br><span class="note">${esc(s.addr)}</span></td>
-      <td class="num">${fmt(s.count)}</td><td class="num">${s.readPct}%</td><td class="num">${fmt(s.inbox)}</td>
-      <td>${s.accounts.map((a) => `${acctChip(a.id, a.email)}${a.status ? `<span class="note">${STATUS[a.status] || a.status}</span> ` : ""}`).join("")}</td>
-      <td class="note">${when(s.last)}</td>
+      <td class="num" data-k="Emails">${fmt(s.count)}</td><td class="num" data-k="Read">${s.readPct}%</td><td class="num" data-k="In inbox">${fmt(s.inbox)}</td>
+      <td class="accs">${s.accounts.map((a) => `${acctChip(a.id, a.email)}${a.status ? `<span class="note">${STATUS[a.status] || a.status}</span> ` : ""}`).join("")}</td>
+      <td class="note last">${when(s.last)}</td>
       <td class="acts-cell">${s.protected ? '<span class="chip prot">protected</span> ' : ""}
         <div class="grp"><button data-i="${i}" data-a="${s.protected ? "unprotect" : "protect"}" title="Protected senders are never archived, deleted or blocked in bulk">${s.protected ? "Unprotect" : "Protect"}</button>
           <button data-i="${i}" data-a="star" title="Star what is in the inbox, and future mail (Gmail filter)">Auto-star</button>
