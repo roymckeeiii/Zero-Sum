@@ -451,7 +451,7 @@ def _undo_read_back(aid, acc, check, rest):
     for part, refill in ((check, True), (rest, False)):
         for i in range(0, len(part), UNDO_STEP):
             try:
-                if not gmail_spare(acc):
+                if not gmail_spare(acc, cost=UNDO_STEP * 5):   # 5 units per metadata read
                     log("cleanup-error", f"undo #{aid}: read-back stopped, the account's Gmail quota stayed busy",
                         ACC.email(acc))
                     return

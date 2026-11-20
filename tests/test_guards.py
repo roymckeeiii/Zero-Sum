@@ -23,7 +23,8 @@ class World(unittest.TestCase):
         self.p = Patched(cleanup, db=self.db, gmail=self.g, ACC=self.acc, log=lambda *a, **k: None,
                          gmail_list=lambda a, path, key, limit: self.g(a, path).get(key, []),
                          label_id=lambda a, name, create=True: "Label_Q", _one_click=lambda url: True,
-                         _background=lambda fn, *a: fn(*a))   # background work runs at once here
+                         _background=lambda fn, *a: fn(*a),   # background work runs at once here,
+                         gmail_spare=lambda acc, **k: True)   # without waiting for spare quota
         self.p.__enter__()
         self.addCleanup(self.p.__exit__)
 
@@ -256,7 +257,7 @@ class EntryPoints(World):
         self.g.meta = {i: JUNK for i in many}
         jobs, spare = [], []
         with Patched(cleanup, _background=lambda fn, *a: jobs.append((fn, a)),
-                     gmail_spare=lambda acc, timeout=300: spare.append(acc) or True):
+                     gmail_spare=lambda acc, **k: spare.append(acc) or True):
             r = cleanup.undo_action({"id": 7})
             self.assertEqual(r["restored"], 50)
             self.assertEqual([p for p in self.g.reads if p.startswith("/messages/")], [])   # nothing read yet
@@ -271,7 +272,7 @@ class EntryPoints(World):
         self.db.on("UPDATE unified.action_log SET undone_at = now()", [("acc1", [], ["INBOX"], many)])
         self.g.meta = {i: JUNK for i in many}
         answers = iter([True, False])
-        with Patched(cleanup, gmail_spare=lambda acc, timeout=300: next(answers)):
+        with Patched(cleanup, gmail_spare=lambda acc, **k: next(answers)):
             cleanup.undo_action({"id": 7})
         self.assertEqual(len([p for p in self.g.reads if p.startswith("/messages/")]), 20)
 

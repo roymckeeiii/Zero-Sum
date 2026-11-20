@@ -5,7 +5,7 @@ AES-256-GCM, key = scrypt(EMAIL_ENCRYPT_SECRET, EMAIL_ENCRYPT_SALT, 32) with Nod
 stored as hex IV(16) + tag(16) + ciphertext. Refreshed access tokens are kept in memory only: this app never writes
 the Account table, so it cannot break Inbox Zero's own logins.
 """
-import hashlib, json, os, re, secrets, string, threading, time, urllib.error, urllib.parse, urllib.request
+import hashlib, json, os, random, re, secrets, string, threading, time, urllib.error, urllib.parse, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 import psycopg
@@ -136,6 +136,7 @@ class Bucket:
 
     def __init__(self):
         self.lock, self.tokens, self.at = threading.Lock(), self.RATE * 5, time.monotonic()
+        self.spare_after = 0.0   # spare() lets no other caller go before this (monotonic seconds)
 
     def take(self, cost):
         while True:
@@ -149,33 +150,38 @@ class Bucket:
                 wait = (cost - self.tokens) / self.RATE
             time.sleep(wait)
 
-    def spare(self, timeout):
+    def spare(self, timeout, cost=0):
         """Wait until the bucket is at least half full, i.e. nothing else is spending this account's quota right now,
-        and take nothing. True when it is, False after `timeout` seconds. Background work calls this before each small
-        step, so that a request (or the collector) running at the same time is never slowed down by it."""
+        and take nothing. True when it is, False after `timeout` seconds. `cost` is about how many units the caller
+        spends next: no other spare() caller is let go until the bucket has had time to earn them back (cost / RATE
+        seconds), so several jobs waiting on the same account start one after another, not all at once.
+        Background work calls this before each small step, so it only starts a step while the quota is idle. Nothing
+        is reserved: a request (or the collector) starting during that step shares the bucket with it for those few
+        seconds."""
         end = time.monotonic() + timeout
         while True:
             with self.lock:
                 now = time.monotonic()
                 self.tokens = min(self.RATE * 5, self.tokens + (now - self.at) * self.RATE)
                 self.at = now
-                if self.tokens >= self.RATE * 2.5:
+                if self.tokens >= self.RATE * 2.5 and now >= self.spare_after:
+                    self.spare_after = now + cost / self.RATE
                     return True
-                wait = (self.RATE * 2.5 - self.tokens) / self.RATE
+                wait = max((self.RATE * 2.5 - self.tokens) / self.RATE, self.spare_after - now)
             left = end - time.monotonic()
             if left <= 0:
                 return False
-            time.sleep(min(wait + 0.5, left))
+            time.sleep(min(wait + random.uniform(0.1, 0.5), left))   # spread out: waiters do not all wake together
 
 
 _buckets, _bucket_lock = {}, threading.Lock()
 
 
-def gmail_spare(account_id, timeout=300):
+def gmail_spare(account_id, timeout=300, cost=0):
     """Bucket.spare for one account: wait until its Gmail quota is not being used by anything else."""
     with _bucket_lock:
         bucket = _buckets.setdefault(account_id, Bucket())
-    return bucket.spare(timeout)
+    return bucket.spare(timeout, cost)
 
 
 def _cost(method, path):

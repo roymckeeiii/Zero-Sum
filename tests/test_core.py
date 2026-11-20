@@ -153,6 +153,17 @@ class Quota(unittest.TestCase):
         self.assertTrue(b.spare(0.2))
         self.assertGreaterEqual(b.tokens, 300.0)   # waiting takes nothing
 
+    def test_jobs_waiting_for_spare_quota_start_one_at_a_time(self):
+        import threading
+        b = core.Bucket()
+        b.RATE, b.tokens, b.at = 100.0, 500.0, time.monotonic()   # idle: every waiter would see it as spare
+        got = []
+        ts = [threading.Thread(target=lambda: got.append(b.spare(0.4, cost=100))) for _ in range(4)]
+        [t.start() for t in ts]
+        [t.join() for t in ts]
+        self.assertEqual(sorted(got), [False, False, False, True])   # the next one goes after 100 / RATE = 1 s
+        self.assertTrue(b.spare(1.5, cost=100))
+
 
 if __name__ == "__main__":
     unittest.main()
