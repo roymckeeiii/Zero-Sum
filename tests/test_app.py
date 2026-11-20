@@ -442,6 +442,38 @@ class FirstRun(unittest.TestCase):
                 app.first_run(app.init_db, "init-db")
         self.assertIn("ADMIN_DATABASE_URL was refused", str(e.exception))
 
+    def test_init_db_sets_the_decoded_password(self):
+        """A password with @ or / must be percent-encoded in DATABASE_URL; libpq logs in with the decoded text, so
+        that is what init-db must set, not the encoded one."""
+        import psycopg
+        ran = []
+
+        class Conn:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def execute(self, q, *a):
+                ran.append(q)
+        env = {"ADMIN_DATABASE_URL": "postgresql://postgres:x@h/db",
+               "DATABASE_URL": "postgresql://iz_unified:p%40ss%2Fw0rd@h:5432/db"}
+        with mock.patch.dict(os.environ, env), mock.patch.object(psycopg, "connect", lambda *a, **k: Conn()), \
+                mock.patch.object(app, "init_schema"), mock.patch("builtins.print"):
+            app.init_db()
+        alter = ran[-1]
+        self.assertIn("ALTER ROLE", repr(alter))
+        self.assertIn("'p@ss/w0rd'", repr(alter))
+        self.assertNotIn("%40", repr(alter))
+
+    def test_init_db_refuses_a_database_url_for_another_role(self):
+        env = {"ADMIN_DATABASE_URL": "postgresql://postgres:x@h/db", "DATABASE_URL": "postgresql://someone:pw@h/db"}
+        with mock.patch.dict(os.environ, env):
+            with self.assertRaises(SystemExit) as e:
+                app.init_db()
+        self.assertIn("must log in as iz_unified", str(e.exception))
+
     def test_other_errors_are_not_hidden(self):
         import psycopg
 

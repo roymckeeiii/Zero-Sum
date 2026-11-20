@@ -341,7 +341,8 @@ wrong database), it stops with one line saying to run `init-db`; `init-db` again
 tables says to point it at Inbox Zero's own database, after Inbox Zero has started once. A refused login is told apart:
 `init-db` with a wrong `ADMIN_DATABASE_URL` user or password says so (running it again would not help), and at start a
 refused `DATABASE_URL` login says that either `init-db` has not run yet or the password in `DATABASE_URL` is not the
-one `init-db` set.
+one `init-db` set. A password containing `@ / : + = %` or similar must be percent-encoded in `DATABASE_URL` (`@` as
+`%40`, `/` as `%2F`); `init-db` decodes it the same way Postgres does, so the role gets the real password.
 
 The secrets it shares with Inbox Zero (`EMAIL_ENCRYPT_SECRET`, `EMAIL_ENCRYPT_SALT`, `GOOGLE_CLIENT_ID`,
 `GOOGLE_CLIENT_SECRET`) come from Inbox Zero's own env file (`INBOX_ZERO_ENV_FILE`, default `apps/web/.env`).

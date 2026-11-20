@@ -372,13 +372,23 @@ def sign_in_mode():
 def init_db():
     """Run grants.sql as Inbox Zero's database owner and give the role the password in DATABASE_URL."""
     import psycopg
+    import psycopg.conninfo
     from psycopg import sql
     admin = os.environ.get("ADMIN_DATABASE_URL", "").strip()
     if not admin:
         raise SystemExit("init-db needs ADMIN_DATABASE_URL: Inbox Zero's owner connection (its DIRECT_URL / DATABASE_URL)")
-    pw = urllib.parse.urlparse(os.environ["DATABASE_URL"]).password
+    # Read the URL the way libpq does: a password with @ / + = in it has to be percent-encoded in a URL, and libpq
+    # logs in with the decoded text, so that is the password the role must get. (urlparse leaves it encoded.)
+    try:
+        parts = psycopg.conninfo.conninfo_to_dict(os.environ["DATABASE_URL"])
+    except psycopg.ProgrammingError as e:
+        raise SystemExit(f"DATABASE_URL is not a valid connection string ({e})")
+    pw, user = parts.get("password"), parts.get("user")
     if not pw:
         raise SystemExit("DATABASE_URL must contain the iz_unified password (postgresql://iz_unified:<password>@...)")
+    if user != "iz_unified":
+        raise SystemExit(f"DATABASE_URL must log in as iz_unified (the role init-db sets up), not {user or 'the default user'}"
+                         ": postgresql://iz_unified:<password>@...")
     try:
         with open(os.path.join(HERE, "grants.sql")) as f, psycopg.connect(admin, autocommit=True) as c:
             c.execute(f.read())
