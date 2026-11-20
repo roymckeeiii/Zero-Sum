@@ -531,5 +531,23 @@ class Quarantine(World):
         self.assertEqual([len(c[3]["ids"]) for c in self.g.changes("batchModify")], [5])
 
 
+class Background(unittest.TestCase):
+    def test_background_work_does_not_use_the_request_pool(self):
+        import threading, gmailops
+        used, done = [], threading.Event()
+
+        class Spy:
+            def submit(self, *a):
+                used.append(a)
+
+            def map(self, *a):
+                used.append(a)
+        with Patched(gmailops, POOL=Spy()):
+            gmailops._background(done.set).result(5)
+        self.assertTrue(done.is_set())
+        self.assertEqual(used, [])
+        self.assertEqual(gmailops.BACKGROUND._max_workers, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

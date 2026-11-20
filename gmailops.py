@@ -3,6 +3,7 @@ and only those are ever removed), label changes on existing mail (_batch: record
 before Gmail is called, refused for protected senders and own addresses), and the undo journal built from that
 record (unified.action_log)."""
 import contextlib, email.utils, os, re, threading, time, urllib.error
+from concurrent.futures import ThreadPoolExecutor
 
 from collector import CPOOL, SKIP, _store, qs
 from core import ACC, POOL, db, gmail, gmail_list, gmail_spare, header, label_id, log
@@ -431,9 +432,15 @@ def undo_action(d):
     return {"ok": True, "restored": n, **({"held": len(held), "note": note} if held else {})}
 
 
+# Background work (the undo read-back) runs on its own two threads, not on core.POOL: a read-back can wait minutes
+# for spare quota, and the request listings (inbox, analytics, AI Cleanup) need POOL's threads meanwhile. More undos
+# than this queue up and run in turn.
+BACKGROUND = ThreadPoolExecutor(max_workers=2, thread_name_prefix="background")
+
+
 def _background(fn, *args):
-    """Run fn(*args) on the shared pool, after the current request has answered."""
-    return POOL.submit(fn, *args)
+    """Run fn(*args) on the background threads, after the current request has answered."""
+    return BACKGROUND.submit(fn, *args)
 
 
 def _undo_read_back(aid, acc, check, rest):
