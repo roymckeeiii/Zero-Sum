@@ -14,12 +14,13 @@ class Result:
 
 
 class Db:
-    """core.db() stand-in. Keeps unified.filter and unified.protected in memory; any other statement is answered by
+    """core.db() stand-in. Keeps unified.filter, unified.protected and unified.sender_seen in memory; any other statement is answered by
     the first handler whose text occurs in the SQL (`on("FROM unified.msg", rows_or_function)`), else with no rows.
     Every statement is kept in .sql as (text, params)."""
 
     def __init__(self):
         self.sql, self.handlers, self.filters, self.protected, self.commits, self.open = [], [], [], set(), 0, 0
+        self.seen = {}   # unified.sender_seen: (account, message id) -> sender read from Gmail (None: could not)
 
     def on(self, text, rows):
         self.handlers.insert(0, (text, rows))
@@ -72,6 +73,10 @@ class Db:
                 return Result([(f[1],) for f in rows])
             if "SELECT DISTINCT account_id" in sql:
                 return Result(sorted({(f[0],) for f in self.filters if f[2] == p[0]}))
+        elif "INSERT INTO unified.sender_seen" in sql:
+            self.seen[(p[0], p[1])] = p[2]
+        elif "SELECT id, from_addr FROM unified.sender_seen" in sql:
+            return Result([(i, self.seen[(p[0], i)]) for i in p[1] if (p[0], i) in self.seen])
         elif "SELECT key FROM unified.protected" in sql:
             return Result([(k,) for k in sorted(self.protected)])
         elif "INSERT INTO unified.protected" in sql:

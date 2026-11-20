@@ -13,8 +13,15 @@ from inbox import meta
 MAX_BULK = int(os.environ.get("MAX_BULK", "200000"))  # most messages one bulk action touches per account
 
 
+# How long a sender read from Gmail is remembered (unified.sender_seen) for mail the local history does not hold, so that
+# a run that is "partly done" does not read the same messages again next time (a message's sender never changes). A
+# read that failed is remembered as unknown only for SEEN_UNKNOWN_MINUTES, then tried again.
+SEEN_DAYS, SEEN_UNKNOWN_MINUTES = 30, 60
+
+
 def senders_of(acc_id, ids, budget=None):
-    """{message id: sender address, or None when it cannot be told}: from the local history, else read from Gmail.
+    """{message id: sender address, or None when it cannot be told}: from the local history (unified.msg, then the
+    senders read earlier, unified.sender_seen), else read from Gmail and remembered.
     `budget(n)`, when given, says how many of the n messages missing from the local history may be read from Gmail;
     the ones beyond it are left out of the answer (not looked up), so the caller can tell them from unknown ones."""
     who = {}
@@ -22,6 +29,12 @@ def senders_of(acc_id, ids, budget=None):
         with db() as c:
             who.update(c.execute("SELECT id, from_addr FROM unified.msg WHERE account_id = %s AND id = ANY(%s)",
                                  (acc_id, ids[i:i + 5000])).fetchall())
+    rest = [i for i in ids if i not in who]
+    for i in range(0, len(rest), 5000):
+        with db() as c:
+            who.update(c.execute("SELECT id, from_addr FROM unified.sender_seen WHERE account_id = %s AND id = ANY(%s) "
+                                 "AND (from_addr IS NOT NULL OR seen_at > now() - make_interval(mins => %s))",
+                                 (acc_id, rest[i:i + 5000], SEEN_UNKNOWN_MINUTES)).fetchall())
 
     def read(mid):
         try:
@@ -32,7 +45,22 @@ def senders_of(acc_id, ids, budget=None):
     todo = [i for i in ids if i not in who]
     if budget is not None:
         todo = todo[:max(0, budget(len(todo)))]
-    who.update(zip(todo, CPOOL.map(read, todo)))
+    got = dict(zip(todo, CPOOL.map(read, todo)))
+    who.update(got)
+    if got:
+        seen = getattr(_ACTION, "seen", None)
+        if seen is not None:   # this request's progress: senders it learned, and reads it spent
+            seen["read"] += len(got)
+            seen["known"] += sum(1 for v in got.values() if v)
+        try:
+            with db() as c:
+                with c.cursor() as cur:
+                    cur.executemany("INSERT INTO unified.sender_seen (account_id, id, from_addr) VALUES (%s, %s, %s) "
+                                    "ON CONFLICT (account_id, id) DO UPDATE SET from_addr = EXCLUDED.from_addr, "
+                                    "seen_at = now()", [(acc_id, k, v) for k, v in got.items()])
+                c.execute("DELETE FROM unified.sender_seen WHERE seen_at < now() - make_interval(days => %s)", (SEEN_DAYS,))
+        except Exception as e:  # noqa: BLE001 - only a cache: the answer stands, the next run reads them again
+            log("cleanup-error", f"sender look-ups not remembered ({acc_id}): {e}"[:300])
     return who
 
 
@@ -348,15 +376,33 @@ def _modify_existing(acc_id, query, add=(), remove=(), *, sender):
                     w = who.get(i)
                     held["protected" if w and (own_address(w, own) or is_protected(w, prot)) else "other"] += 1
         ids = mine
-    return _batch(acc_id, ids, add, remove, sender=sender)
+    n = _batch(acc_id, ids, add, remove, sender=sender)
+    held = getattr(_ACTION, "held", None)
+    if held is not None:
+        held["done"] += n
+    return n
 
 
 def held_start():
     """Start counting what _modify_existing leaves alone for this request (per account)."""
-    _ACTION.held = {"protected": 0, "other": 0, "unchecked": 0}
+    _ACTION.held = {"protected": 0, "other": 0, "unchecked": 0, "done": 0}
 
 
 UNCHECKED_NOTE = "{n} not done yet (their senders were not looked up in this run): run it again to continue"
+STALLED_NOTE = "{n} not done: {why}"
+NO_READS = "Gmail did not return their senders just now (it refused or did not answer): try again later"
+NO_BUDGET = "no sender look-ups were left for this run (BULK_LOOKUPS)"
+
+
+def unchecked_note(n, done):
+    """The note for n messages whose senders were not looked up. When this run changed some mail or learned some
+    senders, running it again gets further: "run it again", and the request is marked partial. When it did neither,
+    running it again would only repeat it: the note says what stopped it instead, and nothing is marked partial."""
+    seen = getattr(_ACTION, "seen", None) or {}
+    if done or seen.get("known"):
+        _ACTION.partial = True
+        return UNCHECKED_NOTE.format(n=n)
+    return STALLED_NOTE.format(n=n, why=NO_READS if seen.get("read") else NO_BUDGET)
 
 
 def held_note():
@@ -368,8 +414,7 @@ def held_note():
     if h.get("other"):
         out.append(f"{h['other']} sent by someone else (or sender unknown) left alone")
     if h.get("unchecked"):
-        out.append(UNCHECKED_NOTE.format(n=h["unchecked"]))
-        _ACTION.partial = True
+        out.append(unchecked_note(h["unchecked"], h.get("done")))
     held_start()
     return "; ".join(out)
 
@@ -377,20 +422,33 @@ def held_note():
 # Most message senders one request (a Cleanup action, a plan, a Quarantine action) reads from Gmail for mail the local
 # history does not have yet, over all its accounts: each read is one messages.get, about 10 a second per account at the
 # default GMAIL_UNITS_PER_SEC, and the request has to answer well inside the proxy's timeout (Cloudflare: 100 s). The
-# messages not looked up are left alone and the result says "run it again". Background work (AI sort) has no limit.
+# messages not looked up are left alone and the result says "run it again"; the senders read are remembered
+# (unified.sender_seen), so the next run starts where this one stopped. Each account gets an equal share of what is
+# left when its turn comes (what one does not use goes to the next), so one account cannot starve the others.
+# Background work (AI sort) has no limit.
 # DEFAULT - Roy may change: 300 (about 30 s)
 BULK_LOOKUPS = int(os.environ.get("BULK_LOOKUPS", "300"))
 
 
 def lookups_start(n=None):
     """Give this request (thread) its budget of Gmail sender look-ups; see BULK_LOOKUPS."""
-    _ACTION.lookups, _ACTION.partial = [BULK_LOOKUPS if n is None else n], False
+    _ACTION.lookups, _ACTION.partial, _ACTION.cap = [BULK_LOOKUPS if n is None else n], False, None
+    _ACTION.seen = {"read": 0, "known": 0}
+
+
+def lookups_account(accounts_left):
+    """The next account's share of this request's look-ups: an equal part of what is left over the accounts still to
+    go (this one included). Also restarts the count of what this account's look-ups learned (unchecked_note)."""
+    left = getattr(_ACTION, "lookups", None)
+    _ACTION.seen = {"read": 0, "known": 0}
+    if left is not None:
+        _ACTION.cap = [-(-max(0, left[0]) // max(1, accounts_left))]
 
 
 def lookups_end():
     """True when some of this request's work was left for another run; ends the budget."""
     partial = bool(getattr(_ACTION, "partial", False))
-    _ACTION.lookups, _ACTION.partial = None, False
+    _ACTION.lookups, _ACTION.partial, _ACTION.cap, _ACTION.seen = None, False, None, None
     return partial
 
 
@@ -399,10 +457,13 @@ def lookup_budget():
     left = getattr(_ACTION, "lookups", None)
     if left is None:
         return None
+    cap = getattr(_ACTION, "cap", None)
 
     def budget(n):
-        k = min(n, max(0, left[0]))
+        k = min(n, max(0, left[0]), max(0, cap[0]) if cap else n)
         left[0] -= k
+        if cap:
+            cap[0] -= k
         return k
     return budget
 

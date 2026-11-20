@@ -9,8 +9,8 @@ from collector import BACKFILL_DAYS, collect_status, qs
 from core import ACC, POOL, db, gmail_list, label_id, log, new_id
 from gmailops import (ARCHIVE_FILTER, AUTOMATION_KINDS, FOREIGN_NOTE, MAX_BULK, NEVER_SPAM_FILTER, QUARANTINE, STAR_FILTER,
                       TRASH_FILTER, _ACTION, _batch, _filter, _modify_existing, bulk_query, foreign_filters,
-                      held_note, held_start, lookup_budget, lookups_end, lookups_start, remove_app_filters,
-                      senders_of, UNCHECKED_NOTE)
+                      held_note, held_start, lookup_budget, lookups_account, lookups_end, lookups_start,
+                      remove_app_filters, senders_of, unchecked_note)
 from guard import (SENDER_KEY, frm, guard_sender, is_protected, keep_query, own_address, own_set, parse_protect_keys,
                    protected_set, sender_addr)
 from inbox import meta
@@ -273,9 +273,10 @@ def sender_action(d):
         acc_ids = [a for a in acc_ids if a in set(d["accounts"])]
     results, manual = [], []
     lookups_start()
-    for a in acc_ids:
+    for k, a in enumerate(acc_ids):
         em = ACC.email(a)
         held_start()
+        lookups_account(len(acc_ids) - k)
         try:
             note = []
             if act in FILTERING:  # a new action replaces the sender's earlier filters, it does not stack on them
@@ -424,15 +425,15 @@ def quarantine_action(d):
     if not (chosen or sender or d.get("all")):
         raise ValueError("choose messages, a sender, or all")
     _ACTION.note = f"quarantine {act}" + (f" {sender}" if sender else " (all)" if d.get("all") else " (chosen)")
-    results, partial = [], False
+    results = []
     lookups_start()
     accounts = ACC.list()
     unknown = sum(len(set(v)) for k, v in chosen.items() if k not in {a["id"] for a in accounts})
     if unknown:
         results.append({"email": "(unknown account)", "ok": False, "note": f"{unknown} not acted on: not a linked account"})
-    for a in accounts:
-        if chosen and a["id"] not in chosen:
-            continue
+    todo = [a for a in accounts if not chosen or a["id"] in chosen]
+    for k, a in enumerate(todo):
+        lookups_account(len(todo) - k)
         try:
             lid = _qlabel(a["id"])
             refused = 0
@@ -476,8 +477,7 @@ def quarantine_action(d):
             if other:
                 note += f"; {other} from another sender (or sender unknown) left in {QUARANTINE}"
             if unchecked:
-                note += "; " + UNCHECKED_NOTE.format(n=unchecked)
-                partial = True
+                note += "; " + unchecked_note(unchecked, n)
             if act == "release" and sender and remove_app_filters(a["id"], sender, kinds=("quarantine",), exact=True):
                 note += ", quarantine filter removed"
             results.append({"email": a["email"], "ok": True, "note": note})
@@ -489,7 +489,7 @@ def quarantine_action(d):
                 c.execute('UPDATE "Newsletter" SET status = NULL, "updatedAt" = now() '
                           'WHERE lower(email) = %s AND "emailAccountId" = %s AND status::text = \'AUTO_ARCHIVED\'',
                           (sender, acc))
-    lookups_end()
+    partial = lookups_end()
     log("quarantine", f"{act} {sender or ('selected' if chosen else 'all')}: "
         + "; ".join(f"{r['email']}: {r['note']}" for r in results))
     return {"results": results, "partial": partial}
@@ -656,8 +656,9 @@ def apply_plan(d):
                                            (addr,)).fetchall()]
     results = []
     lookups_start()
-    for a in acc_ids:
+    for k, a in enumerate(acc_ids):
         em = ACC.email(a)
+        lookups_account(len(acc_ids) - k)
         try:
             lid = label_id(a, QUARANTINE) if "quarantine" in destructive else None
             remove_app_filters(a, addr)  # a re-applied plan replaces the old one's filters (every kind), it doesn't add to them

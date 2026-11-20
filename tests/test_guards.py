@@ -275,6 +275,58 @@ class LookupBudget(World):
         self.assertTrue(r["partial"])
         self.assertIn("1 not done yet", r["results"][0]["note"])
 
+    def test_senders_read_once_are_remembered_so_a_rerun_gets_further(self):
+        # Gmail's from: search also finds deals@shop.com.au. When those come first, a run spends its whole budget on
+        # them; without remembering them, every run read the same ones again and never reached the real mail
+        others, mine = ["ab0001", "ab0002", "ab0003"], ["cd0001", "cd0002"]
+        self.acc.accs = self.acc.accs[:1]
+        self.g.found = {"from:": others + mine}
+        self.g.meta = {**{i: "AU <deals@shop.com.au>" for i in others}, **{i: JUNK for i in mine}}
+        real = self.g
+
+        def gmail(acc, path, method="GET", body=None, retry=True):
+            r = real(acc, path, method, body)
+            if path.endswith("batchModify") and "TRASH" in body["addLabelIds"]:
+                real.found["from:"] = [i for i in real.found["from:"] if i not in body["ids"]]
+            return r
+        runs = []
+        with Patched(cleanup, gmail=gmail):
+            for _ in range(4):
+                runs.append(cleanup.sender_action({"addr": JUNK, "action": "delete"}))
+                if not runs[-1]["partial"]:
+                    break
+        self.assertEqual(self.g.found["from:"], others)                 # all of the real sender's mail is in Trash
+        self.assertEqual(len(runs), 3)
+        self.assertEqual(self.db.seen[("acc1", "ab0001")], "deals@shop.com.au")
+
+    def test_a_run_that_gets_nowhere_says_why_instead_of_run_it_again(self):
+        self.acc.accs = self.acc.accs[:1]
+        self.g.meta = {}                                                  # Gmail answers no metadata read
+        r = cleanup.sender_action({"addr": JUNK, "action": "delete"})
+        self.assertFalse(r["partial"])
+        note = r["results"][0]["note"]
+        self.assertNotIn("run it again", note)
+        self.assertIn("3 not done: Gmail did not return their senders", note)
+        self.g.found = {"labelIds=Label_Q": ["ee0001", "ee0002", "ee0003"]}
+        r = cleanup.quarantine_action({"action": "delete", "all": True})
+        self.assertFalse(r["partial"])
+        self.assertIn("1 not done: Gmail did not return their senders", r["results"][0]["note"])
+
+    def test_each_account_gets_its_share_of_the_look_ups(self):
+        import gmailops
+        self.db.on("SELECT DISTINCT account_id FROM unified.msg", [("acc1",), ("acc2",)])
+        read = []
+        real = self.g
+
+        def gmail(acc, path, method="GET", body=None, retry=True):
+            if path.startswith("/messages/") and method == "GET":
+                read.append(acc)
+            return real(acc, path, method, body)
+        with Patched(gmailops, BULK_LOOKUPS=4), Patched(cleanup, gmail=gmail):
+            r = cleanup.sender_action({"addr": JUNK, "action": "delete"})
+        self.assertEqual((read.count("acc1"), read.count("acc2")), (2, 2))   # not 4 and 0
+        self.assertTrue(r["partial"])
+
     def test_background_work_has_no_budget(self):
         import gmailops
         self.assertIsNone(gmailops.lookup_budget())

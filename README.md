@@ -222,8 +222,11 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
   dialog opens, so mail that arrives in between is not in it. Bulk actions run inside the request; one action
   handles at most `MAX_BULK` messages per account. So that a request always answers well inside the proxy's timeout
   (Cloudflare gives up after 100 seconds), one action reads at most `BULK_LOOKUPS` senders (default 300, about 30
-  seconds) from Gmail for mail not collected yet; the messages it could not check are left alone and the result
-  says **Partly done: run it again** to continue. If the page still gets no answer in time, it says the action may
+  seconds) from Gmail for mail not collected yet, shared fairly between the accounts; the messages it could not
+  check are left alone and the result says **Partly done: run it again** to continue. The senders it read are
+  remembered (`unified.sender_seen`, 30 days; a read that failed is retried after an hour), so the next run picks up
+  where this one stopped instead of reading the same messages again. A run that changed nothing and learned no sender
+  does not say "run it again": it says what stopped it (Gmail not answering the look-ups, or no look-ups left). If the page still gets no answer in time, it says the action may
   still be running and to check **Undo a bulk action** before trying again.
 - **Protected** senders (an address, or a whole domain like `@yourbank.com`) can't be unsubscribed, archived, deleted,
   blocked, quarantined or marked as spam, by hand or by a plan: the buttons are disabled and the server refuses. The
@@ -358,7 +361,7 @@ All settings are environment variables; see [`.env.example`](.env.example).
 | `RULES_AUTO_MAX_DELETES` | `3` | most rule copies the automatic sync deletes between two "Sync now" (counted across runs); the rest wait for "Sync now" |
 | `BACKFILL_DAYS`, `BACKFILL_STEP` | `0` (all history), `2000` | how far back the collector reads (days; 0 = to the account's first email), and how much per run per account |
 | `MAX_BULK` | `200000` | most emails one bulk action touches per account |
-| `BULK_LOOKUPS` | `300` | most message senders one bulk action reads from Gmail per request (mail not collected yet); the rest is left for "run it again" |
+| `BULK_LOOKUPS` | `300` | most message senders one bulk action reads from Gmail per request (mail not collected yet), split evenly over the accounts; the rest is left for "run it again" |
 | `OPENROUTER_API_KEY`, `AI_MODEL`, `AI_BASE_URL` | empty, `anthropic/claude-haiku-5.5`, OpenRouter | all AI features: AI Cleanup, AI sort, AI suggest, background analyst (off without a key; the background analyst is also off until turned on in AI Cleanup) |
 | `AI_MAX_CALLS_PER_DAY`, `AI_PLANS_PER_RUN`, `AI_MIN_EMAILS` | `400`, `4`, `5` | daily AI call cap; senders the background analyst plans per run; minimum emails before a sender is planned |
 | `QUARANTINE_LABEL`, `QUARANTINE_SHOW` | `Quarantine`, `600` | Gmail label for held mail; messages per account listed on the Quarantine tab |
