@@ -230,5 +230,45 @@ class BackgroundDefault(unittest.TestCase):
         self.assertEqual(self.run_with({"ai_background": "0"}), [])
 
 
+class Progress(unittest.TestCase):
+    """A mailbox size Gmail did not give is unknown (None), not 0; turning the background analyst on needs AI."""
+
+    def test_a_failed_profile_read_is_unknown_not_zero(self):
+        db = Db().on("SELECT count(*)", [(0,)]).on("FROM unified.msg GROUP BY 1", [("acc1", 120), ("acc2", 30)])
+
+        def gmail(acc, path, method="GET", body=None, retry=True):
+            if acc == "acc2":
+                raise RuntimeError("Gmail GET /profile: 500 busy")
+            return {"messagesTotal": 1000}
+        with Patched(ai, db=db, gmail=gmail, ACC=Accounts("me@x.com", "two@x.com"), KEY="",
+                     setting=lambda k, d=None: d):
+            g = ai.progress()
+        self.assertIsNone(g["mailboxTotal"])
+        self.assertEqual([a["total"] for a in g["accounts"]], [1000, None])
+        self.assertFalse(g["ai"])
+        with Patched(ai, db=db, gmail=lambda *a, **k: {"messagesTotal": 7}, ACC=Accounts("me@x.com"), KEY="k",
+                     setting=lambda k, d=None: d):
+            g = ai.progress()
+        self.assertEqual((g["mailboxTotal"], g["ai"]), (7, True))
+
+    def test_the_background_analyst_cannot_be_turned_on_without_ai(self):
+        stored = {}
+        with Patched(ai, KEY="", set_setting=stored.__setitem__):
+            with self.assertRaises(PermissionError):
+                ai.set_background({"on": True})
+            ai.set_background({"on": False})   # turning it off always works
+        self.assertEqual(stored, {"ai_background": "0"})
+
+
+@unittest.skipUnless(__import__("shutil").which("node"), "node not installed")
+class Texts(unittest.TestCase):
+    def test_ai_cleanup_texts(self):
+        import subprocess
+        r = subprocess.run(["node", os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_texts.js")],
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("AI-TEXTS OK", r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -524,17 +524,21 @@ async function loadProgress() {
   let g;
   try { g = await api("/api/ai/progress"); } catch (e) { $("#ai-progress").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
   const pct = (a, b) => (b ? Math.min(100, Math.round((100 * a) / b)) : 0);
+  // a mailbox size Gmail did not give is "unknown", not 0 (which read as "120 of 0 (0%)")
+  const of = (a, b) => b == null ? `${fmt(a)} of unknown` : `${fmt(a)} of ${fmt(b)} (${pct(a, b)}%)`;
   $("#ai-progress").innerHTML = `<div class="ph" style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap">
       <h3 style="margin:0">Working through your whole history</h3>
-      <label><input type="checkbox" id="ai-bg" ${g.background ? "checked" : ""}> Analyze senders in the background</label></div>
+      <label${g.ai ? "" : ' title="AI is not configured on this server"'}><input type="checkbox" id="ai-bg" ${g.background ? "checked" : ""}
+        ${g.ai ? "" : "disabled"}> Analyze senders in the background</label></div>
     <p class="note">Zero Sum reads your mail a little at a time (every 15 minutes, within Gmail's limits) and plans senders as their
       history comes in, biggest first. Nothing is changed until you apply a plan.</p>
-    <div class="prog-grid"><div>Mail history collected: <b>${fmt(g.collected)}</b> of ${fmt(g.mailboxTotal)} (${pct(g.collected, g.mailboxTotal)}%)
+    <div class="prog-grid"><div title="Gmail's total also counts sent mail, drafts and chats, which are not collected">Mail history collected: <b>${of(g.collected, g.mailboxTotal).replace(" of", "</b> of")}
       <div class="meter"><div style="width:${pct(g.collected, g.mailboxTotal)}%"></div></div></div>
     <div>Senders analyzed: <b>${fmt(g.planned)}</b> of ${fmt(g.senders)} with ${"5+"} emails (${pct(g.planned, g.senders)}%)
       <div class="meter"><div style="width:${pct(g.planned, g.senders)}%"></div></div></div></div>
     <details><summary class="note">Per account · AI calls today: ${fmt(g.callsToday)} of ${fmt(g.callCap)}</summary>
-      ${g.accounts.map((a) => `<div class="note">${esc(a.email)}: ${fmt(a.collected)} of ${fmt(a.total)} (${pct(a.collected, a.total)}%)</div>`).join("")}</details>`;
+      ${g.accounts.map((a) => `<div class="note">${esc(a.email)}: ${of(a.collected, a.total)}</div>`).join("")}
+      <div class="note">Gmail's totals also count sent mail, drafts and chats, which are not collected, so this rarely reaches 100%.</div></details>`;
   $("#ai-bg").onchange = (e) => api("/api/ai/background", { on: e.target.checked }).catch((err) => alert(err.message));
 }
 async function loadPlans() {
@@ -551,7 +555,9 @@ async function loadPlans() {
   if (r.busy) pollT = setTimeout(loadPlans, 5000);
   const open = new Set([...document.querySelectorAll("#ai-body .plan[data-open]")].map((x) => x.dataset.addr));
   $("#ai-body").innerHTML = d.plans.length ? d.plans.map((p, i) => planCard(p, i)).join("")
-    : `<div class="empty">No plans yet. Click "Analyze top senders": the AI reads each sender's recent subjects and proposes
+    : !d.ai ? `<div class="empty">No plans yet. AI is not configured on this server: set OPENROUTER_API_KEY (see the README)
+       to use AI Cleanup.</div>`
+    : `<div class="empty">No plans yet. Click "✨ Analyze now": the AI reads each sender's recent subjects and proposes
        which emails to keep and which to clear. Nothing changes until you apply a plan.</div>`;
   d.plans.forEach((p, i) => { if (open.has(p.addr)) showPreview(i); });
 }

@@ -349,10 +349,11 @@ def progress(q=None):
 
     def total(a):
         try:
-            return gmail(a["id"], "/profile").get("messagesTotal", 0)
-        except Exception:  # noqa: BLE001
-            return 0
+            return int(gmail(a["id"], "/profile")["messagesTotal"])
+        except Exception:  # noqa: BLE001 - not known: shown as "unknown", never as an empty mailbox
+            return None
     totals = dict(zip([a["id"] for a in ACC.list()], POOL.map(total, ACC.list())))
+    known = [t for t in totals.values() if t is not None]
     with db() as c:
         coll = dict(c.execute("SELECT account_id, count(*) FROM unified.msg GROUP BY 1").fetchall())
         with_subj = c.execute("SELECT count(*) FROM unified.msg WHERE subject IS NOT NULL").fetchone()[0]
@@ -361,10 +362,11 @@ def progress(q=None):
         planned = c.execute("SELECT count(*) FROM unified.ai_plan").fetchone()[0]
         calls = c.execute("SELECT v FROM unified.settings WHERE k = %s",
                           (f"ai_calls:{datetime.datetime.utcnow():%Y-%m-%d}",)).fetchone()
-    return {"collected": sum(coll.values()), "mailboxTotal": sum(totals.values()), "withSubject": with_subj,
+    return {"collected": sum(coll.values()), "mailboxTotal": sum(known) if len(known) == len(totals) else None,
+            "withSubject": with_subj, "ai": bool(KEY),
             "senders": senders, "planned": planned, "background": background_on(),
             "callsToday": int(calls[0]) if calls else 0, "callCap": DAILY_CAP,
-            "accounts": [{"email": a["email"], "collected": coll.get(a["id"], 0), "total": totals.get(a["id"], 0)}
+            "accounts": [{"email": a["email"], "collected": coll.get(a["id"], 0), "total": totals.get(a["id"])}
                          for a in ACC.list()]}
 
 
@@ -374,5 +376,7 @@ def background_on():
 
 
 def set_background(d):
+    if d.get("on") and not KEY:
+        raise PermissionError("AI is not configured: set OPENROUTER_API_KEY (and optionally AI_MODEL)")
     set_setting("ai_background", "1" if d.get("on") else "0")
     return {"ok": True}
