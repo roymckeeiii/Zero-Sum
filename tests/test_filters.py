@@ -286,6 +286,12 @@ class BoundedWait(World):
         self.assertEqual(removed, ["acc2"])
         self.assertIn("could not be removed in me@x.com", r["results"][0]["note"])
 
+    def test_a_word_plan_with_a_busy_account_stays_partly_applied(self):
+        with self.holding("acc1", S):
+            r = cleanup.apply_plan({"addr": S, "groups": [], "default": "archive"})
+        self.assertTrue(r["partial"])
+        self.assertEqual(self.db.said("UPDATE unified.ai_plan SET status")[-1][1], ("partial", S))
+
     def test_bulk_protect_skips_a_sender_another_action_is_working_on(self):
         logged = []
         with Patched(cleanup, log=lambda kind, text, *a: logged.append(text)), self.holding("acc1", S):

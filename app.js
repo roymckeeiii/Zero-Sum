@@ -569,7 +569,7 @@ function planCard(p, i) {
   (p.subjects || []).forEach((x) => { const c = classify(x.subject, p); sampleCounts[c.text] = (sampleCounts[c.text] || 0) + x.count; });
   return `<div class="card plan ${done ? "done" : ""}" data-i="${i}" data-addr="${esc(p.addr)}">
     <div class="ph"><div><b>${esc(p.addr)}</b> <span class="note">· ${fmt(p.count)} emails · ${p.accounts.map((a) => acctChip(a.id, a.email)).join("")}</span>
-      ${done ? `<span class="chip">${esc(p.status)}</span>` : p.status === "partial" ? `<span class="chip" title="Its Gmail filters are active. Apply again to continue; Re-analyze keeps them until the new plan is applied; Stop here keeps what was done.">partly applied: filters active, apply again to continue</span>` : ""}<div class="note">${esc(p.reason || "")}</div>
+      ${done ? `<span class="chip">${esc(p.status)}</span>` : p.status === "partial" ? `<span class="chip partial" title="Its Gmail filters are active. Apply again to continue; Re-analyze keeps them until the new plan is applied; Stop here keeps what was done.">partly applied: filters active, apply again to continue</span>` : ""}<div class="note">${esc(p.reason || "")}</div>
       ${srt ? `<div class="note">AI sort ${esc(srt.status)}: ${fmt(srt.done)}/${fmt(srt.total)} checked, ${fmt(srt.kept)} kept; the rest → ${GACT[srt.action]}.
         Rule: <i>${esc(srt.rule)}</i> <button data-pa="stop" data-i="${i}">Stop AI sort</button></div>` : ""}</div>
       <div class="grp">${done ? `<button data-pa="undo" data-i="${i}">Review again</button>` : `<button data-pa="skip" data-i="${i}"${p.status === "partial" ? ` title="Leave it partly applied: its Gmail filters stay (Keep or Reset on the sender removes them)">Stop here` : ">Skip"}</button>

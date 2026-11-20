@@ -38,6 +38,11 @@ class PhoneAiPlans(unittest.TestCase):
         self.assertIn("grid-template-columns:minmax(0,1fr) minmax(0,1fr);", m.group(1))
         self.assertIn(".plan .g > * { min-width:0; }", m.group(2))
 
+    def test_the_partly_applied_chip_wraps(self):
+        # its text is longer than a 320 px card: as one unbroken chip it pushed the card sideways
+        self.assertIn(".plan .chip.partial { white-space:normal;", read("index.html"))
+        self.assertIn('<span class="chip partial"', read("app.js"))
+
 
 class PhoneOtherTabs(unittest.TestCase):
     """At 390 and 320 px: peek and Quarantine rows give the subject its own line, the Quarantine toolbar is two even
