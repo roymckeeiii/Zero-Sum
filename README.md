@@ -273,7 +273,8 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
   again in Inbox Zero under a new account id, or every master rule the copies came from gone at once), nothing is
   removed until "Sync now" confirms the change. A copy is saved in "Saved rules" before it is deleted, and before an
   update when someone had changed it in that account. Every saved rule can be put back from "Saved rules" on the
-  Rules tab.
+  Rules tab, including an account's own earlier rules after `MASTER_EMAIL` moved to that account. A saved rule you
+  are told to restore by hand (its old name now clashes with another rule) is never pruned.
 - A rule that forwards, sends or replies by email, or calls a webhook, would do that from every account it is copied
   to, with the master's destinations. Any action type Zero Sum does not know to stay inside the account is treated
   the same way. The Rules tab shows each destination, and such a rule is copied to an account only after you tick

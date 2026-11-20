@@ -33,7 +33,8 @@
   later sends somewhere else, it is needed again. Without a current OK the rule is reported, not copied, and a copy
   already there that sends anywhere not OK'd (sending was taken back, or the copy predates the OK) has those actions
   removed ("stop-sending"); the copy is backed up first.
-- Every backup can be restored from the Rules tab (backups() / restore()); backups of rules still mapped are kept.
+- Every backup can be restored from the Rules tab (backups() / restore()), the master account's too (saved before
+  MASTER_EMAIL moved to it); backups of rules still mapped, and ones the user was told to restore by hand, are kept.
 """
 import hashlib, json, os, threading
 
@@ -495,6 +496,9 @@ def _sync_account(master, acc, mrules, incl, apply, allow=None):
             elif op == "restore":
                 _restore(c, acc["id"], target, b[1], b[2], True, f"replaced by its pre-sync version (backup {b[0]})",
                          action_account)
+            elif op == "detach" and b:   # its earlier version clashes and is to be restored by hand: keep that backup
+                c.execute("UPDATE unified.rule_backup SET reason = %s || reason WHERE id = %s AND reason NOT LIKE %s",
+                          (KEEP_PREFIX, b[0], KEEP_PREFIX + "%"))
             c.execute("DELETE FROM unified.rule_map WHERE master_rule_id = %s AND account_id = %s", (mid, acc["id"]))
         _prune_backups(c)
         c.commit()
@@ -505,16 +509,22 @@ def _sync_account(master, acc, mrules, incl, apply, allow=None):
     return ops
 
 
+KEEP_PREFIX = "kept: "   # a backup the user was told to restore by hand: never pruned
+
+
 def _prune_backups(c):
-    """Keep the newest 500 backups, and always every backup of a rule that is still mapped (it may be put back)."""
+    """Keep the newest 500 backups, and always every backup of a rule that is still mapped (it may be put back) and
+    every backup the user was told to restore by hand (reason starts with KEEP_PREFIX)."""
     c.execute("DELETE FROM unified.rule_backup b WHERE b.id NOT IN (SELECT id FROM unified.rule_backup ORDER BY id DESC "
               "LIMIT 500) AND NOT EXISTS (SELECT 1 FROM unified.rule_map m WHERE m.account_id = b.account_id AND "
-              "m.target_rule_id = b.rule_id)")
+              "m.target_rule_id = b.rule_id) AND b.reason NOT LIKE %s", (KEEP_PREFIX + "%",))
 
 
 def backups():
-    """The saved rules, newest first, for the accounts this app may use (ACCOUNT_OWNERS), never the master's."""
-    accs = {a["id"]: a["email"] for a in ACC.list() if not a["master"]}
+    """The saved rules, newest first, for the accounts this app may use (ACCOUNT_OWNERS). Sync only ever saves rules of
+    the accounts it copies to, so a backup of the master's account is from before MASTER_EMAIL moved to it: shown
+    too, so that account's own earlier rules can still be put back."""
+    accs = {a["id"]: a["email"] for a in ACC.list()}
     with db() as c:
         rows = c.execute("SELECT b.id, b.at, b.account_id, b.rule_id, b.reason, b.rule->>'name', "
                          'EXISTS (SELECT 1 FROM "Rule" r WHERE r.id = b.rule_id AND r."emailAccountId" = b.account_id) '
@@ -528,7 +538,7 @@ def restore(d):
     """Put one backed-up rule back in its account, as it was when saved. What is there now is saved first; the rule
     is no longer managed by sync (its mapping and tick are removed), so the next sync does not overwrite it again."""
     bid = int(d["id"])
-    accs = {a["id"]: a for a in ACC.list() if not a["master"]}
+    accs = {a["id"]: a for a in ACC.list()}   # the master too: see backups()
     with LOCK:
         with db() as c:
             row = c.execute("SELECT account_id, rule_id, rule, actions FROM unified.rule_backup WHERE id = %s",

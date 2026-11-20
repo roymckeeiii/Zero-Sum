@@ -271,6 +271,21 @@ class Removals(World):
         self.assertIn("INSERT INTO unified.rule_backup", [s for s, _ in self.writes()][0])  # the copy is saved first
         self.assertEqual(self.db.said("DELETE FROM unified.rule_map")[0][1], ("m1", "acc2"))
 
+    def test_an_adopted_rule_whose_old_version_clashes_is_detached_and_its_backup_kept_from_pruning(self):
+        own = {"id": "old1", "name": "Other", "enabled": True, "automate": True, "emailAccountId": "acc2"}
+        self.backup = [(7, "acc2", "old1", "adopted as a copy of master rule Receipts", own, [])]
+        self.rules["acc2"] = [rule("old1", "Receipts"), rule("x", "Other")]     # "Other" is taken meanwhile
+        self.map, self.include = [("m1", "acc2", "old1", "h", True)], set()
+        res = rulesync.sync(confirm=["acc2:old1"])
+        self.assertEqual(self.ops(res), [("detach", "two@x.com", "Receipts")])
+        self.assertIn("restore it from the backups list", res["ops"][0]["detail"])
+        (sql, params), = self.db.said("UPDATE unified.rule_backup SET reason")
+        self.assertEqual(params[:2], (rulesync.KEEP_PREFIX, 7))
+        order = [s for s, _ in self.db.sql]
+        self.assertLess(order.index(sql), order.index(self.db.said("DELETE FROM unified.rule_backup")[0][0]))
+        self.assertIn("reason NOT LIKE %s", self.db.said("DELETE FROM unified.rule_backup")[0][0])
+        self.assertEqual(self.db.said("DELETE FROM unified.rule_backup")[0][1], (rulesync.KEEP_PREFIX + "%",))
+
     def test_a_mapping_made_before_the_adopted_flag_is_known_by_its_backup(self):
         own = {"name": "Mine", "enabled": True, "automate": True}
         self.backup = [(3, "acc2", "old1", "adopted as a copy of master rule Receipts", own, [])]
@@ -419,12 +434,20 @@ class Restore(World):
         self.assertEqual(self.db.said('INSERT INTO "Rule"')[0][1][:2], ["gone1", "acc2"])
         self.assertFalse(self.db.said("INSERT INTO unified.rule_backup"))
 
-    def test_a_backup_of_an_account_out_of_scope_or_the_master_is_refused(self):
-        for acc in ("acc1", "acc9"):
-            self.row = (acc, "r1", {"name": "Mine"}, [])
-            with self.assertRaises(KeyError):
-                rulesync.restore({"id": 5})
+    def test_a_backup_of_an_account_out_of_scope_is_refused(self):
+        self.row = ("acc9", "r1", {"name": "Mine"}, [])
+        with self.assertRaises(KeyError):
+            rulesync.restore({"id": 5})
         self.assertEqual(self.writes(), [])
+
+    def test_the_master_accounts_own_earlier_rules_stay_listed_and_can_be_put_back(self):
+        # saved while this account was a sync target; MASTER_EMAIL has since moved to it
+        self.db.on("FROM unified.rule_backup b WHERE b.account_id = ANY", lambda p: [
+            (5, "2026-01-01", "acc1", "r1", "adopted as a copy of master rule X", "Mine", False)] if "acc1" in p[0] else [])
+        self.assertEqual([b["account"] for b in rulesync.backups()["backups"]], ["master@x.com"])
+        self.row = ("acc1", "r1", {"name": "Mine", "enabled": True}, [])
+        self.assertEqual(rulesync.restore({"id": 5})["account"], "master@x.com")
+        self.assertEqual(self.db.said('INSERT INTO "Rule"')[0][1][:2], ["r1", "acc1"])
 
     def test_a_name_clash_is_refused_before_anything_is_written(self):
         self.rules["acc2"] = [rule("old1", "Receipts"), rule("x", "Mine")]
