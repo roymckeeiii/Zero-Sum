@@ -44,6 +44,8 @@ class OneClick(unittest.TestCase):
            "nat64.evil.com": ["64:ff9b::a00:1"], "nat64local.evil.com": ["64:ff9b:1::a00:1"],
            "compat.evil.com": ["::a00:1"], "sitelocal.evil.com": ["fec0::1"], "6to4.evil.com": ["2002:a00:1::1"],
            "teredo.evil.com": ["2001:0:4136:e378:8000:63bf:f5ff:fffa"],   # Teredo client 10.0.0.5
+           "siit.evil.com": ["::ffff:0:a00:1"],                         # IPv4-translated (SIIT): 10.0.0.1
+           "siitpub.evil.com": ["::ffff:0:5db8:d822"],                  # ... even of a public address
            "nat64ok.shop.com": ["64:ff9b::5db8:d822"]}                     # NAT64 for 93.184.216.34
 
     def setUp(self):
@@ -71,7 +73,7 @@ class OneClick(unittest.TestCase):
         self.assertEqual(Conn.made, [])                           # nothing was even connected to
 
     def test_ipv6_spellings_of_private_ipv4_and_internal_ipv6_are_refused(self):
-        for host in ("nat64", "nat64local", "compat", "sitelocal", "6to4", "teredo"):
+        for host in ("nat64", "nat64local", "compat", "sitelocal", "6to4", "teredo", "siit", "siitpub"):
             url = f"https://{host}.evil.com/u"
             with self.assertRaises(ValueError, msg=url):
                 cleanup.unsub_target(url)

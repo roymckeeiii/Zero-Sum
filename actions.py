@@ -125,6 +125,7 @@ _NAT64 = ipaddress.ip_network("64:ff9b::/96")        # well-known NAT64 prefix: 
 _REFUSED_V6 = [ipaddress.ip_network(n) for n in (
     "64:ff9b:1::/48",   # local-use NAT64: whatever the operator maps it to
     "::/96",            # IPv4-compatible (deprecated): ::10.0.0.1
+    "::ffff:0:0:0/96",  # IPv4-translated (SIIT): ::ffff:0:10.0.0.1, routed to an IPv4 address by a translator
     "fec0::/10",        # site-local (deprecated): still routed on some internal networks
 )]
 
@@ -132,7 +133,7 @@ _REFUSED_V6 = [ipaddress.ip_network(n) for n in (
 def _private_ip(ip):
     """Is this address one an unsubscribe POST must not reach? Not public, multicast, or an IPv6 address that stands
     for a private IPv4 one (mapped, NAT64, 6to4, Teredo) or that a network may route internally (local-use NAT64,
-    IPv4-compatible, site-local): Python's is_global calls some of those global."""
+    IPv4-compatible, IPv4-translated, site-local): Python's is_global calls some of those global."""
     if ip.version == 6:
         if any(ip in n for n in _REFUSED_V6):
             return True
