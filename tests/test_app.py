@@ -156,6 +156,13 @@ class Gate(unittest.TestCase):
         self.assertEqual(self.raw_post("abc")[0], 400)
         self.assertEqual(len(self.ran), 1)
 
+    def test_a_body_that_is_not_a_json_object_is_refused(self):
+        self.mode(token=True, header=False)
+        for body in (b"[1, 2]", b'"text"', b"42", b"null", b"true"):
+            status, out = self.raw_post(str(len(body)), body)
+            self.assertEqual((status, out), (400, {"error": "bad json"}), body)
+        self.assertEqual(self.ran, [])
+
 
 class Limits(unittest.TestCase):
     """Unauthenticated connections cannot tie the server up: an idle or slow one is dropped and holds no request slot,

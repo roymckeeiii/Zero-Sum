@@ -249,6 +249,8 @@ class H(BaseHTTPRequestHandler):
         try:
             d = json.loads(self.rfile.read(n) or b"{}")
         except ValueError:
+            d = None
+        if not isinstance(d, dict):   # every handler takes an object: a list, string or number is refused here
             return self.send(400, {"error": "bad json"})
         self.work(self.run, POST[self.path], d)
 
