@@ -5,8 +5,10 @@
 
 Prints, per watched item, "same" or a unified diff, and exits 0 when nothing Zero Sum depends on changed (bump
 inbox-zero.version and you are done), 1 when something did (adapt Zero Sum first), 2 on errors. Watched:
-- the Prisma models Zero Sum reads or writes (Account, EmailAccount, Rule, Action, Newsletter, ExecutedRule) and the
-  enums it casts to (ActionType, LogicalOperator, SystemType, NewsletterStatus, ExecutedRuleStatus);
+- the columns Zero Sum reads or writes in Inbox Zero's Prisma models, their model-level attributes (@@unique, @@map)
+  and the enum values it uses: exactly the contract declared in izdb.py (VERSIONED columns included: a release
+  that adds or drops one shows up), not the whole models, so a new upstream
+  column that Zero Sum never touches is not reported;
 - apps/web/utils/encryption.ts (how Google tokens are encrypted);
 - the environment variable names apps/web/env.ts accepts (deployments set some of them);
 - the services, network and scheduled endpoints in docker-compose.yml (the compose add-on joins them).
@@ -16,8 +18,8 @@ import difflib, os, re, sys, urllib.request
 
 REPO = os.environ.get("INBOX_ZERO_REPO", "elie222/inbox-zero")
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MODELS = ["Account", "EmailAccount", "Rule", "Action", "Newsletter", "ExecutedRule"]
-ENUMS = ["ActionType", "LogicalOperator", "SystemType", "NewsletterStatus", "ExecutedRuleStatus"]
+sys.path.insert(0, HERE)
+import izdb  # noqa: E402 - the one declared list of upstream tables, columns and enums
 
 
 def get(url):
@@ -44,6 +46,29 @@ def block(schema, kind, name):
     return m.group(0) if m else f"({kind} {name} not found)"
 
 
+def model_contract(schema, model, columns):
+    """The parts of a Prisma model Zero Sum depends on: the definition line of each used column (found by field name
+    or by its @map name) and the model-level @@ attributes (unique constraints back ON CONFLICT, @@map the table name)."""
+    blk = block(schema, "model", model)
+    if blk.startswith("("):
+        return blk
+    lines = [re.sub(r"\s+", " ", ln.split("//")[0]).strip() for ln in blk.splitlines()[1:-1]]
+    out = []
+    for col in columns:
+        hit = [ln for ln in lines if re.match(rf"{re.escape(col)}\s", ln) or re.search(rf'@map\("{re.escape(col)}"\)', ln)]
+        out.append(hit[0] if hit else f"(column {col} not found)")
+    return "\n".join(out + sorted(ln for ln in lines if ln.startswith("@@unique") or ln.startswith("@@map")))
+
+
+def enum_contract(schema, name, values):
+    """An enum Zero Sum uses: that it exists, and whether each value Zero Sum names is still there."""
+    blk = block(schema, "enum", name)
+    if blk.startswith("("):
+        return blk
+    have = {ln.split("//")[0].strip().split(" ")[0] for ln in blk.splitlines()[1:-1]}
+    return "\n".join([f"enum {name}"] + [f"{v}: {'present' if v in have else 'MISSING'}" for v in values])
+
+
 def env_names(src):
     return "\n".join(sorted(set(re.findall(r"^\s{2,}([A-Z][A-Z0-9_]+):\s*z\.", src, re.M))))
 
@@ -60,8 +85,9 @@ def compose_shape(src):
 
 def watched(tag):
     schema = raw(tag, "apps/web/prisma/schema.prisma")
-    items = {f"model {m}": block(schema, "model", m) for m in MODELS}
-    items.update({f"enum {e}": block(schema, "enum", e) for e in ENUMS})
+    items = {f"model {m} (columns Zero Sum uses)": model_contract(schema, m, cols + izdb.VERSIONED.get(m, []))
+             for m, cols in izdb.TABLES.items()}
+    items.update({f"enum {e}": enum_contract(schema, e, vals) for e, vals in izdb.ENUMS.items()})
     items["utils/encryption.ts"] = raw(tag, "apps/web/utils/encryption.ts")
     items["env.ts variable names"] = env_names(raw(tag, "apps/web/env.ts"))
     items["docker-compose services/endpoints"] = compose_shape(raw(tag, "docker-compose.yml"))

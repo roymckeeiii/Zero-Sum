@@ -2,15 +2,26 @@
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const fmt = (n) => (n == null ? "–" : Number(n).toLocaleString());
-const S = { tab: "inbox", account: "", limit: 30, items: [], sel: -1, accounts: [], images: false, slot: {} };
+const S = { tab: "inbox", account: "", limit: 30, items: [], sel: -1, accounts: [], imagesFor: null, slot: {} };
 
 async function api(path, body) {
-  const r = await fetch(path, body ? { method: "POST", headers: { "Content-Type": "application/json", "X-Requested-With": "zero-sum" },
-    body: JSON.stringify(body) } : {});
-  const d = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
-  if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-  return d;
+  let r;
+  try {
+    r = await fetch(path, body ? { method: "POST", headers: { "Content-Type": "application/json", "X-Requested-With": "zero-sum" },
+      body: JSON.stringify(body) } : {});
+  } catch (e) {  // never reached the app: offline, or an expired sign-in redirected to the login page
+    throw new Error("Could not reach Zero Sum. Reload the page (your sign-in may have expired).");
+  }
+  const d = await r.json().catch(() => null);
+  if (!d && body && (r.status >= 500 || r.status === 408)) {  // the proxy gave up waiting (524, 504), not the app
+    throw new Error(`No answer in time (HTTP ${r.status}). The action may still be running: wait a minute, then check ` +
+      "Cleanup > Undo a bulk action before trying again.");
+  }
+  if (!r.ok) throw new Error(d?.error || `HTTP ${r.status}`);
+  return d ?? { error: `HTTP ${r.status}` };
 }
+/* a bulk action that left messages for another run (BULK_LOOKUPS) says so above its per-account notes */
+const partlyDone = (r) => r.partial ? `<p class="err"><b>Partly done: run it again to continue.</b> Some messages' senders could not be looked up in one go and were left alone.</p>` : "";
 
 /* account colors: fixed categorical order by account (sorted by email), never by rank; past 8 -> neutral */
 function slotOf(id) { const i = S.slot[id]; return i == null || i >= 8 ? "var(--s9)" : `var(--s${i + 1})`; }
@@ -18,6 +29,13 @@ function setSlots(accs) { S.slot = {}; [...accs].sort((a, b) => a.email.localeCo
 const short = (email) => email.split("@")[0];
 const acctChip = (id, email) => `<span class="chip"><span class="dot" style="background:${slotOf(id)}"></span>${esc(short(email))}</span>`;
 
+// A server timestamp (ISO 8601 with its offset) as "YYYY-MM-DD HH:MM" on this browser's clock: the server's own
+// text is in the database's time zone, often UTC, which is not when it happened for the person reading the list.
+function stamp(iso) {
+  const d = new Date(iso), p = (n) => String(n).padStart(2, "0");
+  if (!iso || isNaN(d)) return iso || "";
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
 function when(ts) {
   const d = new Date(ts * 1000), now = new Date();
   if (d.toDateString() === now.toDateString()) return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
@@ -37,25 +55,27 @@ $("#tabs").onclick = (e) => {
   const b = e.target.closest("button[data-tab]");
   if (!b) return;
   S.tab = b.dataset.tab;
-  document.querySelectorAll("#tabs button").forEach((x) => x.classList.toggle("on", x === b));
+  document.querySelectorAll("#tabs button").forEach((x) => { x.classList.toggle("on", x === b); x.setAttribute("aria-current", x === b ? "page" : "false"); });
   document.querySelectorAll(".view").forEach((v) => v.classList.toggle("on", v.id === `v-${S.tab}`));
   if (!loaded[S.tab]) { loaded[S.tab] = true; ({ cleanup: loadSenders, ai: loadPlans, quarantine: loadQuarantine, analytics: loadAnalytics, rules: loadRules })[S.tab]?.(); }
 };
 
 /* ------------------------------------------------------------------ inbox */
 async function loadAccounts() {
-  try { S.accounts = await api("/api/accounts"); } catch (e) { S.accounts = []; }
+  let failed = null;  // a failed load is not "no accounts": say what went wrong instead
+  try { S.accounts = await api("/api/accounts"); } catch (e) { S.accounts = []; failed = e.message; }
   setSlots(S.accounts);
   const total = S.accounts.reduce((n, a) => n + (a.unread || 0), 0);
-  $("#accounts").innerHTML = `<a data-id="" class="${S.account ? "" : "on"}"><span>All accounts</span><span class="n">${total || ""}</span></a>` +
-    S.accounts.map((a) => `<a data-id="${esc(a.id)}" class="${a.id === S.account ? "on" : ""} ${a.ok ? "" : "bad"}" title="${esc(a.ok ? a.email : a.error)}">
+  $("#accounts").innerHTML = `<a href="#" data-id="" class="${S.account ? "" : "on"}" aria-current="${S.account ? "false" : "true"}"><span>All accounts</span><span class="n">${total || ""}</span></a>` +
+    S.accounts.map((a) => `<a href="#" data-id="${esc(a.id)}" class="${a.id === S.account ? "on" : ""} ${a.ok ? "" : "bad"}" aria-current="${a.id === S.account ? "true" : "false"}" title="${esc(a.ok ? a.email : a.error)}">
       <span><span class="dot" style="background:${slotOf(a.id)}"></span>${esc(a.email)}</span><span class="n">${a.ok ? a.unread || "" : "!"}</span></a>`).join("") +
-    `<div class="tools"><input type="search" id="q" placeholder="Search (Gmail syntax)">
+    `<div class="tools"><input type="search" id="q" placeholder="Search (Gmail syntax)" aria-label="Search all accounts (Gmail syntax)">
       <select id="scope" title="Where to search"><option value="inbox">Inbox</option><option value="all">All mail</option>
         <option value="sent">Sent</option><option value="label">A label…</option><option value="spamtrash">Spam &amp; Trash</option></select>
-      <input type="search" id="label" placeholder="Label name" hidden><label><input type="checkbox" id="unread"> Unread only</label>
+      <input type="search" id="label" placeholder="Label name" aria-label="Label name" hidden><label><input type="checkbox" id="unread"> Unread only</label>
       <button id="refresh">Refresh (r)</button></div>`;
-  if (!S.accounts.length) $("#accounts").innerHTML += `<div class="err">No linked accounts yet: add them in Inbox Zero.</div>`;
+  if (failed) $("#accounts").innerHTML += `<div class="err">Could not load your accounts: ${esc(failed)}</div>`;
+  else if (!S.accounts.length) $("#accounts").innerHTML += `<div class="err">No linked accounts yet: add them in Inbox Zero.</div>`;
   $("#q").value = S.q || ""; $("#unread").checked = !!S.unreadOnly;
   $("#scope").value = scopeOf(); $("#label").value = S.label || ""; $("#label").hidden = S.scope !== "label";
   $("#scope").onchange = (e) => { S.scope = e.target.value; S.limit = 30; $("#label").hidden = S.scope !== "label"; if (S.scope !== "label" || S.label) loadList(); };
@@ -66,9 +86,9 @@ async function loadAccounts() {
   $("#refresh").onclick = () => { loadAccounts(); loadList(true); };
 }
 
-// The list view is the inbox; typing a search searches All mail unless a scope was picked (RFC-001853 spec item 1).
+// The list view is the inbox; typing a search searches All mail unless a scope was picked.
 const scopeOf = () => S.scope || (S.q ? "all" : "inbox");
-// every scope, Inbox included, pages with per-account tokens (`next`) (RFC-001886 final review)
+// every scope, Inbox included, pages with per-account tokens (`next`)
 async function loadList(keepSel, page) {
   const scope = scopeOf();
   if ($("#scope")) $("#scope").value = scope;
@@ -76,7 +96,7 @@ async function loadList(keepSel, page) {
   if (scope === "label") p.set("label", S.label || "");
   if (page) p.set("page", page);
   if (!keepSel && !page) $("#list").innerHTML = `<div class="empty">Loading…</div>`;
-  // a slower answer to an older search (or its Load more) must not land in the list of a newer one (RFC-001885)
+  // a slower answer to an older search (or its Load more) must not land in the list of a newer one
   const req = (S.req = (S.req || 0) + 1);
   let d;
   try { d = await api(`/api/messages?${p}`); } catch (e) { if (req === S.req) $("#list").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
@@ -89,7 +109,7 @@ async function loadList(keepSel, page) {
     d.errors = [...errs.values()];
   }
   S.items = d.items; S.errors = d.errors; S.next = d.next || "";
-  S.more = !!S.next;
+  S.more = !!S.next; S.paged = !!page;  // pages added with Load more: the 2-minute refresh leaves them alone
   S.sel = selId ? S.items.findIndex((i) => i.id === selId) : -1;
   redraw();
 }
@@ -97,7 +117,8 @@ async function loadList(keepSel, page) {
 function row(it, i) {
   const chips = (it.rules || []).map((r) => `<span class="chip rule" title="Inbox Zero rule (${esc(r.status)})">${esc(r.name)}</span>`).join("") +
     it.labels.map((l) => `<span class="chip">${esc(l)}</span>`).join("");
-  return `<div class="row ${it.unread ? "unread" : ""} ${i === S.sel ? "sel" : ""}" data-i="${i}">
+  return `<div class="row ${it.unread ? "unread" : ""} ${i === S.sel ? "sel" : ""}" data-i="${i}" tabindex="0" aria-current="${i === S.sel ? "true" : "false"}"
+    aria-label="${esc(`${it.unread ? "Unread. " : ""}${it.folder === "Sent" && it.to ? `To ${it.to}` : `From ${it.from}`}: ${it.subject}, ${when(it.ts)}`)}">
     <span class="dot" style="background:${slotOf(it.account)}"></span>
     <span class="from" title="${esc(it.folder === "Sent" && it.to ? `To: ${it.to}` : it.fromAddr)}">${it.starred ? '<span class="star" title="Starred">★</span> ' : ""}${it.protected ? '<span class="chip prot" title="Protected sender">protected</span>' : ""}${it.folder === "Sent" && it.to ? `To: ${esc(it.to)}` : esc(it.from)}</span><span class="when">${when(it.ts)}</span>
     <span class="acts"><button data-act="archive" title="Archive (e)">Archive</button>
@@ -109,9 +130,11 @@ function row(it, i) {
 }
 
 function redraw() {
+  const focused = !!document.activeElement?.closest?.("#list .row");   // keep the keyboard where it was
   $("#list").innerHTML = (S.errors || []).map((e) => `<div class="err">${esc(e.email)}: ${esc(e.error)}</div>`).join("") +
     (S.items.length ? S.items.map(row).join("") : `<div class="empty">Nothing here.</div>`) +
     (S.more ? `<button id="more">Load more</button>` : "");
+  if (focused && S.sel >= 0) $("#list").querySelector(`.row[data-i="${S.sel}"]`)?.focus?.();
   const more = $("#more");
   if (more) more.onclick = () => {
     loadList(true, S.next);
@@ -127,8 +150,12 @@ async function act(i, action) {
     S.items = S.items.filter((x) => !(x.threadId === it.threadId && x.account === it.account));
     if (S.sel >= S.items.length) S.sel = S.items.length - 1;
     redraw();
-    if (action === "delete") toast(`Moved to Trash: ${esc(it.subject)}`, "Undo",
-      () => api("/api/action", { account: it.account, threadId: it.threadId, action: "undelete" }).then(() => loadList(true)));
+    // undo: out of Trash, or back in the inbox; but archiving a search result that was not in the inbox changed
+    // nothing, and an "undo" would put it in the inbox for the first time
+    const undo = action === "delete" ? "undelete" : it.folder === "Inbox" ? "inbox" : null;
+    toast(`${action === "delete" ? "Moved to Trash" : "Archived"}: ${esc(it.subject)}`, undo && "Undo",
+      () => api("/api/action", { account: it.account, threadId: it.threadId, action: undo }).then(() => { loadList(true); loadAccounts(); })
+        .catch((e) => alert(`Undo failed: ${e.message}`)));
     if (S.sel >= 0) open(S.sel); else $("#reader").innerHTML = `<div class="empty">${action === "delete" ? "Deleted" : "Archived"}.</div>`;
   } else if (action === "star" || action === "unstar") { it.starred = action === "star"; redraw(); if (S.sel === i) open(i); }
   else { it.unread = action === "unread"; redraw(); }
@@ -144,8 +171,10 @@ function toast(html, label, fn) {
   clearTimeout(toast.t); toast.t = setTimeout(() => { t.style.display = "none"; }, 8000);
 }
 
-function frameDoc(m) {
-  const imgs = S.images ? "img-src https: data:;" : "img-src data:;";
+// remote images load only for the one message they were allowed on (S.imagesFor): never for the next one opened,
+// where a tracking pixel would tell its sender when and from where it was read
+function frameDoc(m, images) {
+  const imgs = images ? "img-src https: data:;" : "img-src data:;";
   return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy"
     content="default-src 'none'; style-src 'unsafe-inline'; ${imgs} font-src data:"><base target="_blank">
     <style>body{font:14px/1.5 system-ui,sans-serif;margin:16px;color:#1d2330;word-wrap:break-word}img{max-width:100%;height:auto}</style>
@@ -157,27 +186,32 @@ async function open(i) {
   const it = S.items[i], r = $("#reader");
   document.body.classList.add("reading");
   r.innerHTML = `<div class="empty">Loading…</div>`;
+  // only the message opened last may fill the reader: its buttons and e/#/s/u act on the selection (S.sel), so an
+  // older message answering late would be shown while the keys act on another one
+  const req = (S.openReq = (S.openReq || 0) + 1);
   let m;
   try { m = await api(`/api/message?account=${encodeURIComponent(it.account)}&id=${encodeURIComponent(it.id)}`); }
-  catch (e) { r.innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
+  catch (e) { if (req === S.openReq) r.innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
+  if (req !== S.openReq) return;
+  const images = S.imagesFor === `${it.account}/${it.id}`;
   const gmailUrl = `https://mail.google.com/mail/?authuser=${encodeURIComponent(m.email)}#all/${encodeURIComponent(m.threadId)}`;
   r.innerHTML = `<div class="hd"><h2>${esc(m.subject || "(no subject)")}</h2>
     <div class="meta"><b>${esc(m.from)}</b><br>to ${esc(m.to)}${m.cc ? `, cc ${esc(m.cc)}` : ""}<br>${esc(m.date)} · ${acctChip(it.account, m.email)}</div>
-    <div class="tools"><button id="r-archive">Archive (e)</button><button id="r-star">${it.starred ? "Unstar" : "Star"} (s)</button>
-      <button id="r-unread">Mark unread (u)</button><button id="r-delete">Delete (#)</button>
+    <div class="tools"><button id="r-archive">Archive<span class="key"> (e)</span></button><button id="r-star">${it.starred ? "Unstar" : "Star"}<span class="key"> (s)</span></button>
+      <button id="r-unread">Mark unread<span class="key"> (u)</span></button><button id="r-delete">Delete<span class="key"> (#)</span></button>
       <a href="${gmailUrl}" target="_blank" rel="noopener"><button>Reply in Gmail ↗</button></a>
-      ${m.kind === "html" ? `<button id="r-img">${S.images ? "Hide" : "Show"} images</button>` : ""}
+      ${m.kind === "html" ? `<button id="r-img">${images ? "Hide" : "Show"} images</button>` : ""}
       <button id="r-close" class="mobile">Close</button></div></div>` +
     (m.kind === "html" ? `<iframe sandbox="allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer" title="Email body"></iframe>`
       : `<pre>${esc(m.body)}</pre>`);
-  if (m.kind === "html") r.querySelector("iframe").srcdoc = frameDoc(m);
+  if (m.kind === "html") r.querySelector("iframe").srcdoc = frameDoc(m, images);
   $("#r-archive").onclick = () => act(S.sel, "archive");
   $("#r-unread").onclick = () => act(S.sel, "unread");
   $("#r-delete").onclick = () => act(S.sel, "delete");
   $("#r-star").onclick = () => act(S.sel, S.items[S.sel].starred ? "unstar" : "star");
   $("#r-close").onclick = () => document.body.classList.remove("reading");
   const img = $("#r-img");
-  if (img) img.onclick = () => { S.images = !S.images; open(S.sel); };
+  if (img) img.onclick = () => { S.imagesFor = images ? null : `${it.account}/${it.id}`; open(S.sel); };
   if (it.unread) { it.unread = false; redraw();
     api("/api/action", { account: it.account, threadId: it.threadId, action: "read" }).then(loadAccounts).catch(() => {}); }
 }
@@ -185,6 +219,7 @@ async function open(i) {
 $("#accounts").onclick = (e) => {
   const a = e.target.closest("a[data-id]");
   if (!a) return;
+  e.preventDefault();
   S.account = a.dataset.id; S.limit = 30;
   loadAccounts(); loadList();
 };
@@ -195,6 +230,7 @@ $("#list").onclick = (e) => {
   if (b) { e.stopPropagation(); act(i, b.dataset.act); } else open(i);
 };
 document.onkeydown = (e) => {
+  if ((e.key === "Enter" || e.key === " ") && e.target?.matches?.(".row[data-i], td.who[data-peek]")) { e.preventDefault(); e.target.click(); return; }
   if (S.tab !== "inbox" || ["INPUT", "SELECT"].includes(e.target.tagName) || e.metaKey || e.ctrlKey || e.altKey) return;
   const n = S.items.length;
   if (e.key === "j" && n) open(Math.min(S.sel + 1, n - 1));
@@ -224,15 +260,19 @@ const TIPS = { unsubscribe: "Unsubscribe only (one-click where offered); mail al
   spam: "Report all mail from this sender as spam (also trains Gmail's spam filter)" };
 const CONFIRM = { unsub_delete: "Unsubscribe and move ALL mail from", delete: "Move ALL mail from", block: "Move ALL mail from",
   spam: "Report ALL mail from" };
+// Future mail is handled by a Gmail filter on from:, which Gmail matches loosely (a display name or a longer address
+// containing it matches too); only mail already there is checked message by message. The confirm says so.
+const LOOSE = "\n\nFuture mail is matched by Gmail's own from: filter, which can also catch mail that only shows this address in its sender name.";
 function confirmText(a, s) {  // every removal action asks first (Roy, 11-07)
-  const n = `${s.addr} (${s.count} recent emails across ${s.accounts.length} account(s))`;
+  const n = `${s.addr} (${s.accounts.length} account(s))`;  // how many emails: counted in Gmail, shown under the text
   if (CONFIRM[a]) return `${CONFIRM[a]} ${n}` + (a === "spam" ? " as spam?" : " to Trash?") +
-    (["block", "unsub_delete"].includes(a) ? " Future mail from this sender will go straight to Trash." : "");
+    (["block", "unsub_delete"].includes(a) ? " Future mail from this sender will go straight to Trash." + LOOSE : "");
   if (a === "protect") return `Protect ${s.addr}? Zero Sum will refuse to unsubscribe, archive, delete or block anything from it, now and in future, and Gmail will never send it to Spam (in every account).`;
-  return { unsubscribe: `Unsubscribe from ${n}?`, unsub_archive: `Unsubscribe from ${n} and archive their mail? Future mail skips the inbox.`,
+  const t = { unsubscribe: `Unsubscribe from ${n}?`, unsub_archive: `Unsubscribe from ${n} and archive their mail? Future mail skips the inbox.`,
     unsub_quarantine: `Unsubscribe from ${n} and move their mail to Quarantine? Future mail goes there too.`,
     quarantine: `Move mail from ${n} to Quarantine? Future mail goes there too.`,
     autoarchive: `Archive mail from ${n}? Future mail skips the inbox.`, archive: `Archive what is in the inbox from ${n}?` }[a];
+  return t && ["unsub_archive", "unsub_quarantine", "quarantine", "autoarchive"].includes(a) ? t + LOOSE : t;
 }
 async function loadSenders() {
   const p = new URLSearchParams({ q: $("#c-q").value, days: $("#c-days").value, hide: $("#c-handled").checked ? "0" : "1" });
@@ -245,11 +285,11 @@ async function loadSenders() {
   S.senders = d.senders;
   $("#c-table").innerHTML = `<table><thead><tr><th>Sender</th><th class="num">Emails</th><th class="num">Read</th>
     <th class="num">In inbox</th><th>Accounts</th><th>Last</th><th>Apply to every account</th></tr></thead><tbody>` +
-    d.senders.map((s, i) => `<tr data-row="${i}"><td class="who" data-peek="${i}" title="Show the 20 most recent emails">
+    d.senders.map((s, i) => `<tr data-row="${i}"><td class="who" data-peek="${i}" title="Show the 20 most recent emails" tabindex="0" role="button" aria-label="${esc(`Show the 20 most recent emails from ${s.name || s.addr}`)}">
       <span class="caret">▸</span> <b>${esc(s.name || s.addr)}</b><br><span class="note">${esc(s.addr)}</span></td>
-      <td class="num">${fmt(s.count)}</td><td class="num">${s.readPct}%</td><td class="num">${fmt(s.inbox)}</td>
-      <td>${s.accounts.map((a) => `${acctChip(a.id, a.email)}${a.status ? `<span class="note">${STATUS[a.status] || a.status}</span> ` : ""}`).join("")}</td>
-      <td class="note">${when(s.last)}</td>
+      <td class="num" data-k="Emails">${fmt(s.count)}</td><td class="num" data-k="Read">${s.readPct}%</td><td class="num" data-k="In inbox">${fmt(s.inbox)}</td>
+      <td class="accs">${s.accounts.map((a) => `${acctChip(a.id, a.email)}${a.status ? `<span class="note">${STATUS[a.status] || a.status}</span> ` : ""}`).join("")}</td>
+      <td class="note last">${when(s.last)}</td>
       <td class="acts-cell">${s.protected ? '<span class="chip prot">protected</span> ' : ""}
         <div class="grp"><button data-i="${i}" data-a="${s.protected ? "unprotect" : "protect"}" title="Protected senders are never archived, deleted or blocked in bulk">${s.protected ? "Unprotect" : "Protect"}</button>
           <button data-i="${i}" data-a="star" title="Star what is in the inbox, and future mail (Gmail filter)">Auto-star</button>
@@ -288,11 +328,41 @@ function askDialog(a, s, ai) {
     const w = $("#dlg-keep").value.split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
     d.querySelectorAll(".subjects li").forEach((li) => li.classList.toggle("kept", subjectHas(w, li.textContent)));
   };
-  $("#dlg-keep").oninput = preview;
+  /* the real number this action will touch: counted by the server with the same Gmail searches the action runs
+     (every folder, every year), not the "recent emails" figure of the list; recounted when the keep words change */
+  let countT = 0, countSeq = 0;
+  const count = async () => {
+    const seq = ++countSeq, el = $("#dlg-count");
+    if (!text) { el.textContent = ""; return; }
+    el.textContent = "Counting what this will touch in Gmail…";
+    try {
+      const r = await api("/api/sender/preview", { addr: s.addr, action: a,
+        keep: $("#dlg-keep").value.split(",").map((x) => x.trim()).filter(Boolean) });
+      if (seq === countSeq) el.textContent = previewText(r);
+    } catch (err) { if (seq === countSeq) el.textContent = `Could not count what this will touch: ${err.message}`; }
+  };
+  $("#dlg-keep").oninput = () => { preview(); clearTimeout(countT); countT = setTimeout(count, 700); };
+  count();
   d.showModal();
   return new Promise((res) => {
     d.onclose = () => res(d.returnValue === "ok" ? { keep: $("#dlg-keep").value.split(",").map((x) => x.trim()).filter(Boolean) } : null);
   });
+}
+/* "1,234 emails (a@x: 1,000 · b@y: 234)" for one step of /api/sender/preview; "or more" when the count was capped,
+   "up to" when some senders were not looked up (mail the local history does not have yet) */
+function stepText(st) {
+  const upto = (n, u) => u ? `${fmt(n)}, up to ${fmt(n + u)}` : fmt(n);
+  const one = (x) => x.error ? `${x.email}: count failed` : `${x.email}: ${upto(x.count, x.unchecked)}${x.capped ? "+" : ""}`;
+  const u = st.unchecked || 0;
+  return `${upto(st.total, u)}${st.capped ? " or more" : ""} email${st.total + u === 1 && !st.capped ? "" : "s"}` +
+    (st.accounts.length ? ` (${st.accounts.map(one).join(" · ")})` : "") + (st.failed ? " — some accounts could not be counted" : "");
+}
+function previewText(r) {
+  if (!r.steps.length) return "This changes no existing mail.";
+  const main = r.steps[0], kept = r.steps.find((x) => x.what === "kept and starred");
+  return `In Gmail right now this touches ${stepText(main)}, in every folder and year` +
+    (kept ? `; ${stepText(kept)} kept and starred.` : ".") +
+    (main.accounts.some((x) => x.count + (x.unchecked || 0) > r.max) ? ` One action handles at most ${fmt(r.max)} per account.` : "");
 }
 async function runSender(s, a, b, ai) {
   const ok = await askDialog(a, s, ai);
@@ -304,14 +374,14 @@ async function runSender(s, a, b, ai) {
     const next = ["delete", "quarantine", "block", "archive", "unsubscribe"].filter((x) => x !== a)
       .map((x) => `<button data-next="${x}" class="${["delete", "block"].includes(x) ? "danger" : ""}">${LABELS[x]}</button>`).join(" ");
     $("#c-result").innerHTML = `<div class="card"><b>${esc(LABELS[a] || a)}: ${esc(s.addr)}</b>
-      ${s.protected ? "" : `<div class="grp" style="margin:6px 0">Next for this sender: ${next}</div>`}<ul>` +
+      ${s.protected ? "" : `<div class="grp" style="margin:6px 0">Next for this sender: ${next}</div>`}${partlyDone(r)}<ul>` +
       r.results.map((x) => `<li class="${x.ok ? "" : "err"}">${esc(x.email)}: ${esc(x.note)}</li>`).join("") + "</ul>" +
       (r.manual.length ? `<p>Finish unsubscribing by opening these (one per account):</p><ul>` +
         r.manual.map((m) => `<li>${esc(m.email)}: <a href="${esc(m.url)}" target="_blank" rel="noopener noreferrer">${esc(m.url.slice(0, 80))}</a></li>`).join("") + "</ul>" : "") + "</div>";
   } catch (err) { $("#c-result").innerHTML = `<div class="err">${esc(err.message)}</div>`; }
   loadSenders();
 }
-/* Undo: every bulk change is recorded with the messages it touched (cleanup.py _record) */
+/* Undo: every bulk change is recorded with the messages it touched (gmailops.py _record) */
 function undoWhat(a) {
   if (a.add.includes("TRASH")) return "moved to Trash";
   if (a.add.includes("SPAM")) return "reported as spam";
@@ -326,7 +396,7 @@ async function loadUndo() {
   try { d = await api("/api/undo"); } catch (e) { $("#c-undo").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
   $("#c-undo").innerHTML = d.actions.length ? `<p>Each line is one bulk change of the last ${d.days} days. Undo puts those
     messages back where they were. It does not remove filters: use Keep or Reset on the sender for that.</p><ul class="ops">` +
-    d.actions.map((a) => `<li><span class="note">${esc(a.at.slice(0, 16).replace("T", " "))}</span> ${esc(a.email)}:
+    d.actions.map((a) => `<li><span class="note">${esc(stamp(a.at))}</span> ${esc(a.email)}:
       <b>${fmt(a.count)}</b> ${undoWhat(a)}${a.note ? ` (${esc(a.note)})` : ""}
       ${a.undone ? `<span class="note">undone</span>` : `<button data-undo="${Number(a.id)}">Undo</button>`}</li>`).join("") + "</ul>"
     : "No bulk changes recorded yet.";
@@ -335,7 +405,7 @@ $("#c-undo").onclick = async (e) => {
   const id = e.target.dataset && e.target.dataset.undo;
   if (!id || !confirm("Put these messages back where they were?")) return;
   e.target.disabled = true;
-  try { const r = await api("/api/undo", { id: Number(id) }); $("#c-result").innerHTML = `<div class="card">${fmt(r.restored)} messages restored.</div>`; }
+  try { const r = await api("/api/undo", { id: Number(id) }); $("#c-result").innerHTML = `<div class="card">${fmt(r.restored)} messages restored${r.note ? `; ${esc(r.note)}` : ""}.</div>`; }
   catch (err) { $("#c-result").innerHTML = `<div class="err">${esc(err.message)}</div>`; }
   loadUndo(); loadSenders();
 };
@@ -429,7 +499,7 @@ $("#c-protect-btn").onclick = async () => {
 };
 $("#c-collect").onclick = async () => { await api("/api/collect", {}).catch(() => {}); $("#c-status").textContent = "Collecting… refresh in a minute."; };
 
-/* Whole-word match, as the applied Gmail search subject:(word) does (cleanup.py subject_has): a substring test showed
+/* Whole-word match, as the applied Gmail search subject:(word) does (guard.py subject_has): a substring test showed
    "Reorder now" as kept by "order", and Gmail then gave it the destructive action. */
 function subjectHas(words, subject) {
   const sub = String(subject || "").toLowerCase();
@@ -454,17 +524,21 @@ async function loadProgress() {
   let g;
   try { g = await api("/api/ai/progress"); } catch (e) { $("#ai-progress").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
   const pct = (a, b) => (b ? Math.min(100, Math.round((100 * a) / b)) : 0);
+  // a mailbox size Gmail did not give is "unknown", not 0 (which read as "120 of 0 (0%)")
+  const of = (a, b) => b == null ? `${fmt(a)} of unknown` : `${fmt(a)} of ${fmt(b)} (${pct(a, b)}%)`;
   $("#ai-progress").innerHTML = `<div class="ph" style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap">
       <h3 style="margin:0">Working through your whole history</h3>
-      <label><input type="checkbox" id="ai-bg" ${g.background ? "checked" : ""}> Analyze senders in the background</label></div>
+      <label${g.ai ? "" : ' title="AI is not configured on this server"'}><input type="checkbox" id="ai-bg" ${g.background ? "checked" : ""}
+        ${g.ai ? "" : "disabled"}> Analyze senders in the background</label></div>
     <p class="note">Zero Sum reads your mail a little at a time (every 15 minutes, within Gmail's limits) and plans senders as their
       history comes in, biggest first. Nothing is changed until you apply a plan.</p>
-    <div class="prog-grid"><div>Mail history collected: <b>${fmt(g.collected)}</b> of ${fmt(g.mailboxTotal)} (${pct(g.collected, g.mailboxTotal)}%)
+    <div class="prog-grid"><div title="Gmail's total also counts sent mail, drafts and chats, which are not collected">Mail history collected: <b>${of(g.collected, g.mailboxTotal).replace(" of", "</b> of")}
       <div class="meter"><div style="width:${pct(g.collected, g.mailboxTotal)}%"></div></div></div>
     <div>Senders analyzed: <b>${fmt(g.planned)}</b> of ${fmt(g.senders)} with ${"5+"} emails (${pct(g.planned, g.senders)}%)
       <div class="meter"><div style="width:${pct(g.planned, g.senders)}%"></div></div></div></div>
     <details><summary class="note">Per account · AI calls today: ${fmt(g.callsToday)} of ${fmt(g.callCap)}</summary>
-      ${g.accounts.map((a) => `<div class="note">${esc(a.email)}: ${fmt(a.collected)} of ${fmt(a.total)} (${pct(a.collected, a.total)}%)</div>`).join("")}</details>`;
+      ${g.accounts.map((a) => `<div class="note">${esc(a.email)}: ${of(a.collected, a.total)}</div>`).join("")}
+      <div class="note">Gmail's totals also count sent mail, drafts and chats, which are not collected, so this rarely reaches 100%.</div></details>`;
   $("#ai-bg").onchange = (e) => api("/api/ai/background", { on: e.target.checked }).catch((err) => alert(err.message));
 }
 async function loadPlans() {
@@ -475,26 +549,30 @@ async function loadPlans() {
   if (Object.values(S.sorting).some((x) => x.status === "sorting")) { clearTimeout(S.sortT); S.sortT = setTimeout(loadPlans, 8000); }
   const r = d.running;
   $("#ai-status").textContent = !d.ai ? "AI is not configured on this server." : r.busy ? `Analyzing senders… ${r.done}/${r.total}`
-    : `${d.plans.filter((p) => p.status === "new").length} plan(s) to review.` + (r.error ? ` Last error: ${r.error}` : "");
+    : `${d.plans.filter((p) => OPEN_PLAN.has(p.status)).length} plan(s) to review.` + (r.error ? ` Last error: ${r.error}` : "");
   $("#ai-run").disabled = !d.ai || r.busy;
   clearTimeout(pollT);
   if (r.busy) pollT = setTimeout(loadPlans, 5000);
   const open = new Set([...document.querySelectorAll("#ai-body .plan[data-open]")].map((x) => x.dataset.addr));
   $("#ai-body").innerHTML = d.plans.length ? d.plans.map((p, i) => planCard(p, i)).join("")
-    : `<div class="empty">No plans yet. Click "Analyze top senders": the AI reads each sender's recent subjects and proposes
+    : !d.ai ? `<div class="empty">No plans yet. AI is not configured on this server: set OPENROUTER_API_KEY (see the README)
+       to use AI Cleanup.</div>`
+    : `<div class="empty">No plans yet. Click "✨ Analyze now": the AI reads each sender's recent subjects and proposes
        which emails to keep and which to clear. Nothing changes until you apply a plan.</div>`;
   d.plans.forEach((p, i) => { if (open.has(p.addr)) showPreview(i); });
 }
+const OPEN_PLAN = new Set(["new", "partial"]);
 function planCard(p, i) {
-  const done = p.status !== "new", ai = (p.mode || "words") === "ai", srt = (S.sorting || {})[p.addr];
+  // "partial": applied, but some mail was left for another run: it keeps its editor and Apply button
+  const done = !OPEN_PLAN.has(p.status), ai = (p.mode || "words") === "ai", srt = (S.sorting || {})[p.addr];
   const sampleCounts = {};
   (p.subjects || []).forEach((x) => { const c = classify(x.subject, p); sampleCounts[c.text] = (sampleCounts[c.text] || 0) + x.count; });
   return `<div class="card plan ${done ? "done" : ""}" data-i="${i}" data-addr="${esc(p.addr)}">
     <div class="ph"><div><b>${esc(p.addr)}</b> <span class="note">· ${fmt(p.count)} emails · ${p.accounts.map((a) => acctChip(a.id, a.email)).join("")}</span>
-      ${done ? `<span class="chip">${esc(p.status)}</span>` : ""}<div class="note">${esc(p.reason || "")}</div>
+      ${done ? `<span class="chip">${esc(p.status)}</span>` : p.status === "partial" ? `<span class="chip partial" title="Its Gmail filters are active. Apply again to continue; Re-analyze keeps them until the new plan is applied; Stop here keeps what was done.">partly applied: filters active, apply again to continue</span>` : ""}<div class="note">${esc(p.reason || "")}</div>
       ${srt ? `<div class="note">AI sort ${esc(srt.status)}: ${fmt(srt.done)}/${fmt(srt.total)} checked, ${fmt(srt.kept)} kept; the rest → ${GACT[srt.action]}.
         Rule: <i>${esc(srt.rule)}</i> <button data-pa="stop" data-i="${i}">Stop AI sort</button></div>` : ""}</div>
-      <div class="grp">${done ? `<button data-pa="undo" data-i="${i}">Review again</button>` : `<button data-pa="skip" data-i="${i}">Skip</button>
+      <div class="grp">${done ? `<button data-pa="undo" data-i="${i}">Review again</button>` : `<button data-pa="skip" data-i="${i}"${p.status === "partial" ? ` title="Leave it partly applied: its Gmail filters stay (Keep or Reset on the sender removes them)">Stop here` : ">Skip"}</button>
         <button data-pa="redo" data-i="${i}">Re-analyze</button><button data-pa="apply" data-i="${i}" class="primary">Apply plan</button>`}</div></div>
     ${done ? "" : `<div class="mode"><button data-pa="mode-words" data-i="${i}" class="${ai ? "" : "on"}">Word groups</button><button
         data-pa="mode-ai" data-i="${i}" class="${ai ? "on" : ""}">AI sorts each email</button>
@@ -503,21 +581,21 @@ function planCard(p, i) {
     (ai ? `<div class="groups"><label class="rule">Keep emails like this (plain English, edit freely)
         <textarea data-f="rule" rows="2" placeholder="e.g. keep travel articles, guides and trip ideas; sales, deals and booking promos are junk">${esc(p.keep_rule || "")}</textarea></label>
       <div class="g"><span class="gl note">Emails the rule doesn't keep</span><span class="gw note">judged one by one by the AI</span>
-        ${gactSel(p.default, 'data-f="default"')}<span></span></div></div>
+        ${gactSel(p.default, 'data-f="default" aria-label="What happens to everything else"')}<span></span></div></div>
       <details data-i="${i}"><summary>Preview the 20 most recent emails, tagged by the AI with this rule</summary><div class="pv"></div></details>` :
     `<div class="groups">${p.groups.map((g, gi) => `<div class="g" data-gi="${gi}">
-        <input data-f="label" value="${esc(g.label)}" placeholder="Name" class="gl">
-        <input data-f="words" value="${esc(g.words.join(", "))}" placeholder="subject words, comma-separated" class="gw">
-        ${gactSel(g.action, 'data-f="action"')}<button data-pa="del-g" data-i="${i}" data-gi="${gi}" title="Remove group">×</button></div>`).join("")}
+        <input data-f="label" value="${esc(g.label)}" placeholder="Name" class="gl" aria-label="Group name">
+        <input data-f="words" value="${esc(g.words.join(", "))}" placeholder="subject words, comma-separated" class="gw" aria-label="Subject words, comma-separated">
+        ${gactSel(g.action, `data-f="action" aria-label="${esc(`What happens to ${g.label || "this group"}`)}"`)}<button data-pa="del-g" data-i="${i}" data-gi="${gi}" title="Remove group">×</button></div>`).join("")}
       <div class="g"><span class="gl note">Everything else</span><span class="gw note">mail that matches no group above</span>
-        ${gactSel(p.default, 'data-f="default"')}<span></span></div>
+        ${gactSel(p.default, 'data-f="default" aria-label="What happens to everything else"')}<span></span></div>
       <button data-pa="add-g" data-i="${i}">+ Add group</button>
       <span class="note">In the sample of ${p.sampled}: ${Object.entries(sampleCounts).map(([k, n]) => `${esc(k)}: ${n}`).join(" · ")}</span></div>
       <details data-i="${i}"><summary>Preview the 20 most recent emails and what each would get</summary><div class="pv"></div></details>`)}</div>`;
 }
 function readCard(i) {  // editor state back into S.plans[i]
   const card = document.querySelector(`#ai-body .plan[data-i="${i}"]`), p = S.plans[i];
-  if (!card || p.status !== "new") return p;
+  if (!card || !OPEN_PLAN.has(p.status)) return p;
   const rule = card.querySelector('[data-f="rule"]');
   if (rule) { if (rule.value !== p.keep_rule) p._verdicts = null; p.keep_rule = rule.value; }
   p.groups = [...card.querySelectorAll(".g[data-gi]")].map((g) => ({ label: g.querySelector('[data-f="label"]').value.trim(),
@@ -565,19 +643,31 @@ $("#ai-body").onclick = async (e) => {
     await api("/api/ai/stop-sort", { addr: p.addr }).catch((err) => alert(err.message)); return loadPlans(); }
   if (a === "add-g") { p.groups.push({ label: "", words: [], action: "keep" }); return loadPlansRender(); }
   if (a === "del-g") { p.groups.splice(+b.dataset.gi, 1); return loadPlansRender(); }
-  if (a === "skip" || a === "undo") { await api("/api/ai/skip", { addr: p.addr, undo: a === "undo" }).catch(() => {}); return loadPlans(); }
+  if (a === "skip" || a === "undo") {
+    const r = await api("/api/ai/skip", { addr: p.addr, undo: a === "undo" }).catch(() => ({}));
+    if (r.note) alert(`${p.addr}: ${r.note}`);
+    return loadPlans();
+  }
   if (a === "redo") { await api("/api/ai/analyze", { addr: p.addr }).catch((err) => alert(err.message)); return loadPlans(); }
   if (a === "apply") {
     const isAi = (p.mode || "words") === "ai";
     if (isAi && !p.keep_rule.trim()) return alert("Write which emails to keep first.");
     const lines = isAi ? [`• keep: ${p.keep_rule}`, `• everything else → ${GACT[p.default]}`]
       : p.groups.map((g) => `• subject has ${g.words.join(" / ")} → ${GACT[g.action]}`).concat([`• everything else → ${GACT[p.default]}`]);
+    let counted = "";
+    if (!isAi) {  // the real numbers, from the same searches the plan runs
+      try {
+        const r = await api("/api/sender/preview", { addr: p.addr, groups: p.groups, default: p.default });
+        counted = "\n\nIn Gmail right now:\n" + (r.steps.length ? r.steps.map((st) => `• ${st.what} → ${GACT[st.action]}: ${stepText(st)}`).join("\n")
+          : "• no existing mail changes");
+      } catch (err) { counted = `\n\n(Could not count what this will touch: ${err.message})`; }
+    }
     if (!confirm(isAi ? `AI-sort mail from ${p.addr} in ${p.accounts.length} account(s)? The AI judges every existing email (every folder, every year; runs in the background) and each new one every 15 minutes:\n\n${lines.join("\n")}`
-      : `Apply this plan to ${p.addr} in ${p.accounts.length} account(s)? It sorts existing mail (every folder, every year) and adds Gmail filters for future mail:\n\n${lines.join("\n")}`)) return;
+      : `Apply this plan to ${p.addr} in ${p.accounts.length} account(s)? It sorts existing mail (every folder, every year) and adds Gmail filters for future mail:\n\n${lines.join("\n")}${counted}${LOOSE}`)) return;
     b.disabled = true; b.textContent = "Applying…";
     try {
       const r = await api("/api/ai/apply", { addr: p.addr, groups: p.groups, default: p.default, mode: p.mode || "words", rule: p.keep_rule || "" });
-      $("#ai-result").innerHTML = `<div class="card"><b>Applied: ${esc(p.addr)}</b><ul>` + r.results.map((x) => `<li class="${x.ok ? "" : "err"}">${esc(x.email)}: ${esc(x.note)}</li>`).join("") + "</ul></div>";
+      $("#ai-result").innerHTML = `<div class="card"><b>Applied: ${esc(p.addr)}</b>${partlyDone(r)}<ul>` + r.results.map((x) => `<li class="${x.ok ? "" : "err"}">${esc(x.email)}: ${esc(x.note)}</li>`).join("") + "</ul></div>";
     } catch (err) { $("#ai-result").innerHTML = `<div class="err">${esc(err.message)}</div>`; }
     loadPlans();
   }
@@ -606,12 +696,12 @@ function renderQuarantine() {
     : `Nothing in "${d.label}". Use Clean up… > Quarantine on the Cleanup tab to hold a sender's mail here.`;
   $("#q-body").innerHTML = (d.errors || []).map((e) => `<div class="err">${esc(e.email)}: ${esc(e.error)}</div>`).join("") +
     d.senders.map((g, gi) => `<div class="qgroup"><div class="qh">
-      <label><input type="checkbox" data-group="${gi}"></label>
+      <label><input type="checkbox" data-group="${gi}" aria-label="${esc(`Select every listed email from ${g.name || g.addr}`)}"></label>
       <span class="who"><b>${esc(g.name || g.addr)}</b> <span class="note">${esc(g.addr)} · ${g.count}${d.shown < d.total ? "+" : ""} email(s)</span><br>
         ${g.accounts.map((a) => acctChip(a.id, a.email)).join("")}</span>
       <button data-qa="release" data-g="${gi}" title="Back to the inbox, and stop quarantining this sender">Release sender</button>
       <button data-qa="archive" data-g="${gi}">Archive</button><button data-qa="delete" data-g="${gi}" class="danger">Delete</button></div>` +
-      g.items.slice(0, g.open ? 1000 : 5).map((it, ii) => `<div class="qm"><input type="checkbox" data-g="${gi}" data-ii="${ii}">
+      g.items.slice(0, g.open ? 1000 : 5).map((it, ii) => `<div class="qm"><input type="checkbox" data-g="${gi}" data-ii="${ii}" aria-label="${esc(`Select: ${it.subject}`)}">
         ${acctChip(it.account, it.email)}<span class="s">${esc(it.subject)} <span class="note">${esc(it.snippet)}</span></span>
         <span class="note">${when(it.ts)}</span></div>`).join("") +
       (g.items.length > 5 && !g.open ? `<div class="qm"><span></span><span></span><a href="#" data-more="${gi}">Show all ${g.count}</a><span></span></div>` : "") +
@@ -633,7 +723,7 @@ async function qact(body, ask) {
   $("#q-result").innerHTML = `<div class="note">Working…</div>`;
   try {
     const r = await api("/api/quarantine", body);
-    $("#q-result").innerHTML = `<div class="card"><ul>` + (r.results.length ? r.results.map((x) => `<li class="${x.ok ? "" : "err"}">${esc(x.email)}: ${esc(x.note)}</li>`).join("")
+    $("#q-result").innerHTML = `<div class="card">${partlyDone(r)}<ul>` + (r.results.length ? r.results.map((x) => `<li class="${x.ok ? "" : "err"}">${esc(x.email)}: ${esc(x.note)}</li>`).join("")
       : "<li>Nothing to do.</li>") + "</ul></div>";
   } catch (e) { $("#q-result").innerHTML = `<div class="err">${esc(e.message)}</div>`; }
   loadQuarantine();
@@ -666,12 +756,24 @@ function hbars(rows, label, value, title) {
     <span class="track"><div class="fill" style="width:${(100 * value(r)) / max}%"></div></span><span class="val">${fmt(value(r))}</span></div>`).join("");
 }
 
-function dailyChart(daily, days) {
+// YYYY-MM-DD of a moment as a calendar day in the time zone the server grouped the days by
+function dayIn(tz, ms) {
+  let f;
+  try { f = new Intl.DateTimeFormat("en-US", { timeZone: tz || "UTC", year: "numeric", month: "2-digit", day: "2-digit" }); }
+  catch { f = new Intl.DateTimeFormat("en-US", { timeZone: "UTC", year: "numeric", month: "2-digit", day: "2-digit" }); }
+  const p = Object.fromEntries(f.formatToParts(new Date(ms)).map((x) => [x.type, x.value]));
+  return `${p.year}-${p.month}-${p.day}`;
+}
+function viewerZone() { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch { return ""; } }
+// `width`: the room the chart has, in CSS pixels. The drawing is made that wide (at least 280, at most 900), so its
+// labels stay 11px on a phone instead of being scaled down with a 900-wide drawing
+function dailyChart(daily, days, tz, width = 900) {
   const byDay = {};
   for (const d of daily) { (byDay[d.day] ||= { total: 0, parts: {} }); byDay[d.day].total += d.count; byDay[d.day].parts[d.email] = d.count; }
-  const list = [];
-  for (let i = days - 1; i >= 0; i--) { const dt = new Date(Date.now() - i * 864e5).toISOString().slice(0, 10); list.push({ day: dt, ...(byDay[dt] || { total: 0, parts: {} }) }); }
-  const W = 900, H = 200, L = 40, B = 22, T = 8, max = Math.max(1, ...list.map((x) => x.total));
+  // today in that zone, then whole calendar days back from it (counted on UTC dates: no daylight-saving gaps)
+  const today = Date.parse(dayIn(tz, Date.now()) + "T00:00:00Z"), list = [];
+  for (let i = days - 1; i >= 0; i--) { const dt = new Date(today - i * 864e5).toISOString().slice(0, 10); list.push({ day: dt, ...(byDay[dt] || { total: 0, parts: {} }) }); }
+  const W = Math.round(Math.max(280, Math.min(900, width || 900))), H = 200, L = 40, B = 22, T = 8, max = Math.max(1, ...list.map((x) => x.total));
   const raw = max / 4, mag = Math.pow(10, Math.floor(Math.log10(raw))), step = [1, 2, 5, 10].map((m) => m * mag).find((v) => v >= raw);
   const top = Math.ceil(max / step) * step, nt = Math.round(top / step);
   const bw = (W - L) / list.length, gap = Math.min(2, bw * 0.25), y = (v) => T + (H - B - T) * (1 - v / top);
@@ -683,7 +785,7 @@ function dailyChart(daily, days) {
     const x = L + i * bw + gap / 2, w = Math.max(1, bw - gap), h = (H - B - T) * (d.total / top), yy = H - B - h, r = Math.min(4, w / 2, h);
     if (h > 0) svg += `<path d="M${x},${H - B} V${yy + r} Q${x},${yy} ${x + r},${yy} H${x + w - r} Q${x + w},${yy} ${x + w},${yy + r} V${H - B} Z" fill="var(--bar)"/>`;
     svg += `<rect x="${L + i * bw}" y="${T}" width="${bw}" height="${H - B - T}" fill="transparent" data-i="${i}"/>`;
-    if (i % Math.ceil(list.length / 8) === 0) svg += `<text x="${x + w / 2}" y="${H - 6}" text-anchor="middle" font-size="11" fill="var(--muted)">${d.day.slice(5)}</text>`;
+    if (i % Math.ceil(list.length / Math.max(3, Math.min(8, Math.floor((W - L) / 70)))) === 0) svg += `<text x="${x + w / 2}" y="${H - 6}" text-anchor="middle" font-size="11" fill="var(--muted)">${d.day.slice(5)}</text>`;
   });
   svg += "</svg>";
   return { svg, list };
@@ -692,19 +794,20 @@ function dailyChart(daily, days) {
 async function loadAnalytics() {
   const days = +$("#a-days").value;
   let d;
-  try { d = await api(`/api/analytics?days=${days}`); } catch (e) { $("#a-body").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
+  try { d = await api(`/api/analytics?days=${days}&tz=${encodeURIComponent(viewerZone())}`); } catch (e) { $("#a-body").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
   const t = d.totals, cv = d.coverage;
-  $("#a-cover").textContent = `Mail history: ${cv.backfilled}/${cv.accounts} accounts fully collected${cv.since ? `, since ${cv.since.slice(0, 10)}` : ""}.`;
+  $("#a-cover").textContent = `Mail history: ${cv.backfilled}/${cv.accounts} accounts fully collected${cv.since ? `, since ${stamp(cv.since).slice(0, 10)}` : ""}.`;
   const tile = (v, k) => `<div class="tile"><div class="v">${v}</div><div class="k">${k}</div></div>`;
-  const chart = dailyChart(d.daily, days);
+  const room = $("#a-body").clientWidth;   // 0 while the tab is hidden: then the full-size drawing
+  const chart = dailyChart(d.daily, days, d.tz, room > 0 ? room - 38 : 900);   // less the card's padding and border
   $("#a-body").innerHTML = `<div class="tiles">${tile(fmt(t.received), "emails received")}${tile(t.readPct == null ? "–" : t.readPct + "%", "read")}
       ${tile(fmt(t.inboxNow), "in inboxes now")}${tile(fmt(t.senders), "senders")}${tile(fmt(t.ruleActions), "rule actions by Inbox Zero")}
       ${tile(fmt(t.unsubscribed + t.autoArchived), "senders unsubscribed / auto-archived")}</div>
     <div class="card"><h3>Emails received per day, all accounts</h3><div id="a-chart">${chart.svg}</div></div>
-    <div class="card wide"><h3>By account</h3><table><thead><tr><th>Account</th><th class="num">Received</th><th class="num">Read</th>
+    <div class="card wide"><h3>By account</h3><table class="acct-table"><thead><tr><th>Account</th><th class="num">Received</th><th class="num">Read</th>
       <th class="num">Senders</th><th class="num">In inbox now</th><th class="num">Unread threads now</th></tr></thead><tbody>` +
-      d.accounts.map((a) => `<tr><td>${esc(a.email)}</td><td class="num">${fmt(a.received)}</td><td class="num">${a.readPct == null ? "–" : a.readPct + "%"}</td>
-        <td class="num">${fmt(a.senders)}</td><td class="num">${fmt(a.inboxNow)}</td><td class="num">${fmt(a.unreadThreadsNow)}</td></tr>`).join("") + `</tbody></table></div>
+      d.accounts.map((a) => `<tr><td>${esc(a.email)}</td><td class="num" data-k="Received">${fmt(a.received)}</td><td class="num" data-k="Read">${a.readPct == null ? "–" : a.readPct + "%"}</td>
+        <td class="num" data-k="Senders">${fmt(a.senders)}</td><td class="num" data-k="In inbox">${fmt(a.inboxNow)}</td><td class="num" data-k="Unread threads">${fmt(a.unreadThreadsNow)}</td></tr>`).join("") + `</tbody></table></div>
     <div class="grid2"><div class="card"><h3>Top senders</h3>${hbars(d.topSenders, (r) => esc(r.name || r.addr), (r) => r.count,
         (r) => `${r.addr}: ${fmt(r.count)} emails, ${fmt(r.unread)} unread, ${r.accounts} account(s)`) || '<div class="note">No data yet.</div>'}</div>
       <div class="card"><h3>Top domains</h3>${hbars(d.topDomains, (r) => esc(r.domain), (r) => r.count,
@@ -720,7 +823,9 @@ async function loadAnalytics() {
 $("#a-days").onchange = loadAnalytics;
 
 /* ------------------------------------------------------------------ rules */
-const OPS = { create: "create", adopt: "adopt existing", update: "update", delete: "delete", error: "error" };
+const OPS = { create: "create", adopt: "adopt existing", update: "update", delete: "delete", error: "error",
+  restore: "put back own rule", detach: "stop managing", held: "waiting", outbound: "needs your OK to send",
+  "stop-sending": "stopped sending" };
 async function loadRules() {
   let d;
   try { d = await api("/api/rules"); } catch (e) { $("#r-matrix").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
@@ -729,32 +834,79 @@ async function loadRules() {
   $("#r-master").innerHTML = `Rules are written in Inbox Zero on <b>${esc(d.master.email)}</b>. Tick a rule under an account to share it there; nothing is shared unless ticked.
     ${S.izUrl ? `<a href="${esc(S.izUrl)}" target="_blank" rel="noopener">Edit rules ↗</a>` : ""}`;
   $("#r-auto").checked = d.auto;
+  S.ruleCells = {};
   $("#r-matrix").innerHTML = d.rules.length ? `<table class="matrix"><thead><tr><th>Master rule</th>` +
     d.accounts.map((a) => `<th class="num" title="${esc(a.email)}">${acctChip(a.id, a.email)}</th>`).join("") + `</tr></thead><tbody>` +
     d.rules.map((r) => `<tr><td><b>${esc(r.name)}</b>${r.enabled ? "" : ' <span class="note">(off)</span>'}<br>
-      <span class="note">${esc(r.actions.join(", ").toLowerCase())}</span></td>` +
-      d.accounts.map((a) => { const st = r.cells[a.id];
-        return `<td class="cell"><label title="Copy this rule to ${esc(a.email)}"><input type="checkbox" data-r="${esc(r.id)}" data-a="${esc(a.id)}" ${st === "off" || st === "removing" ? "" : "checked"}>
-          ${st === "off" ? "" : `<span class="st ${st}">${st}</span>`}</label></td>`; }).join("") + "</tr>").join("") + "</tbody></table>"
+      <span class="note">${esc(r.actions.join(", ").toLowerCase())}</span>
+      ${(r.outbound || []).length ? `<br><span class="err">Sends out: ${esc(r.outbound.join("; "))}</span>` : ""}</td>` +
+      d.accounts.map((a) => { const st = r.cells[a.id], out = (r.outbound || []).length, ok = (r.outboundAllowed || {})[a.id],
+          stale = (r.outboundStale || {})[a.id];
+        S.ruleCells[`${r.id}|${a.id}`] = { rule: r.name, email: a.email, st, outbound: r.outbound || [], key: r.outboundKey };
+        const ticked = !(st === "off" || st === "removing");
+        return `<td class="cell"><label title="Copy this rule to ${esc(a.email)}"><input type="checkbox" data-r="${esc(r.id)}" data-a="${esc(a.id)}" aria-label="${esc(`Copy ${r.name} to ${a.email}`)}" ${ticked ? "checked" : ""}>
+          ${st === "off" ? "" : `<span class="st ${esc(st.replace(/ /g, "-"))}">${esc(st)}</span>`}</label>
+          ${out && ticked ? `<br><label class="note" title="Let this rule forward, send or call webhooks from ${esc(a.email)}"><input type="checkbox" data-out="1" data-r="${esc(r.id)}" data-a="${esc(a.id)}" aria-label="${esc(`Allow ${r.name} to send from ${a.email}`)}" ${ok ? "checked" : ""}> allow sending</label>${stale ? `<br><span class="err">sends somewhere new: allow again</span>` : ""}` : ""}</td>`; }).join("") + "</tr>").join("") + "</tbody></table>"
     : `<div class="empty">The master account has no rules yet: create them in Inbox Zero.</div>`;
   $("#r-log").innerHTML = d.log.length ? `<div class="card"><h3>Recent sync activity</h3><ul class="ops">` +
-    d.log.map((l) => `<li class="${l.kind.includes("error") ? "err" : ""}"><span class="note">${esc(l.at.slice(0, 16).replace("T", " "))}</span>
+    d.log.map((l) => `<li class="${l.kind.includes("error") ? "err" : ""}"><span class="note">${esc(stamp(l.at))}</span>
       ${esc(l.account || "")}: ${esc(l.msg)}</li>`).join("") + "</ul></div>" : "";
+  loadRuleBackups();
 }
+// every rule saved before sync overwrote it (unified.rule_backup), each with a button that puts it back
+async function loadRuleBackups() {
+  let d;
+  try { d = await api("/api/rules/backups"); } catch (e) { $("#r-backups").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
+  $("#r-backups").innerHTML = d.backups.length ? `<details class="card"><summary><b>Saved rules</b> <span class="note">(${d.backups.length}):
+      each account's own rules as they were before sync changed them</span></summary><ul class="ops">` +
+    d.backups.map((b) => `<li><span class="note">${esc(stamp(b.at))}</span> <b>${esc(b.rule || "(no name)")}</b>
+      <span class="note">on ${esc(b.account)} · ${esc(b.reason)}${b.exists ? "" : " · deleted since"}</span>
+      <button data-b="${esc(b.id)}" data-name="${esc(b.rule || "")}" data-acc="${esc(b.account)}">Restore</button></li>`).join("") + "</ul></details>" : "";
+}
+$("#r-backups").onclick = async (e) => {
+  const b = e.target.closest("button[data-b]");
+  if (!b || !confirm(`Put "${b.dataset.name}" back in ${b.dataset.acc} as it was saved? What is there now is saved first, and the rule stops being shared.`)) return;
+  try { const r = await api("/api/rules/restore", { id: b.dataset.b }); toast(`Restored ${esc(r.rule)} on ${esc(r.account)}`); }
+  catch (err) { alert(`Restore failed: ${err.message}`); }
+  loadRules();
+};
 function showOps(res) {
   const ops = res.ops.filter((o) => o.op !== "same");
   $("#r-ops").innerHTML = `<div class="card"><h3>${res.applied ? "Synced" : "Preview"}: ${ops.length ? `${ops.length} change(s)` : "everything is up to date"}</h3>` +
+    (res.masterChanged ? `<div class="err">${esc(res.masterChanged.detail || `MASTER_EMAIL changed from ${res.masterChanged.from} to ${res.masterChanged.to}`)}: copies of the old master's rules are only removed after you confirm with Sync now.</div>` : "") +
     (ops.length ? `<ul class="ops">` + ops.map((o) => `<li class="${o.op === "error" ? "err" : ""}"><b>${esc(OPS[o.op] || o.op)}</b> ${esc(o.rule)}
       <span class="note">on ${esc(o.account)}${o.detail ? ` · ${esc(o.detail)}` : ""}</span></li>`).join("") + "</ul>" : "") + "</div>";
 }
 $("#r-preview").onclick = async () => { try { showOps(await api("/api/rules/preview")); } catch (e) { $("#r-ops").innerHTML = `<div class="err">${esc(e.message)}</div>`; } };
+// Sync now: look first. Deletes (and a changed master account) are listed and run only for what the user confirms.
 $("#r-sync").onclick = async (e) => { e.target.disabled = true;
-  try { showOps(await api("/api/rules/sync", {})); } catch (err) { $("#r-ops").innerHTML = `<div class="err">${esc(err.message)}</div>`; }
-  e.target.disabled = false; loadRules(); };
+  try {
+    const plan = await api("/api/rules/preview"), dels = plan.ops.filter((o) => o.op === "delete");
+    const confirmed = dels.map((o) => o.key);
+    if (plan.masterChanged) confirmed.push("master-change");
+    const ask = (plan.masterChanged ? `${plan.masterChanged.detail || `MASTER_EMAIL changed from ${plan.masterChanged.from} to ${plan.masterChanged.to}`}. Copies made from the old master's rules will be removed.\n\n` : "") +
+      (dels.length ? `Delete ${dels.length} rule(s) that sync made?\n\n${dels.map((o) => `• ${o.rule} on ${o.account} (${o.detail})`).join("\n")}\n\nRules an account had before sync are put back, never deleted.` : "Continue?");
+    if ((dels.length || plan.masterChanged) && !confirm(ask)) { showOps(plan); return; }
+    showOps(await api("/api/rules/sync", { confirm: confirmed }));
+  } catch (err) { $("#r-ops").innerHTML = `<div class="err">${esc(err.message)}</div>`; }
+  finally { e.target.disabled = false; loadRules(); }
+};
 $("#r-auto").onchange = (e) => api("/api/rules/auto", { on: e.target.checked }).catch((err) => alert(err.message));
 $("#r-matrix").onchange = async (e) => {
   const c = e.target.closest("input[data-r]");
   if (!c) return;
+  const cell = (S.ruleCells || {})[`${c.dataset.r}|${c.dataset.a}`];
+  if (c.dataset.out) {   // forward / send / reply / webhook: copied only with this second, explicit OK
+    if (c.checked && !confirm(`Let "${cell ? cell.rule : "this rule"}" act from ${cell ? cell.email : "this account"}: ${cell ? cell.outbound.join("; ") : ""}?\n\nMatching mail in that account will be sent to these destinations.`)) { c.checked = false; return; }
+    // the OK names the destinations shown here: if the rule changed since, the server refuses it
+    await api("/api/rules/include", c.checked ? { rule: c.dataset.r, account: c.dataset.a, include: true, outbound: true, destinations: cell ? cell.key : "" }
+      : { rule: c.dataset.r, account: c.dataset.a, include: true, outbound: false }).catch((err) => alert(err.message));
+    loadRules(); return;
+  }
+  if (!c.checked && cell && cell.st !== "off" && cell.st !== "pending" &&
+      !confirm(`Stop sharing "${cell.rule}" with ${cell.email}? At the next sync its copy there is removed (a rule that account had before is put back instead).`)) {
+    c.checked = true; return;
+  }
   await api("/api/rules/include", { rule: c.dataset.r, account: c.dataset.a, include: c.checked }).catch((err) => alert(err.message));
   loadRules();
 };
@@ -762,4 +914,6 @@ $("#r-matrix").onchange = async (e) => {
 api("/api/config").then((c) => { S.izUrl = c.inboxZeroUrl; S.ai = !!c.ai; if (c.inboxZeroUrl) { const a = $("#iz-link"); a.href = c.inboxZeroUrl; a.hidden = false; } }).catch(() => {});
 loadAccounts().then(() => loadList());
 api("/api/quarantine").then((d) => { $("#q-count").textContent = d.total || ""; }).catch(() => {});
-setInterval(() => { if (!document.hidden && S.tab === "inbox") { loadAccounts(); loadList(true); } }, 120000);
+// every 2 minutes: account counts, and the list unless Load more was used (reloading would drop those pages and the
+// selection in them; r, a new search or another account starts from page one again)
+setInterval(() => { if (!document.hidden && S.tab === "inbox") { loadAccounts(); if (!S.paged) loadList(true); } }, 120000);

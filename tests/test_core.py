@@ -3,6 +3,7 @@ node is available), message parsing, unsubscribe headers, rule hashing and the G
 import base64, json, os, shutil, subprocess, sys, time, unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault("EMAIL_ENCRYPT_SECRET", "test-secret")
 os.environ.setdefault("EMAIL_ENCRYPT_SALT", "test-salt")
 
@@ -144,6 +145,25 @@ class Quota(unittest.TestCase):
             b.take(50)
         self.assertGreater(time.monotonic() - t, 0.8)
 
+    def test_background_work_waits_for_spare_quota(self):
+        b = core.Bucket()
+        b.RATE, b.tokens, b.at = 1.0, 0.0, time.monotonic()   # another job has just spent it all
+        self.assertFalse(b.spare(0.2))
+        b.RATE, b.tokens, b.at = 100.0, 300.0, time.monotonic()   # nobody else is using it
+        self.assertTrue(b.spare(0.2))
+        self.assertGreaterEqual(b.tokens, 300.0)   # waiting takes nothing
+
+    def test_jobs_waiting_for_spare_quota_start_one_at_a_time(self):
+        import threading
+        b = core.Bucket()
+        b.RATE, b.tokens, b.at = 100.0, 500.0, time.monotonic()   # idle: every waiter would see it as spare
+        got = []
+        ts = [threading.Thread(target=lambda: got.append(b.spare(0.4, cost=100))) for _ in range(4)]
+        [t.start() for t in ts]
+        [t.join() for t in ts]
+        self.assertEqual(sorted(got), [False, False, False, True])   # the next one goes after 100 / RATE = 1 s
+        self.assertTrue(b.spare(1.5, cost=100))
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -182,27 +202,39 @@ class Cleared(unittest.TestCase):
         self.assertFalse(cleanup.sender_matches("", "@shop.com"))
 
     def test_protecting_removes_only_this_senders_trash_filters(self):
+        # Since the app keeps a record of the filters it creates (unified.filter), "this sender's trash filters" are
+        # the recorded ones: 1, 3 and 4 below were made by the app, 2 is its star filter, 5 was made by hand in Gmail.
         filters = [{"id": "1", "criteria": {"from": "deals@shop.com"}, "action": {"addLabelIds": ["TRASH"]}},
                    {"id": "2", "criteria": {"from": "deals@shop.com"}, "action": {"addLabelIds": ["STARRED"]}},
                    {"id": "3", "criteria": {"from": "x@other.com"}, "action": {"addLabelIds": ["TRASH"]}},
                    {"id": "4", "criteria": {"from": "news@mail.shop.com", "negatedQuery": "subject:(order)"},
+                    "action": {"addLabelIds": ["TRASH"]}},
+                   {"id": "5", "criteria": {"from": "deals@shop.com", "hasAttachment": True},
                     "action": {"addLabelIds": ["TRASH"]}}]
+        from fakes import Db
         deleted = []
 
         def gmail(acc, path, method="GET", body=None):
             if method == "DELETE":
                 deleted.append(path.rsplit("/", 1)[-1])
             return {"filter": filters}
-        old = cleanup.gmail
-        cleanup.gmail = gmail
+
+        def recorded():
+            fake = Db()
+            fake.filters = [("a", "1", "deals@shop.com", "trash", "block"), ("a", "2", "deals@shop.com", "star", "star"),
+                            ("a", "3", "x@other.com", "trash", "block"), ("a", "4", "news@mail.shop.com", "trash", "block")]
+            return fake
+        old = (cleanup.gmail, cleanup.db)
+        cleanup.gmail, cleanup.db = gmail, recorded()
         try:
             self.assertEqual(cleanup.remove_trash_filters("a", "deals@shop.com"), 1)
             self.assertEqual(deleted, ["1"])
             del deleted[:]
+            cleanup.db = recorded()
             self.assertEqual(cleanup.remove_trash_filters("a", "@shop.com"), 2)   # the domain and its subdomains
             self.assertEqual(deleted, ["1", "4"])
         finally:
-            cleanup.gmail = old
+            cleanup.gmail, cleanup.db = old
 
 
 class Collector(unittest.TestCase):
@@ -253,6 +285,22 @@ class Collector(unittest.TestCase):
         self.assertGreaterEqual(cleanup.NEW_MAIL_MAX, 100000)
 
 
+    def test_a_message_dated_in_the_future_does_not_stall_the_new_mail_pass(self):
+        sql = []
+        fake = FakeDb()
+        fake.execute = lambda q, params=None: sql.append(q) or type("R", (), {
+            "fetchall": staticmethod(lambda: []), "fetchone": staticmethod(lambda: None)})()
+        old = (cleanup.gmail_list, cleanup._store, cleanup.db)
+        cleanup.gmail_list, cleanup._store, cleanup.db = (lambda *a, **k: []), (lambda *a, **k: 0), fake
+        try:
+            cleanup.collect_account({"id": "acc"})
+        finally:
+            cleanup.gmail_list, cleanup._store, cleanup.db = old
+        state = next(q for q in sql if "INSERT INTO unified.collect_state" in q)
+        self.assertIn("least(max(ts), now())", state)          # the next pass searches after:<newest>
+        self.assertNotIn(" max(ts), min(ts)", state)
+
+
 class Previews(unittest.TestCase):
     def test_preview_matches_whole_words_like_the_gmail_search(self):
         for words, subject, expect in ((["order"], "Your order shipped", True), (["order"], "Reorder now", False),
@@ -295,18 +343,34 @@ class Undo(unittest.TestCase):
     def setUp(self):
         self.calls, self.sql = [], []
         fake = FakeDb()
-        fake.execute = lambda sql, params=None: (self.sql.append((sql, params)) or type("R", (), {
-            "fetchall": staticmethod(lambda: []),
-            "fetchone": staticmethod(lambda: ("acc", ["TRASH"], ["INBOX"], ["m1", "m2"], None))})())
+        self.log_row = {"undone": None}   # the journal row #7: a Delete of m1, m2; undone_at as set by the SQL below
+
+        def execute(sql, params=None):
+            self.sql.append((sql, params))
+            one = None
+            if "SET undone_at = now()" in sql:   # the claim: only a row nobody has undone yet
+                if self.log_row["undone"] is None:
+                    self.log_row["undone"] = "now"
+                    one = ("acc", ["TRASH"], ["INBOX"], ["m1", "m2"])
+            elif "SET undone_at = NULL" in sql:
+                self.log_row["undone"] = None
+            elif "SELECT undone_at FROM unified.action_log" in sql:
+                one = (self.log_row["undone"],)
+            return type("R", (), {"fetchall": staticmethod(lambda: []), "fetchone": staticmethod(lambda: one)})()
+        fake.execute = execute
         self.old = (cleanup.db, cleanup.gmail, cleanup._store, cleanup.log)
         self.old_acc, cleanup.ACC = cleanup.ACC, type("A", (), {"email": staticmethod(lambda a: "me@x.com")})()
         cleanup.db = fake
         cleanup.gmail = lambda acc, path, method="GET", body=None: self.calls.append((path, body)) or {}
         cleanup._store, cleanup.log = (lambda *a, **k: 0), (lambda *a, **k: None)
+        self.old_list, cleanup.gmail_list = cleanup.gmail_list, lambda *a, **k: []
+        self.old_bg, cleanup._background = cleanup._background, lambda fn, *a: None   # no read-back after the test
 
     def tearDown(self):
         cleanup.db, cleanup.gmail, cleanup._store, cleanup.log = self.old
+        cleanup.gmail_list = self.old_list
         cleanup.ACC = self.old_acc
+        cleanup._background = self.old_bg
 
     def test_a_bulk_change_is_recorded_before_gmail_is_called(self):
         cleanup._ACTION.note = "block deals@shop.com"
@@ -327,6 +391,37 @@ class Undo(unittest.TestCase):
                                                                  "removeLabelIds": ["TRASH"]}))
         self.assertFalse([s for s, _ in self.sql if "INSERT INTO unified.action_log" in s])
         self.assertTrue([s for s, _ in self.sql if "SET undone_at" in s])
+
+    def test_one_change_is_undone_once_even_when_undo_is_clicked_twice(self):
+        cleanup.undo_action({"id": 7})
+        with self.assertRaises(ValueError) as e:
+            cleanup.undo_action({"id": 7})
+        self.assertIn("already undone", str(e.exception))
+        self.assertEqual(len(self.calls), 1)   # Gmail was asked once
+        claim = [s for s, _ in self.sql if "SET undone_at = now()" in s][0]
+        self.assertIn("undone_at IS NULL", claim)   # the check and the claim are one statement: no race between them
+        self.assertIn("make_interval", claim)       # nor is a change past UNDO_DAYS (its Trash may be gone) undone
+
+    def test_a_failed_undo_can_be_tried_again(self):
+        def down(*a, **k):
+            raise RuntimeError("Gmail POST /messages/batchModify: 500 backend error")
+        cleanup.gmail = down
+        with self.assertRaises(RuntimeError):
+            cleanup.undo_action({"id": 7})
+        self.assertIsNone(self.log_row["undone"])   # released: not shown as undone when nothing came back
+        cleanup.gmail = lambda acc, path, method="GET", body=None: self.calls.append((path, body)) or {}
+        self.assertEqual(cleanup.undo_action({"id": 7}), {"ok": True, "restored": 2})
+
+    def test_an_unknown_or_expired_change_is_refused(self):
+        self.log_row["undone"] = "earlier"
+        with self.assertRaises(ValueError) as e:
+            cleanup.undo_action({"id": 7})
+        self.assertIn("already undone", str(e.exception))
+        cleanup.db.execute = lambda sql, params=None: type("R", (), {"fetchone": staticmethod(lambda: None)})()
+        with self.assertRaises(ValueError) as e:
+            cleanup.undo_action({"id": 8})
+        self.assertIn("no such action", str(e.exception))
+        self.assertEqual(self.calls, [])
 
 
 class AccessToken(unittest.TestCase):
@@ -374,6 +469,32 @@ class AccessToken(unittest.TestCase):
         bad.append(f"{head}.{forged}.{sig}")                       # payload swapped under a real signature
         for tok in bad:
             self.assertIsNone(self.check(tok), str(tok)[:40])
+
+    def test_unknown_kids_and_a_down_cloudflare_cannot_make_every_request_fetch_keys(self):
+        a, fetched = self.access, []
+        saved = (a._fetch_keys, a._keys, a._fetched, a._retry_at)
+        self.addCleanup(lambda: setattr(a, "_fetch_keys", saved[0]) or setattr(a, "_keys", saved[1])
+                        or setattr(a, "_fetched", saved[2]) or setattr(a, "_retry_at", saved[3]))
+        a._fetch_keys = lambda: fetched.append(1) or {"k1": self.key.public_key()}
+        a._keys, a._fetched, a._retry_at = {}, 0.0, 0.0
+        tok = self.token(self.good(), kid="made-up")
+        for _ in range(30):   # a stream of tokens naming a kid Cloudflare never issued
+            self.assertIsNone(a.email_from(tok, team="t.cloudflareaccess.com", aud="AUD1", now=1000))
+        self.assertEqual(len(fetched), 1)          # the first fetch; the forced refetch waits a minute
+        a._fetched -= a.REFETCH_MIN + 1             # a minute on: a rotated key is still picked up
+        a.keys(force=True)
+        self.assertEqual(len(fetched), 2)
+
+        def down():
+            fetched.append(1)
+            raise OSError("cloudflare unreachable")
+        a._fetch_keys, a._keys, a._fetched, a._retry_at, fetched[:] = down, {}, 0.0, 0.0, []
+        for _ in range(30):   # nothing held and Cloudflare down: nobody gets in, and it is not asked 30 times
+            self.assertEqual(a.keys(), {})
+        self.assertEqual(len(fetched), 1)
+        a._retry_at = 0.0
+        a._fetch_keys = lambda: {"k1": self.key.public_key()}
+        self.assertIn("k1", a.keys())
 
     def test_off_unless_both_settings_are_present(self):
         self.assertFalse(self.access.ENABLED)   # the test environment sets neither: the header mode is unchanged

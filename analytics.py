@@ -1,16 +1,30 @@
 """Merged analytics across every linked account: mail volume, read rate, top senders and domains (from the collector's
 unified.msg), what Inbox Zero's rules did (ExecutedRule, grouped by rule name, which the rule sync keeps identical
 across accounts), and cleanup totals (Newsletter statuses). Every number comes with a per-account breakdown."""
+import re
+
 from core import ACC, POOL, db, gmail
+
+TZ_NAME = re.compile(r"[A-Za-z0-9_+\-/]{1,64}")
+
+
+def _zone(c, name):
+    """The viewer's time zone (an IANA name sent by the browser) if Postgres knows it, else UTC. Days in the daily
+    chart are that zone's calendar days, not the database session's, which the browser cannot know."""
+    if name and TZ_NAME.fullmatch(name) and c.execute("SELECT 1 FROM pg_timezone_names WHERE name = %s",
+                                                      (name,)).fetchone():
+        return name
+    return "UTC"
 
 
 def overview(q):
     days = max(1, min(int(q.get("days", ["30"])[0]), 180))
     accs = {a["id"]: a["email"] for a in ACC.list()}
     with db() as c:
+        tz = _zone(c, q.get("tz", [""])[0].strip())
         daily = c.execute(
-            "SELECT to_char(date_trunc('day', ts), 'YYYY-MM-DD'), account_id, count(*) FROM unified.msg "
-            "WHERE ts > now() - make_interval(days => %s) GROUP BY 1, 2 ORDER BY 1", (days,)).fetchall()
+            "SELECT to_char(date_trunc('day', ts AT TIME ZONE %s), 'YYYY-MM-DD'), account_id, count(*) FROM unified.msg "
+            "WHERE ts > now() - make_interval(days => %s) GROUP BY 1, 2 ORDER BY 1", (tz, days)).fetchall()
         per = c.execute(
             "SELECT account_id, count(*), sum(unread::int), sum(inbox::int), count(DISTINCT from_addr) "
             "FROM unified.msg WHERE ts > now() - make_interval(days => %s) GROUP BY 1", (days,)).fetchall()
@@ -59,6 +73,7 @@ def overview(q):
     unread = sum(a["unread"] for a in accounts)
     return {
         "days": days,
+        "tz": tz,
         "totals": {"received": total, "readPct": round(100 * (total - unread) / total) if total else None,
                    "inboxNow": sum(a["inboxNow"] or 0 for a in accounts),
                    "senders": n_senders,

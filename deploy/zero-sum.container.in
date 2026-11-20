@@ -1,0 +1,42 @@
+# Podman quadlet for Zero Sum, as a template: the unit a host's setup script should render, so that the unit and the
+# app version together. Replace the @NAME@ markers and install the result as /etc/containers/systemd/<name>.container.
+#
+#   @IMAGE@     image built from this checkout's Containerfile, e.g. localhost/iz-unified:<commit>
+#   @ENV_FILE@  root-only (0600) env file holding the variables listed in deploy/env.contract
+#   @PORT@      host port; published on 127.0.0.1 only (an authenticating proxy or tunnel sits in front)
+#   @NETWORK@   the quadlet network Inbox Zero's Postgres is on, e.g. iz.network
+#   @DB_UNIT@   the Postgres unit, e.g. iz-db.service
+#
+# The app listens on 0.0.0.0 inside the container (LISTEN_HOST is set in the image); PublishPort decides who can
+# reach it. It refuses to start unless the env file sets CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD (or, for local
+# development only, ALLOW_HEADER_TRUST=1).
+#
+# Health: the deep check also connects to the database and compares the Inbox Zero schema with what the app depends
+# on (izdb.py). An updater should roll back on the same URL: http://127.0.0.1:@PORT@/healthz?deep=1
+[Unit]
+Description=Zero Sum (unified view over Inbox Zero)
+Requires=@DB_UNIT@
+After=@DB_UNIT@
+
+[Container]
+ContainerName=iz-unified
+Image=@IMAGE@
+EnvironmentFile=@ENV_FILE@
+PublishPort=127.0.0.1:@PORT@:8080
+Network=@NETWORK@
+ReadOnly=true
+UserNS=auto
+DropCapability=ALL
+NoNewPrivileges=true
+HealthCmd=python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz?deep=1', timeout=8)"
+HealthInterval=60s
+HealthTimeout=10s
+HealthStartPeriod=30s
+HealthRetries=3
+
+[Service]
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
