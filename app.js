@@ -796,7 +796,8 @@ $("#a-days").onchange = loadAnalytics;
 
 /* ------------------------------------------------------------------ rules */
 const OPS = { create: "create", adopt: "adopt existing", update: "update", delete: "delete", error: "error",
-  restore: "put back own rule", detach: "stop managing", held: "waiting", outbound: "needs your OK to send" };
+  restore: "put back own rule", detach: "stop managing", held: "waiting", outbound: "needs your OK to send",
+  "stop-sending": "stopped sending" };
 async function loadRules() {
   let d;
   try { d = await api("/api/rules"); } catch (e) { $("#r-matrix").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
@@ -811,12 +812,13 @@ async function loadRules() {
     d.rules.map((r) => `<tr><td><b>${esc(r.name)}</b>${r.enabled ? "" : ' <span class="note">(off)</span>'}<br>
       <span class="note">${esc(r.actions.join(", ").toLowerCase())}</span>
       ${(r.outbound || []).length ? `<br><span class="err">Sends out: ${esc(r.outbound.join("; "))}</span>` : ""}</td>` +
-      d.accounts.map((a) => { const st = r.cells[a.id], out = (r.outbound || []).length, ok = (r.outboundAllowed || {})[a.id];
-        S.ruleCells[`${r.id}|${a.id}`] = { rule: r.name, email: a.email, st, outbound: r.outbound || [] };
+      d.accounts.map((a) => { const st = r.cells[a.id], out = (r.outbound || []).length, ok = (r.outboundAllowed || {})[a.id],
+          stale = (r.outboundStale || {})[a.id];
+        S.ruleCells[`${r.id}|${a.id}`] = { rule: r.name, email: a.email, st, outbound: r.outbound || [], key: r.outboundKey };
         const ticked = !(st === "off" || st === "removing");
         return `<td class="cell"><label title="Copy this rule to ${esc(a.email)}"><input type="checkbox" data-r="${esc(r.id)}" data-a="${esc(a.id)}" aria-label="${esc(`Copy ${r.name} to ${a.email}`)}" ${ticked ? "checked" : ""}>
-          ${st === "off" ? "" : `<span class="st ${st}">${st}</span>`}</label>
-          ${out && ticked ? `<br><label class="note" title="Let this rule forward, send or call webhooks from ${esc(a.email)}"><input type="checkbox" data-out="1" data-r="${esc(r.id)}" data-a="${esc(a.id)}" aria-label="${esc(`Allow ${r.name} to send from ${a.email}`)}" ${ok ? "checked" : ""}> allow sending</label>` : ""}</td>`; }).join("") + "</tr>").join("") + "</tbody></table>"
+          ${st === "off" ? "" : `<span class="st ${esc(st.replace(/ /g, "-"))}">${esc(st)}</span>`}</label>
+          ${out && ticked ? `<br><label class="note" title="Let this rule forward, send or call webhooks from ${esc(a.email)}"><input type="checkbox" data-out="1" data-r="${esc(r.id)}" data-a="${esc(a.id)}" aria-label="${esc(`Allow ${r.name} to send from ${a.email}`)}" ${ok ? "checked" : ""}> allow sending</label>${stale ? `<br><span class="err">sends somewhere new: allow again</span>` : ""}` : ""}</td>`; }).join("") + "</tr>").join("") + "</tbody></table>"
     : `<div class="empty">The master account has no rules yet: create them in Inbox Zero.</div>`;
   $("#r-log").innerHTML = d.log.length ? `<div class="card"><h3>Recent sync activity</h3><ul class="ops">` +
     d.log.map((l) => `<li class="${l.kind.includes("error") ? "err" : ""}"><span class="note">${esc(stamp(l.at))}</span>
@@ -868,7 +870,9 @@ $("#r-matrix").onchange = async (e) => {
   const cell = (S.ruleCells || {})[`${c.dataset.r}|${c.dataset.a}`];
   if (c.dataset.out) {   // forward / send / reply / webhook: copied only with this second, explicit OK
     if (c.checked && !confirm(`Let "${cell ? cell.rule : "this rule"}" act from ${cell ? cell.email : "this account"}: ${cell ? cell.outbound.join("; ") : ""}?\n\nMatching mail in that account will be sent to these destinations.`)) { c.checked = false; return; }
-    await api("/api/rules/include", { rule: c.dataset.r, account: c.dataset.a, include: true, outbound: c.checked }).catch((err) => alert(err.message));
+    // the OK names the destinations shown here: if the rule changed since, the server refuses it
+    await api("/api/rules/include", c.checked ? { rule: c.dataset.r, account: c.dataset.a, include: true, outbound: true, destinations: cell ? cell.key : "" }
+      : { rule: c.dataset.r, account: c.dataset.a, include: true, outbound: false }).catch((err) => alert(err.message));
     loadRules(); return;
   }
   if (!c.checked && cell && cell.st !== "off" && cell.st !== "pending" &&

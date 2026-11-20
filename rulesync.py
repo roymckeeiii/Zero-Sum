@@ -22,9 +22,13 @@
     - by the automatic sync, at most AUTO_MAX_DELETES per run; the rest wait ("held") and are logged.
   When MASTER_EMAIL names another account than the last sync ran for, every copy looks orphaned: no copy is removed
   until a "Sync now" confirms the change ("master-change" in confirm).
-- Actions that send mail or data out of the account (FORWARD, SEND_EMAIL, REPLY, CALL_WEBHOOK) carry the master's
-  destinations. The Rules tab shows where each one goes, and a rule with any of them is copied to an account only after
-  that is allowed for it separately (unified.rule_include.outbound); until then it is reported, not copied.
+- Actions that send mail or data out of the account (FORWARD, SEND_EMAIL, REPLY, CALL_WEBHOOK, and any action type not
+  known to stay inside the account) carry the master's destinations. The Rules tab shows where each one goes, and a
+  rule with any of them is copied to an account only after that is allowed for it separately
+  (unified.rule_include.outbound). The OK covers the destinations it was given for (outbound_key): when the master
+  later sends somewhere else, it is needed again. Without a current OK the rule is reported, not copied, and a copy
+  already there that sends anywhere not OK'd (sending was taken back, or the copy predates the OK) has those actions
+  removed ("stop-sending"); the copy is backed up first.
 - Every backup can be restored from the Rules tab (backups() / restore()); backups of rules still mapped are kept.
 """
 import hashlib, json, os, threading
@@ -36,8 +40,11 @@ MASTER_HINT = bool(MASTER)
 
 # per-account action types (they reference the master's own messaging channel): never copied
 SKIP_ACTION_TYPES = {"DRAFT_MESSAGING_CHANNEL", "NOTIFY_MESSAGING_CHANNEL"}
-# actions that send mail or data somewhere: copied only where explicitly allowed (rule_include.outbound)
-OUTBOUND_ACTION_TYPES = {"FORWARD", "SEND_EMAIL", "REPLY", "CALL_WEBHOOK"}
+# action types known to act only inside the account. Every other type (FORWARD, SEND_EMAIL, REPLY, CALL_WEBHOOK, and
+# any type a later Inbox Zero adds) is treated as sending mail or data out: copied only where explicitly allowed
+LOCAL_ACTION_TYPES = {"LABEL", "ARCHIVE", "MARK_READ", "MARK_SPAM", "DRAFT_EMAIL", "DIGEST", "MOVE_FOLDER",
+                      "TRACK_THREAD"}
+OUTBOUND_ACTION_TYPES = {"FORWARD", "SEND_EMAIL", "REPLY", "CALL_WEBHOOK"}   # the known ones, described by name
 LOCK = threading.Lock()
 # Most copies the automatic sync deletes in one run; more wait for "Sync now". DEFAULT - Roy may change: 3
 AUTO_MAX_DELETES = int(os.environ.get("RULES_AUTO_MAX_DELETES", "3"))
@@ -79,21 +86,38 @@ def master_actions(master_id, rule):
     return out
 
 
+def sends(a):
+    """Can this action send mail or data out of the account? Unknown types are assumed to."""
+    return a["type"] not in LOCAL_ACTION_TYPES and a["type"] not in SKIP_ACTION_TYPES
+
+
 def outbound(actions):
     """Where a rule's actions send mail or data, one plain line each ([] when nowhere)."""
     out = []
     for a in actions:
-        if a["type"] not in OUTBOUND_ACTION_TYPES:
+        if not sends(a):
             continue
         to = ", ".join(x for x in (a.get("to"), a.get("cc") and f"cc {a['cc']}", a.get("bcc") and f"bcc {a['bcc']}") if x)
-        out.append({"FORWARD": f"forward to {to or '(no address)'}", "SEND_EMAIL": f"send email to {to or '(no address)'}",
-                    "REPLY": "reply to the sender" + (f" ({to})" if to else ""),
-                    "CALL_WEBHOOK": f"webhook {a.get('url') or '(no URL)'}"}[a["type"]])
+        known = {"FORWARD": f"forward to {to or '(no address)'}", "SEND_EMAIL": f"send email to {to or '(no address)'}",
+                 "REPLY": "reply to the sender" + (f" ({to})" if to else ""),
+                 "CALL_WEBHOOK": f"webhook {a.get('url') or '(no URL)'}"}
+        out.append(known.get(a["type"]) or f"{a['type']} action (not known to stay inside the account)"
+                   + (f" to {to}" if to else "") + (f" {a['url']}" if a.get("url") else ""))
     return out
 
 
+def dest_key(actions):
+    """A short fingerprint of where the actions send (type and every address / URL); "" when nowhere. An OK to send
+    is stored with it, so it stops counting once the destinations change."""
+    dests = sorted(json.dumps([a["type"], a.get("to"), a.get("cc"), a.get("bcc"), a.get("url")]) for a in actions
+                   if sends(a))
+    return hashlib.sha256("\n".join(dests).encode()).hexdigest()[:20] if dests else ""
+
+
 def _outbound_allowed(c):
-    return set(c.execute("SELECT master_rule_id, account_id FROM unified.rule_include WHERE outbound").fetchall())
+    """{(master rule, account): the dest_key the OK was given for (None for an OK given before keys were kept)}."""
+    return {(m, a): k for m, a, k in c.execute(
+        "SELECT master_rule_id, account_id, outbound_key FROM unified.rule_include WHERE outbound").fetchall()}
 
 
 def digest(rule, actions):
@@ -123,30 +147,55 @@ def state():
         acts = master_actions(master["id"], r)
         h = digest(r, acts)
         cells = {}
+        key = dest_key(acts)
         for a in accounts:
             m = rmap.get((r["id"], a["id"]))
             if (r["id"], a["id"]) not in incl:
                 cells[a["id"]] = "removing" if m and m[0] in targets[a["id"]] else "off"
+            elif key and allowed.get((r["id"], a["id"]), "") != key:
+                cells[a["id"]] = "not sending"   # a copy is not made, or kept, with sending that is not OK'd
             elif not m or m[0] not in targets[a["id"]]:
                 cells[a["id"]] = "pending"
             else:
                 cells[a["id"]] = "synced" if m[1] == h else "changed"
         rules.append({"id": r["id"], "name": r["name"], "enabled": r["enabled"], "systemType": r["systemType"],
                       "instructions": r["instructions"], "actions": [a["type"] for a in r["actions"]], "cells": cells,
-                      "outbound": outbound(acts),
-                      "outboundAllowed": {a["id"]: (r["id"], a["id"]) in allowed for a in accounts}})
+                      "outbound": outbound(acts), "outboundKey": key,
+                      "outboundAllowed": {a["id"]: bool(key) and allowed.get((r["id"], a["id"])) == key
+                                          for a in accounts},
+                      # allowed once, but the rule has sent somewhere else since: needs a new OK
+                      "outboundStale": {a["id"]: bool(key) and (r["id"], a["id"]) in allowed and
+                                        allowed[(r["id"], a["id"])] != key for a in accounts}})
     return {"master": master, "accounts": accounts, "rules": rules, "auto": setting("rules_auto", "0") == "1",
             "log": [{"at": a.isoformat(), "kind": k, "account": acc, "msg": m} for a, k, acc, m in logs]}
 
 
+def _current_dest_key(rule_id):
+    master = ACC.master()
+    if not master:
+        raise PermissionError("master account not linked in Inbox Zero")
+    with db() as c:
+        r = load_rules(c, master["id"]).get(rule_id)
+    if not r:
+        raise KeyError("no such master rule")
+    return dest_key(master_actions(master["id"], r))
+
+
 def set_include(d):
     """Tick or untick a rule for an account. With "outbound", also allow (or stop allowing) its forward / send /
-    reply / webhook actions to be copied there."""
+    reply / webhook actions to be copied there. An OK is stored for the destinations the rule has now; when the page
+    sends the key of the destinations it showed ("destinations") and they have changed since, it is refused."""
+    if d.get("include") and d.get("outbound"):
+        key = _current_dest_key(d["rule"])
+        if "destinations" in d and d["destinations"] != key:
+            raise ValueError("where this rule sends has changed since the page was loaded: reload and check again")
     with db() as c:
         if d.get("include") and "outbound" in d:
-            c.execute("INSERT INTO unified.rule_include (master_rule_id, account_id, outbound) VALUES (%s, %s, %s) "
-                      "ON CONFLICT (master_rule_id, account_id) DO UPDATE SET outbound = EXCLUDED.outbound",
-                      (d["rule"], d["account"], bool(d["outbound"])))
+            ok = bool(d["outbound"])
+            c.execute("INSERT INTO unified.rule_include (master_rule_id, account_id, outbound, outbound_key) "
+                      "VALUES (%s, %s, %s, %s) ON CONFLICT (master_rule_id, account_id) DO UPDATE SET outbound = "
+                      "EXCLUDED.outbound, outbound_key = EXCLUDED.outbound_key",
+                      (d["rule"], d["account"], ok, key if ok else None))
         elif d.get("include"):
             c.execute("INSERT INTO unified.rule_include (master_rule_id, account_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
                       (d["rule"], d["account"]))
@@ -250,7 +299,7 @@ def _restore(c, account_id, rule_id, rule, actions, exists, reason, action_accou
 
 
 def _sync_account(master, acc, mrules, incl, apply, allow=None):
-    allow = allow or {"keys": set(), "budget": 0, "removals": True}
+    allow = allow or {"keys": set(), "budget": 0, "removals": True, "outbound": {}}
     ops, writes, removals = [], [], []
     with db() as c:  # read only
         trules = load_rules(c, acc["id"])
@@ -266,10 +315,23 @@ def _sync_account(master, acc, mrules, incl, apply, allow=None):
         actions = master_actions(master["id"], r)
         h = digest(r, actions)
         cur = rmap.get(mid)
-        dest = outbound(actions)
-        if dest and (mid, acc["id"]) not in allow.get("outbound", ()):
+        dest, key = outbound(actions), dest_key(actions)
+        ok_key = allow.get("outbound", {}).get((mid, acc["id"]))
+        if dest and ok_key != key:
+            why = ("sending was allowed for other destinations, or before they were recorded: allow it again for these"
+                   if (mid, acc["id"]) in allow.get("outbound", {}) else
+                   "not copied until sending is allowed for this account")
+            copy = trules.get(cur[0]) if cur else None
+            if copy and any(sends(a) for a in copy["actions"]) and dest_key(copy["actions"]) != ok_key:
+                # the copy there sends somewhere nobody OK'd (now): take those actions out, keep the rest as it is
+                keep = [a for a in copy["actions"] if not sends(a)]
+                ops.append({"op": "stop-sending", "account": acc["email"], "rule": r["name"],
+                            "detail": "this copy no longer sends: " + "; ".join(outbound(copy["actions"]))
+                            + f" (saved in the backups first); {'; '.join(dest)}: {why}"})
+                writes.append(("stop-sending", mid, cur[0], copy, keep, digest(copy, keep), cur[2]))
+                continue
             ops.append({"op": "outbound", "account": acc["email"], "rule": r["name"],
-                        "detail": "; ".join(dest) + ": not copied until sending is allowed for this account"})
+                        "detail": "; ".join(dest) + ": " + why})
             continue
         if cur and cur[0] in trules:
             if cur[1] == h:
@@ -338,13 +400,15 @@ def _sync_account(master, acc, mrules, incl, apply, allow=None):
     lids = {}
     for w in writes:
         for a in w[4]:
-            if a["type"] == "LABEL" and a.get("label") and a["label"] not in lids:
+            if a["type"] == "LABEL" and a.get("label") and "labelId" not in a and a["label"] not in lids:
                 lids[a["label"]] = label_id(acc["id"], a["label"])
     with db() as c:  # then one short transaction on Inbox Zero's tables
         action_account = has_column(c, "Action", "emailAccountId")  # once per pass: an upgrade is seen next sync
         for op, mid, target, r, actions, h, adopted in writes:
             if op == "adopt":  # a rule this app did not make is about to be overwritten: keep what it was
                 _backup_rule(c, target, acc["id"], f"adopted as a copy of master rule {r['name']}"[:200])
+            elif op == "stop-sending":
+                _backup_rule(c, target, acc["id"], "before its sending actions were removed (sending not allowed)")
             _write_rule(c, target, acc["id"], r, actions, insert=(op == "create"), lids=lids,
                         action_account=action_account)
             c.execute("INSERT INTO unified.rule_map (master_rule_id, account_id, target_rule_id, hash, synced_at, "
@@ -361,7 +425,7 @@ def _sync_account(master, acc, mrules, incl, apply, allow=None):
         _prune_backups(c)
         c.commit()
     for o in ops:
-        if o["op"] not in ("error", "held", "outbound"):
+        if o["op"] not in ("error", "held", "outbound"):  # stop-sending is logged
             log("rules", f"{o['op']} {o['rule']}" + (" (its previous version is saved in unified.rule_backup)"
                                                      if o["op"] == "adopt" else ""), acc["email"])
     return ops

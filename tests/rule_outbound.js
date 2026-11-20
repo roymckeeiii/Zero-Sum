@@ -9,7 +9,7 @@ const fail = (m) => { console.log("RULE-OUTBOUND FAIL " + m); process.exit(1); }
   const p = loadRules(); await tick();
   const state = { master: { id: "acc1", email: "m@x.com" }, accounts: [{ id: "acc2", email: "b@x.com" }], auto: false, log: [],
     rules: [{ id: "m1", name: "Invoices", enabled: true, actions: ["FORWARD"], cells: { acc2: "pending" },
-      outbound: ["forward to accountant@example.com"], outboundAllowed: { acc2: false } }] };
+      outbound: ["forward to accountant@example.com"], outboundKey: "k1", outboundAllowed: { acc2: false } }] };
   for (let i = 0; i < 3; i++) { for (const r of pending.splice(0)) r.resolve(ok(r.url === "/api/rules" ? state : { backups: [] })); await tick(); }
   await p;
   const html = String(els["#r-matrix"].innerHTML);
@@ -24,7 +24,7 @@ const fail = (m) => { console.log("RULE-OUTBOUND FAIL " + m); process.exit(1); }
   box.checked = true;
   const done = els["#r-matrix"].onchange({ target: { closest: () => box } }); await tick();
   const inc = pending.find((r) => r.url === "/api/rules/include");
-  if (!inc || JSON.stringify(inc.body) !== JSON.stringify({ rule: "m1", account: "acc2", include: true, outbound: true })) fail(`sent ${JSON.stringify(inc && inc.body)}`);
+  if (!inc || JSON.stringify(inc.body) !== JSON.stringify({ rule: "m1", account: "acc2", include: true, outbound: true, destinations: "k1" })) fail(`sent ${JSON.stringify(inc && inc.body)}`);
   for (let i = 0; i < 4; i++) { for (const r of pending.splice(0)) r.resolve(ok(r.url === "/api/rules" ? state : { ok: true, backups: [] })); await tick(); }
   await done;
   console.log("RULE-OUTBOUND OK");

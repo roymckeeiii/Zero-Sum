@@ -120,6 +120,8 @@ td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
 .st.synced { background:var(--rule); color:var(--rule-t); }
 .st.pending, .st.changed { background:#fff1d6; color:#7a4b00; }
 .st.removing { background:var(--chip); color:var(--muted); }  /* --faint is below 4.5:1 for small text */
+.st.not-sending { background:#fde2e1; color:#8a1c14; }
+@media (prefers-color-scheme: dark) { .st.not-sending { background:#3d1714; color:#f4a29b; } }
 @media (prefers-color-scheme: dark) { .st.pending, .st.changed { background:#3a2c0f; color:#f3c26b; } }
 .ops li { margin:2px 0; }
 .qgroup { background:var(--panel); border:1px solid var(--line); border-radius:8px; margin-bottom:10px; }

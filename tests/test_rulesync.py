@@ -44,8 +44,11 @@ class World(unittest.TestCase):
             if b[1] == p[0] and b[3].startswith("adopted")])
         self.db.on("FROM unified.settings", lambda p: [(self.settings[p[0]],)] if p[0] in self.settings else [])
         self.db.on("FROM unified.rule_include", lambda p: sorted(self.include))
-        self.outbound = set()   # (master rule, account) where forward / send / reply / webhook may be copied
-        self.db.on("FROM unified.rule_include WHERE outbound", lambda p: sorted(self.outbound))
+        # (master rule, account) where forward / send / reply / webhook may be copied: OK'd for the destinations the
+        # master rule has now, unless ok_keys names the destinations the OK was given for
+        self.outbound, self.ok_keys = set(), {}
+        self.db.on("FROM unified.rule_include WHERE outbound", lambda p: [
+            (m, a, self.ok_keys.get((m, a), self.dest_key(m))) for m, a in sorted(self.outbound)])
 
         def label_id(acc, name, create=True):
             self.events.append(("gmail", acc, name, self.db.open))
@@ -54,6 +57,9 @@ class World(unittest.TestCase):
                          labels=lambda acc: {"L_master": "Receipts"})
         self.p.__enter__()
         self.addCleanup(self.p.__exit__)
+
+    def dest_key(self, mid):
+        return rulesync.dest_key([dict(zip(rulesync.ACTION_FIELDS, t[1:-1])) for t in self.actions.get(mid, [])])
 
     def writes(self):
         return [(s, p) for s, p in self.db.sql if any(w in s for w in WRITES)]
@@ -391,7 +397,75 @@ class Outbound(World):
         self.assertNotIn("outbound", self.db.sql[-1][0])
         rulesync.set_include({"rule": "m1", "account": "acc2", "include": True, "outbound": True})
         self.assertIn("DO UPDATE SET outbound", self.db.sql[-1][0])
-        self.assertEqual(self.db.sql[-1][1], ("m1", "acc2", True))
+        self.assertEqual(self.db.sql[-1][1], ("m1", "acc2", True, self.dest_key("m1")))   # the OK is for these
+
+    def copy_that_forwards(self, to="accountant@example.com"):
+        fwd = {f: None for f in rulesync.ACTION_FIELDS} | {"type": "FORWARD", "to": to}
+        self.rules["acc2"] = [rule("t1", "Receipts")]
+        self.actions["t1"] = [action("t1", label_id="L_acc2"), ("t1", *[fwd[f] for f in rulesync.ACTION_FIELDS], None)]
+
+    def test_taking_back_allow_sending_removes_the_sending_actions_from_the_copy(self):
+        self.copy_that_forwards()
+        self.map = [("m1", "acc2", "t1", self.digest())]
+        for auto in (False, True):   # the automatic sync does it too: it only ever reduces sending
+            self.db.sql.clear()
+            (o,) = rulesync.sync(auto=auto)["ops"]
+            self.assertEqual(o["op"], "stop-sending")
+            self.assertIn("forward to accountant@example.com", o["detail"])
+            w = [s for s, _ in self.writes()]
+            self.assertIn("INSERT INTO unified.rule_backup", w[0])                # the copy as it was is saved first
+            self.assertEqual(self.db.said("INSERT INTO unified.rule_backup")[0][1][1:], ("t1", "acc2"))
+            types = [p[-len(rulesync.ACTION_FIELDS)] for _, p in self.db.said('INSERT INTO "Action"')]
+            self.assertEqual(types, ["LABEL"])                                   # no FORWARD left
+            self.assertEqual(self.db.said('INSERT INTO "Action"')[0][1][1:3], ["t1", "L_acc2"])   # its own label kept
+            self.assertNotEqual(self.db.said("INSERT INTO unified.rule_map")[0][1][3], self.digest())
+
+    def test_a_copy_made_before_the_ok_existed_stops_sending_too(self):
+        self.copy_that_forwards()
+        self.map = [("m1", "acc2", "t1", "made-before-outbound-was-checked")]
+        self.assertEqual([o["op"] for o in rulesync.sync()["ops"]], ["stop-sending"])
+
+    def test_an_ok_counts_only_for_the_destinations_it_was_given_for(self):
+        self.copy_that_forwards()
+        self.actions["m1"][1] = ("m1", *[({f: None for f in rulesync.ACTION_FIELDS} | {
+            "type": "FORWARD", "to": "accountant@example.com"})[f] for f in rulesync.ACTION_FIELDS], None)
+        self.actions["m1"].pop()
+        old = self.dest_key("m1")
+        self.map = [("m1", "acc2", "t1", self.digest())]
+        self.outbound, self.ok_keys = {("m1", "acc2")}, {("m1", "acc2"): old}
+        self.actions["m1"][1] = ("m1", *[({f: None for f in rulesync.ACTION_FIELDS} | {
+            "type": "FORWARD", "to": "eve@example.com"})[f] for f in rulesync.ACTION_FIELDS], None)
+        for auto in (True, False):
+            (o,) = rulesync.sync(auto=auto)["ops"]
+            self.assertEqual(o["op"], "outbound")                                # not copied: needs a new OK
+            self.assertIn("eve@example.com", o["detail"])
+            self.assertIn("allow it again", o["detail"])
+        self.assertEqual(self.writes(), [])                                      # the copy still sends where OK'd
+        self.ok_keys = {}                                                        # OK'd again, for eve
+        self.assertEqual([o["op"] for o in rulesync.sync()["ops"]], ["update"])
+
+    def test_an_ok_from_before_destinations_were_recorded_is_not_enough(self):
+        self.outbound, self.ok_keys = {("m1", "acc2")}, {("m1", "acc2"): None}
+        self.assertEqual([o["op"] for o in rulesync.sync()["ops"]], ["outbound"])
+        self.assertEqual(self.writes(), [])
+
+    def test_an_action_type_not_known_to_stay_inside_is_treated_as_sending(self):
+        self.actions = {"m1": [action("m1"), action("m1", "NOTIFY_SENDER", None, None)]}
+        (o,) = rulesync.sync()["ops"]
+        self.assertEqual(o["op"], "outbound")
+        self.assertIn("NOTIFY_SENDER", o["detail"])
+        self.assertEqual(self.writes(), [])
+
+    def test_allowing_is_refused_when_the_destinations_changed_since_the_page_showed_them(self):
+        with self.assertRaises(ValueError):
+            rulesync.set_include({"rule": "m1", "account": "acc2", "include": True, "outbound": True,
+                                  "destinations": "what-the-page-showed-before"})
+        self.assertFalse(self.db.said("INSERT INTO unified.rule_include"))
+        rulesync.set_include({"rule": "m1", "account": "acc2", "include": True, "outbound": True,
+                              "destinations": self.dest_key("m1")})
+        self.assertEqual(self.db.said("INSERT INTO unified.rule_include")[0][1][2:], (True, self.dest_key("m1")))
+        rulesync.set_include({"rule": "m1", "account": "acc2", "include": True, "outbound": False})
+        self.assertEqual(self.db.said("INSERT INTO unified.rule_include")[1][1][2:], (False, None))
 
     def test_the_rules_tab_shows_where_each_rule_sends(self):
         self.outbound = {("m1", "acc3")}
@@ -402,6 +476,12 @@ class Outbound(World):
         self.assertEqual(r["outbound"], ["forward to accountant@example.com, cc boss@example.com",
                                          "webhook https://hooks.example.com/x"])
         self.assertEqual(r["outboundAllowed"], {"acc2": False, "acc3": True})
+        self.assertEqual(r["cells"]["acc2"], "not sending")
+        self.assertEqual(r["outboundKey"], self.dest_key("m1"))
+        self.ok_keys = {("m1", "acc3"): "older"}
+        with Patched(rulesync, setting=lambda k, d=None: d):
+            (r,) = rulesync.state()["rules"]
+        self.assertEqual((r["outboundAllowed"]["acc3"], r["outboundStale"]["acc3"]), (False, True))
 
 
 class InboxZeroV230(World):
@@ -447,10 +527,10 @@ class InboxZeroV230(World):
 
     def test_messaging_channel_actions_are_not_copied(self):
         self.actions = {"m1": [action("m1"), action("m1", "NOTIFY_MESSAGING_CHANNEL", None, None),
-                               action("m1", "DRAFT_MESSAGING_CHANNEL", None, None), action("m1", "STAR", None, None)]}
+                               action("m1", "DRAFT_MESSAGING_CHANNEL", None, None), action("m1", "MARK_READ", None, None)]}
         rulesync.sync()
         self.assertEqual([p[-len(rulesync.ACTION_FIELDS)] for _, p in self.db.said('INSERT INTO "Action"')],
-                         ["LABEL", "STAR"])
+                         ["LABEL", "MARK_READ"])
 
     def test_a_rule_with_only_messaging_channel_actions_is_copied_with_none(self):
         self.actions = {"m1": [action("m1", "NOTIFY_MESSAGING_CHANNEL", None, None)]}

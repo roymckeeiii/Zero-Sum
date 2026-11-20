@@ -265,8 +265,15 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
   When `MASTER_EMAIL` names another account than the last sync, nothing is removed until "Sync now" confirms the
   change. Every saved rule can be put back from "Saved rules" on the Rules tab.
 - A rule that forwards, sends or replies by email, or calls a webhook, would do that from every account it is copied
-  to, with the master's destinations. The Rules tab shows each destination, and such a rule is copied to an account
-  only after you tick "allow sending" for that account (and confirm); until then the sync reports it and leaves it.
+  to, with the master's destinations. Any action type Zero Sum does not know to stay inside the account is treated
+  the same way. The Rules tab shows each destination, and such a rule is copied to an account only after you tick
+  "allow sending" for that account (and confirm); until then the sync reports it and leaves it.
+- The OK is for the destinations shown when you gave it. If the master rule later forwards or posts somewhere else,
+  the copy is not updated until you allow sending again (the cell says "sends somewhere new"); the copy already there
+  keeps sending only where you OK'd.
+- Taking "allow sending" back stops it: at the next sync the copy loses its forward / send / reply / webhook actions,
+  and the rest of it stays. The copy is saved in "Saved rules" first. Copies made before this OK existed are treated
+  as not allowed, so they stop sending too until you allow it; their cell reads "not sending".
 
 ## Requirements
 
