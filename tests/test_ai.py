@@ -289,6 +289,20 @@ class PartlyAppliedPlan(unittest.TestCase):
         self.assertEqual(self.status_set("UPDATE unified.ai_plan SET status")[-1], ("applied", "deals@shop.com"))
         self.assertIn("Gmail filters", r["note"])
 
+    def test_review_again_after_stop_here_keeps_it_marked_filters_active(self):
+        self.db.on("SELECT status FROM unified.ai_plan", [("applied",)])   # Stop here was pressed earlier
+        r = ai.skip({"addr": "deals@shop.com", "undo": True})              # Review again
+        self.assertEqual((r["status"], self.status_set("UPDATE unified.ai_plan SET status")[-1]),
+                         ("partial", ("partial", "deals@shop.com")))
+        self.db.on("SELECT status FROM unified.ai_plan", [("partial",)])
+        r = ai.skip({"addr": "deals@shop.com"})                            # then Skip (labelled Stop here)
+        self.assertEqual(self.status_set("UPDATE unified.ai_plan SET status")[-1], ("applied", "deals@shop.com"))
+        self.assertIn("Gmail filters", r["note"])
+
+    def test_review_again_after_a_skip_is_a_new_plan(self):
+        self.db.on("SELECT status FROM unified.ai_plan", [("skipped",)])
+        self.assertEqual(ai.skip({"addr": "deals@shop.com", "undo": True})["status"], "new")
+
     def test_skipping_a_new_plan_skips_it(self):
         self.db.on("SELECT status FROM unified.ai_plan", [("new",)])
         r = ai.skip({"addr": "deals@shop.com"})

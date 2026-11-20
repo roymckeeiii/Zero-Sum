@@ -273,11 +273,16 @@ STOPPED_NOTE = ("stopped here: the part already applied stays, and so do its Gma
 
 def skip(d):
     """Skip a plan, or (undo) put it back up for review. A partly applied plan is not "skipped": its filters are
-    active, so it is marked applied (stopped where it got to) and the answer says its filters stay."""
+    active, so it is marked applied (stopped where it got to) and the answer says its filters stay. An applied plan
+    put back up for review is "partial" again, not new: its filters are still active, so skipping it later stops it
+    again instead of marking it skipped."""
     addr = str(d.get("addr") or "").strip().lower()
     with db() as c:
         old = c.execute("SELECT status FROM unified.ai_plan WHERE addr = %s FOR UPDATE", (addr,)).fetchone()
-        status = "new" if d.get("undo") else "applied" if old and old[0] == "partial" else "skipped"
+        if d.get("undo"):
+            status = "partial" if old and old[0] in ("applied", "partial") else "new"
+        else:
+            status = "applied" if old and old[0] == "partial" else "skipped"
         c.execute("UPDATE unified.ai_plan SET status = %s, updated_at = now() WHERE addr = %s", (status, addr))
     return {"ok": True, "status": status, **({"note": STOPPED_NOTE} if status == "applied" and not d.get("undo") else {})}
 
