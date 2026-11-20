@@ -206,8 +206,10 @@ class EntryPoints(World):
         self.db.on("UPDATE unified.action_log SET undone_at = now()",
                    [("acc1", ["TRASH"], ["Label_Q"], ["aa11bb", "aa22cc"])])
         self.db.on("SELECT id, from_addr FROM unified.msg", [("aa11bb", JUNK), ("aa22cc", BANK)])
-        with Patched(cleanup, _store=lambda *a, **k: 0):
+        stored = []
+        with Patched(cleanup, _store=lambda acc, ids, *a, **k: stored.extend(ids) or 0):
             r = cleanup.undo_action({"id": 7})
+        self.assertEqual(sorted(stored), ["aa11bb", "aa22cc"])   # the history is refreshed for both, the held one too
         bodies = [c[3] for c in self.g.changes("batchModify")]
         self.assertEqual(bodies, [{"ids": ["aa11bb"], "addLabelIds": ["Label_Q"], "removeLabelIds": ["TRASH"]},
                                   {"ids": ["aa22cc"], "addLabelIds": ["INBOX"], "removeLabelIds": ["TRASH"]}])

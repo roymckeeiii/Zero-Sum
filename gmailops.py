@@ -271,7 +271,7 @@ def undo_action(d):
             c.execute("UPDATE unified.action_log SET undone_at = NULL WHERE id = %s", (aid,))
         raise
     try:  # Delete/Block dropped these messages from the local history: read them back so the sender shows up again
-        _store(acc, list(ids)[:5000])
+        _store(acc, (list(ids) + held)[:5000])   # the held ones too: they are in the inbox now
     except Exception as e:  # noqa: BLE001 - the mail itself is restored; the collector fills the rest
         log("cleanup-error", f"undo #{aid}: history not refreshed: {e}"[:300], ACC.email(acc))
     note = (f"{len(held)} from a protected sender or your own address went back to the inbox, not to where the "
