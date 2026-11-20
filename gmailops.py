@@ -60,7 +60,12 @@ def _filter(acc_id, addr, action, kind, keep=None, query=None, negated=None, sou
     except RuntimeError as e:
         if "exists" not in str(e).lower():
             raise
-        return None  # an identical filter is already there: recorded earlier, or not this app's (then it stays so)
+        if not getattr(e, "retried", False):
+            return None  # an identical filter is already there: recorded earlier, or not this app's (then it stays so)
+        # "exists" answered a repeat of this request: the first try made it before its answer was lost. It is this
+        # app's filter, so it is found and recorded like any other (else Protect, Keep and Reset could never remove it)
+        f = next((x for x in gmail(acc_id, "/settings/filters").get("filter", [])
+                  if (x.get("criteria") or {}) == crit and _same_action(x.get("action") or {}, action)), None)
     fid = (f or {}).get("id")
     if not fid:
         return None
@@ -76,6 +81,11 @@ def _filter(acc_id, addr, action, kind, keep=None, query=None, negated=None, sou
             pass
         raise
     return fid
+
+
+def _same_action(a, b):
+    return all(sorted(a.get(k) or []) == sorted(b.get(k) or []) for k in ("addLabelIds", "removeLabelIds")) and \
+        a.get("forward") == b.get("forward")
 
 
 def remove_app_filters(acc_id, keys, kinds=AUTOMATION_KINDS, exact=False):

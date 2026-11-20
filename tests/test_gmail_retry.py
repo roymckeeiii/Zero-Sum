@@ -1,5 +1,6 @@
-"""core.gmail: busy answers (429, 5xx including 502 and 504) are retried with back-off; a dropped connection is
-retried for reads only, since a change may already have been applied; other errors are raised at once."""
+"""core.gmail: busy answers (429, 500, 503) are retried with back-off; 502 and 504, like a dropped connection, only
+for requests that are harmless to send twice, since the change may already have been applied; other errors are raised
+at once."""
 import io, os, sys, unittest, urllib.error
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -17,7 +18,7 @@ class Token:
 
 
 class Retry(unittest.TestCase):
-    def call(self, answers, method="GET"):
+    def call(self, answers, method="GET", path="/labels/INBOX"):
         """core.gmail with urlopen answering from `answers` in turn (an exception, or a JSON reply)."""
         seen, slept = [], []
 
@@ -30,17 +31,35 @@ class Retry(unittest.TestCase):
         with Patched(core.urllib.request, urlopen=urlopen), Patched(core.time, sleep=slept.append), \
                 Patched(core, ACC=Token()):
             try:
-                return core.gmail("acc-retry", "/labels/INBOX", method, {} if method != "GET" else None), seen, slept
+                return core.gmail("acc-retry", path, method, {} if method != "GET" else None), seen, slept
             except Exception as e:  # noqa: BLE001
                 return e, seen, slept
 
     def http(self, code):
         return urllib.error.HTTPError("u", code, "x", {}, io.BytesIO(b"busy"))
 
-    def test_bad_gateway_and_gateway_timeout_are_retried_like_other_5xx(self):
+    def test_busy_answers_to_a_read_are_retried(self):
         for code in (500, 502, 503, 504):
             out, seen, slept = self.call([self.http(code), '{"ok": 1}'])
             self.assertEqual((out, len(seen), slept), ({"ok": 1}, 2, [1]), code)
+
+    def test_a_gateway_error_on_a_new_filter_or_label_is_not_sent_again(self):
+        for path in ("/settings/filters", "/labels"):
+            for code in (502, 504):
+                out, seen, _ = self.call([self.http(code), '{"id": "F2"}'], method="POST", path=path)
+                self.assertIsInstance(out, RuntimeError, (path, code))
+                self.assertEqual(seen, ["POST"], (path, code))
+                self.assertFalse(out.retried)
+
+    def test_a_gateway_error_on_a_label_change_is_sent_again(self):
+        for path in ("/messages/batchModify", "/messages/abc/trash", "/messages/abc/untrash"):
+            out, seen, _ = self.call([self.http(504), '{}'], method="POST", path=path)
+            self.assertEqual((out, len(seen)), ({}, 2), path)
+
+    def test_an_error_after_a_repeat_says_so(self):
+        out, _, _ = self.call([self.http(503), urllib.error.HTTPError("u", 400, "x", {}, io.BytesIO(b"exists"))],
+                              method="POST", path="/settings/filters")
+        self.assertTrue(out.retried)
 
     def test_a_dropped_connection_is_retried_for_a_read(self):
         for err in (urllib.error.URLError("reset"), TimeoutError("read timed out"), ConnectionResetError()):
@@ -60,6 +79,19 @@ class Retry(unittest.TestCase):
         out, seen, _ = self.call([self.http(400)])
         self.assertIsInstance(out, RuntimeError)
         self.assertEqual(len(seen), 1)
+
+
+class LabelExists(unittest.TestCase):
+    def test_a_label_made_meanwhile_is_used_instead_of_failing(self):
+        made = []
+
+        def gmail(acc, path, method="GET", body=None, retry=True):
+            if method == "POST":
+                made.append(body["name"])
+                raise RuntimeError("Gmail POST /labels: 409 Label name exists or conflicts")
+            return {"labels": [{"id": "Label_9", "name": n, "type": "user"} for n in made]}
+        with Patched(core, gmail=gmail, _labels={}):
+            self.assertEqual(core.label_id("acc-l", "Receipts"), "Label_9")
 
 
 if __name__ == "__main__":

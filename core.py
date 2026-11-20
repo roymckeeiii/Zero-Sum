@@ -165,6 +165,12 @@ def _cost(method, path):
     return 5
 
 
+def _idempotent(method, path):
+    """Can this request be sent twice with the same result as once?"""
+    return method in ("GET", "PUT", "DELETE") or path.split("?")[0].rsplit("/", 1)[-1] in (
+        "batchModify", "modify", "trash", "untrash")
+
+
 def gmail(account_id, path, method="GET", body=None, retry=True):
     with _bucket_lock:
         bucket = _buckets.setdefault(account_id, Bucket())
@@ -184,10 +190,15 @@ def gmail(account_id, path, method="GET", body=None, retry=True):
             detail = e.read()[:300].decode("utf-8", "replace")
             low = detail.lower()
             limited = e.code == 429 or (e.code == 403 and ("ratelimit" in low.replace(" ", "") or "quota exceeded" in low))
-            if (limited or e.code in (500, 502, 503, 504)) and attempt < 5:  # quota is per minute: back off up to a minute
+            # 502 / 504: a gateway gave up, but Gmail may have done the work: asked again only when doing it twice is
+            # harmless (a read, a label change); a new filter or label would be made twice, or fail as "exists"
+            busy = e.code in (500, 503) or (e.code in (502, 504) and _idempotent(method, path))
+            if (limited or busy) and attempt < 5:  # quota is per minute: back off up to a minute
                 time.sleep(min(60, 4 * 2 ** attempt) if limited else 2 ** attempt)
                 continue
-            raise RuntimeError(f"Gmail {method} {path.split('?')[0]}: {e.code} {detail}") from None
+            err = RuntimeError(f"Gmail {method} {path.split('?')[0]}: {e.code} {detail}")
+            err.retried = attempt > 0   # this answer came to a repeat: the first try may have been applied
+            raise err from None
         except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
             # no answer at all (reset, timeout, DNS): a read is simply asked again; a change is not, since Gmail may
             # have applied it before the connection dropped, and the caller decides what to do about that
@@ -233,8 +244,16 @@ def label_id(account_id, name, create=True):
             return lid
     if not create:
         return None
-    d = gmail(account_id, "/labels", "POST", {"name": name, "labelListVisibility": "labelShow",
-                                               "messageListVisibility": "show"})
+    try:
+        d = gmail(account_id, "/labels", "POST", {"name": name, "labelListVisibility": "labelShow",
+                                                   "messageListVisibility": "show"})
+    except RuntimeError as e:   # made meanwhile (or by a first try whose answer was lost): use that one
+        if ": 409 " not in str(e) and "exists" not in str(e).lower():
+            raise
+        found = [lid for lid, n in labels(account_id, fresh=True).items() if n.lower() == name.lower()]
+        if not found:
+            raise
+        return found[0]
     labels(account_id, fresh=True)
     return d["id"]
 

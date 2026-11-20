@@ -65,6 +65,24 @@ class Recorded(World):
         self.assertEqual(self.db.filters, [])
 
 
+    def test_a_filter_made_by_a_first_try_whose_answer_was_lost_is_recorded(self):
+        real = self.g
+
+        def lost_answer(acc, path, method="GET", body=None, retry=True):
+            if path == "/settings/filters" and method == "POST":
+                real(acc, path, method, body)          # Gmail makes it; its answer is lost and the request repeated
+                try:
+                    return real(acc, path, method, body)
+                except RuntimeError as e:
+                    e.retried = True
+                    raise
+            return real(acc, path, method, body)
+        with Patched(cleanup, gmail=lost_answer):
+            fid = cleanup._filter("acc1", S, cleanup.TRASH_FILTER, "trash", keep="subject:(x)")
+        self.assertEqual(fid, "F1")
+        self.assertEqual([(f[1], f[2], f[3]) for f in self.db.filters], [("F1", S, "trash")])
+
+
 class Removed(World):
     def setUp(self):
         super().setUp()
