@@ -206,7 +206,12 @@ def make_plan(addr):
 
 
 def _save(addr, plan, status="new"):
+    """Store a (new) plan for addr. A plan that was partly applied stays "partial" when it is re-analyzed: its Gmail
+    filters are still active, and the page keeps saying so until the new plan is applied (which replaces them)."""
     with db() as c:
+        old = c.execute("SELECT status FROM unified.ai_plan WHERE addr = %s FOR UPDATE", (addr,)).fetchone()
+        if old and old[0] == "partial":
+            status = "partial"
         c.execute("INSERT INTO unified.ai_plan (addr, plan, status) VALUES (%s, %s, %s) ON CONFLICT (addr) DO UPDATE "
                   "SET plan = EXCLUDED.plan, status = EXCLUDED.status, updated_at = now()", (addr, json.dumps(plan), status))
 
@@ -254,7 +259,7 @@ def plans(q):
         rows = c.execute(
             "SELECT p.addr, p.plan, p.status, p.updated_at, coalesce(s.n, 0), coalesce(s.accounts, '{}') FROM unified.ai_plan p "
             "LEFT JOIN (SELECT from_addr, count(*) n, array_agg(DISTINCT account_id) accounts FROM unified.msg GROUP BY 1) s "
-            "ON s.from_addr = p.addr ORDER BY (p.status = 'new') DESC, coalesce(s.n, 0) DESC").fetchall()
+            "ON s.from_addr = p.addr ORDER BY (p.status IN ('new', 'partial')) DESC, coalesce(s.n, 0) DESC").fetchall()
     accs = {a["id"]: a["email"] for a in ACC.list()}
     return {"ai": bool(KEY), "running": _running, "plans": [
         {**plan, "addr": addr, "status": status, "updated": upd.isoformat(), "count": n,
@@ -262,11 +267,19 @@ def plans(q):
         for addr, plan, status, upd, n, acc_ids in rows]}
 
 
+STOPPED_NOTE = ("stopped here: the part already applied stays, and so do its Gmail filters (use Keep or Reset on the "
+                "sender to remove them)")
+
+
 def skip(d):
+    """Skip a plan, or (undo) put it back up for review. A partly applied plan is not "skipped": its filters are
+    active, so it is marked applied (stopped where it got to) and the answer says its filters stay."""
+    addr = str(d.get("addr") or "").strip().lower()
     with db() as c:
-        c.execute("UPDATE unified.ai_plan SET status = %s, updated_at = now() WHERE addr = %s",
-                  ("new" if d.get("undo") else "skipped", str(d.get("addr") or "").strip().lower()))
-    return {"ok": True}
+        old = c.execute("SELECT status FROM unified.ai_plan WHERE addr = %s FOR UPDATE", (addr,)).fetchone()
+        status = "new" if d.get("undo") else "applied" if old and old[0] == "partial" else "skipped"
+        c.execute("UPDATE unified.ai_plan SET status = %s, updated_at = now() WHERE addr = %s", (status, addr))
+    return {"ok": True, "status": status, **({"note": STOPPED_NOTE} if status == "applied" and not d.get("undo") else {})}
 
 
 # ---------------------------------------------------------------- AI sort: judge each email by a plain-English rule

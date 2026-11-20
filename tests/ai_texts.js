@@ -39,6 +39,10 @@ const progress = (ai, total) => ({ collected: 120, mailboxTotal: total, withSubj
     const body = String(els["#ai-body"].innerHTML);
     if (body.includes('data-pa="apply"') !== apply) fail(`${status} plan: Apply button shown=${!apply} expected ${apply}`);
     if (status === "partial" && !/partly applied/.test(body)) fail(`partial plan not marked: ${body}`);
+    // its filters are live: the skip button says it stops there, not that the plan is skipped as if never applied
+    if (status === "partial" && (!/filters active/.test(body) || !/data-pa="skip"[^>]*>Stop here</.test(body)))
+      fail(`partial plan does not say its filters stay: ${body}`);
+    if (status === "new" && !/data-pa="skip"[^>]*>Skip</.test(body)) fail(`new plan lost its Skip button: ${body}`);
     if (status === "partial" && !/1 plan\(s\) to review/.test(String(els["#ai-status"].textContent))) fail("partial plan not counted to review");
   }
   console.log("AI-TEXTS OK");

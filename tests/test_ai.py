@@ -270,5 +270,45 @@ class Texts(unittest.TestCase):
         self.assertIn("AI-TEXTS OK", r.stdout)
 
 
+
+class PartlyAppliedPlan(unittest.TestCase):
+    """A plan applied in part has live Gmail filters: Skip and Re-analyze must not make it look untouched."""
+
+    def setUp(self):
+        self.db = Db()
+        p = Patched(ai, db=self.db)
+        p.__enter__()
+        self.addCleanup(p.__exit__)
+
+    def status_set(self, text):
+        return [params for sql, params in self.db.said(text)]
+
+    def test_skipping_a_partial_plan_stops_it_and_says_its_filters_stay(self):
+        self.db.on("SELECT status FROM unified.ai_plan", [("partial",)])
+        r = ai.skip({"addr": "deals@shop.com"})
+        self.assertEqual(self.status_set("UPDATE unified.ai_plan SET status")[-1], ("applied", "deals@shop.com"))
+        self.assertIn("Gmail filters", r["note"])
+
+    def test_skipping_a_new_plan_skips_it(self):
+        self.db.on("SELECT status FROM unified.ai_plan", [("new",)])
+        r = ai.skip({"addr": "deals@shop.com"})
+        self.assertEqual(self.status_set("UPDATE unified.ai_plan SET status")[-1], ("skipped", "deals@shop.com"))
+        self.assertNotIn("note", r)
+
+    def test_re_analyzing_a_partial_plan_keeps_it_marked_partly_applied(self):
+        self.db.on("SELECT status FROM unified.ai_plan", [("partial",)])
+        ai._save("deals@shop.com", {"groups": []})
+        self.assertEqual(self.status_set("INSERT INTO unified.ai_plan")[-1][2], "partial")
+        self.db = Db()
+        with Patched(ai, db=self.db):
+            ai._save("deals@shop.com", {"groups": []})
+            self.assertEqual(self.status_set("INSERT INTO unified.ai_plan")[-1][2], "new")
+
+    def test_partial_plans_are_listed_with_the_open_ones(self):
+        with Patched(ai, ACC=Accounts("me@x.com")):
+            ai.plans({})
+        self.assertIn("ORDER BY (p.status IN ('new', 'partial')) DESC", self.db.sql[-1][0])
+
+
 if __name__ == "__main__":
     unittest.main()

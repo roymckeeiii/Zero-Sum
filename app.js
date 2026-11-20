@@ -569,10 +569,10 @@ function planCard(p, i) {
   (p.subjects || []).forEach((x) => { const c = classify(x.subject, p); sampleCounts[c.text] = (sampleCounts[c.text] || 0) + x.count; });
   return `<div class="card plan ${done ? "done" : ""}" data-i="${i}" data-addr="${esc(p.addr)}">
     <div class="ph"><div><b>${esc(p.addr)}</b> <span class="note">· ${fmt(p.count)} emails · ${p.accounts.map((a) => acctChip(a.id, a.email)).join("")}</span>
-      ${done ? `<span class="chip">${esc(p.status)}</span>` : p.status === "partial" ? `<span class="chip">partly applied: apply again to continue</span>` : ""}<div class="note">${esc(p.reason || "")}</div>
+      ${done ? `<span class="chip">${esc(p.status)}</span>` : p.status === "partial" ? `<span class="chip" title="Its Gmail filters are active. Apply again to continue; Re-analyze keeps them until the new plan is applied; Stop here keeps what was done.">partly applied: filters active, apply again to continue</span>` : ""}<div class="note">${esc(p.reason || "")}</div>
       ${srt ? `<div class="note">AI sort ${esc(srt.status)}: ${fmt(srt.done)}/${fmt(srt.total)} checked, ${fmt(srt.kept)} kept; the rest → ${GACT[srt.action]}.
         Rule: <i>${esc(srt.rule)}</i> <button data-pa="stop" data-i="${i}">Stop AI sort</button></div>` : ""}</div>
-      <div class="grp">${done ? `<button data-pa="undo" data-i="${i}">Review again</button>` : `<button data-pa="skip" data-i="${i}">Skip</button>
+      <div class="grp">${done ? `<button data-pa="undo" data-i="${i}">Review again</button>` : `<button data-pa="skip" data-i="${i}"${p.status === "partial" ? ` title="Leave it partly applied: its Gmail filters stay (Keep or Reset on the sender removes them)">Stop here` : ">Skip"}</button>
         <button data-pa="redo" data-i="${i}">Re-analyze</button><button data-pa="apply" data-i="${i}" class="primary">Apply plan</button>`}</div></div>
     ${done ? "" : `<div class="mode"><button data-pa="mode-words" data-i="${i}" class="${ai ? "" : "on"}">Word groups</button><button
         data-pa="mode-ai" data-i="${i}" class="${ai ? "on" : ""}">AI sorts each email</button>
@@ -643,7 +643,11 @@ $("#ai-body").onclick = async (e) => {
     await api("/api/ai/stop-sort", { addr: p.addr }).catch((err) => alert(err.message)); return loadPlans(); }
   if (a === "add-g") { p.groups.push({ label: "", words: [], action: "keep" }); return loadPlansRender(); }
   if (a === "del-g") { p.groups.splice(+b.dataset.gi, 1); return loadPlansRender(); }
-  if (a === "skip" || a === "undo") { await api("/api/ai/skip", { addr: p.addr, undo: a === "undo" }).catch(() => {}); return loadPlans(); }
+  if (a === "skip" || a === "undo") {
+    const r = await api("/api/ai/skip", { addr: p.addr, undo: a === "undo" }).catch(() => ({}));
+    if (r.note) alert(`${p.addr}: ${r.note}`);
+    return loadPlans();
+  }
   if (a === "redo") { await api("/api/ai/analyze", { addr: p.addr }).catch((err) => alert(err.message)); return loadPlans(); }
   if (a === "apply") {
     const isAi = (p.mode || "words") === "ai";
