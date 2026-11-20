@@ -342,10 +342,13 @@ function askDialog(a, s, ai) {
     d.onclose = () => res(d.returnValue === "ok" ? { keep: $("#dlg-keep").value.split(",").map((x) => x.trim()).filter(Boolean) } : null);
   });
 }
-/* "1,234 emails (a@x: 1,000 · b@y: 234)" for one step of /api/sender/preview; "or more" when the count was capped */
+/* "1,234 emails (a@x: 1,000 · b@y: 234)" for one step of /api/sender/preview; "or more" when the count was capped,
+   "up to" when some senders were not looked up (mail the local history does not have yet) */
 function stepText(st) {
-  const one = (x) => x.error ? `${x.email}: count failed` : `${x.email}: ${fmt(x.count)}${x.capped ? "+" : ""}`;
-  return `${fmt(st.total)}${st.capped ? " or more" : ""} email${st.total === 1 && !st.capped ? "" : "s"}` +
+  const upto = (n, u) => u ? `${fmt(n)}, up to ${fmt(n + u)}` : fmt(n);
+  const one = (x) => x.error ? `${x.email}: count failed` : `${x.email}: ${upto(x.count, x.unchecked)}${x.capped ? "+" : ""}`;
+  const u = st.unchecked || 0;
+  return `${upto(st.total, u)}${st.capped ? " or more" : ""} email${st.total + u === 1 && !st.capped ? "" : "s"}` +
     (st.accounts.length ? ` (${st.accounts.map(one).join(" · ")})` : "") + (st.failed ? " — some accounts could not be counted" : "");
 }
 function previewText(r) {

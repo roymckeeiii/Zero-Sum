@@ -13,8 +13,10 @@ from inbox import meta
 MAX_BULK = int(os.environ.get("MAX_BULK", "200000"))  # most messages one bulk action touches per account
 
 
-def senders_of(acc_id, ids):
-    """{message id: sender address, or None when it cannot be told}: from the local history, else read from Gmail."""
+def senders_of(acc_id, ids, budget=None):
+    """{message id: sender address, or None when it cannot be told}: from the local history, else read from Gmail.
+    `budget(n)`, when given, says how many of the n messages missing from the local history may be read from Gmail;
+    the ones beyond it are left out of the answer (not looked up), so the caller can tell them from unknown ones."""
     who = {}
     for i in range(0, len(ids), 5000):
         with db() as c:
@@ -28,6 +30,8 @@ def senders_of(acc_id, ids):
         except Exception:  # noqa: BLE001 - unknown stays unknown: the caller leaves that message alone
             return None
     todo = [i for i in ids if i not in who]
+    if budget is not None:
+        todo = todo[:max(0, budget(len(todo)))]
     who.update(zip(todo, CPOOL.map(read, todo)))
     return who
 

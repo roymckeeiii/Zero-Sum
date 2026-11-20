@@ -92,6 +92,28 @@ class Preview(World):
         self.assertEqual(kept["total"], 5)                        # starring is not limited to the real sender
         self.assertEqual(cleanup.preview({"addr": S, "action": "star"})["steps"][0]["total"], 5)
 
+    def test_senders_missing_from_the_local_history_are_looked_up_only_up_to_a_limit(self):
+        # older mail not collected yet: one messages.get each, so a dialog reads at most PREVIEW_LOOKUPS of them in all
+        self.sizes = {"acc1": 30, "acc2": 20}
+        known = {"acc1m0", "acc1m1", "acc2m0"}
+        self.db.on("SELECT id, from_addr FROM unified.msg", lambda p: [(i, S) for i in p[1] if i in known])
+        self.g.meta = {f"{a}m{i}": S for a, n in self.sizes.items() for i in range(n)}
+        reads = []
+        real = self.g
+
+        def gmail(acc, path, method="GET", body=None, retry=True):
+            if path.startswith("/messages/"):
+                reads.append(path)
+            return real(acc, path, method, body)
+        with Patched(cleanup, gmail=gmail, PREVIEW_LOOKUPS=10):
+            st = cleanup.preview({"addr": S, "action": "delete"})["steps"][0]
+        self.assertEqual(len(reads), 10)
+        self.assertEqual((st["total"], st["unchecked"]), (3 + 10, 50 - 3 - 10))
+        self.assertEqual(sum(a["count"] + a["unchecked"] for a in st["accounts"]), 50)
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "app.js"), encoding="utf-8") as f:
+            self.assertIn("up to ${fmt(n + u)}", f.read())   # the dialog shows the rest as "up to"
+
     def test_a_count_at_the_limit_says_so_and_only_the_chosen_accounts_are_counted(self):
         self.sizes["acc1"] = 10 ** 6
         with Patched(cleanup, PREVIEW_MAX=50):

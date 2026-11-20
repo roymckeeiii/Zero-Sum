@@ -535,13 +535,18 @@ def plan_steps(groups, default):
 
 
 PREVIEW_MAX = int(os.environ.get("PREVIEW_MAX", "20000"))  # a preview counts up to this many per account and step
+# Most message senders one preview reads from Gmail (one messages.get each) for mail the local history does not have
+# yet; the rest is reported as "up to". DEFAULT - Roy may change: 100 (about 10 s of one account's quota)
+PREVIEW_LOOKUPS = int(os.environ.get("PREVIEW_LOOKUPS", "100"))
 
 
 def preview(d):
     """What a sender action ({addr, action, keep}) or a word plan ({addr, groups, default}) would change, per account
     and in total: counted in Gmail with the very searches the action runs (all folders, all years), not from the
     recent local window. Nothing is changed. A count that reaches PREVIEW_MAX is reported as capped ("or more").
-    Where the action takes mail out of view, only mail really from the sender is counted, as only that is changed."""
+    Where the action takes mail out of view, only mail really from the sender is counted, as only that is changed: the
+    sender is taken from the local history, and read from Gmail for at most PREVIEW_LOOKUPS messages in all; the ones
+    not looked up are reported as "unchecked" (the count is then "up to" count + unchecked)."""
     if "groups" in d or "default" in d:
         addr, groups, default = plan_input(d)
         steps = [(label, action, plan_query(addr, action, extra)) for label, action, _, extra in plan_steps(groups, default)]
@@ -566,15 +571,24 @@ def preview(d):
     # a step that takes mail out of view changes only mail really from addr (_modify_existing): counted the same way
     exact = {query for _, action, query in steps if action not in ("keep", "star", "unstar")}
 
+    left, left_lock = [PREVIEW_LOOKUPS], threading.Lock()
+
+    def budget(n):  # shared by every account and step of this preview
+        with left_lock:
+            k = min(n, left[0])
+            left[0] -= k
+            return k
+
     def count(job):
         a, query = job
         try:
             ids = [m["id"] for m in gmail_list(a, qs(bulk_query(query)), "messages", PREVIEW_MAX)]
-            n = len(ids)
+            n, unchecked = len(ids), 0
             if query in exact and ids:
-                who = senders_of(a, ids)
+                who = senders_of(a, ids, budget)
                 n = sum(who.get(i) == addr for i in ids)
-            return {"count": n, "capped": len(ids) >= PREVIEW_MAX}
+                unchecked = sum(i not in who for i in ids)
+            return {"count": n, "unchecked": unchecked, "capped": len(ids) >= PREVIEW_MAX}
         except Exception as e:  # noqa: BLE001 - shown per account; the other counts still help
             return {"error": str(e)[:200]}
     jobs = [(a, query) for _, _, query in steps for a in acc_ids]
@@ -584,6 +598,7 @@ def preview(d):
         per = [{"id": a, "email": ACC.email(a), **counts[(a, query)]} for a in acc_ids]
         out.append({"what": label, "action": action, "query": bulk_query(query), "accounts": per,
                     "total": sum(x.get("count", 0) for x in per),
+                    "unchecked": sum(x.get("unchecked", 0) for x in per),
                     "capped": any(x.get("capped") for x in per), "failed": any("error" in x for x in per)})
     return {"addr": addr, "accounts": len(acc_ids), "steps": out, "max": MAX_BULK}
 

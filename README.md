@@ -215,7 +215,9 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
 - Every Clean up action and every word plan asks for confirmation with the real number of emails per account: the
   server counts them in Gmail with the same searches the action then runs (`POST /api/sender/preview`; up to
   `PREVIEW_MAX`, default 20,000, per account and step, shown as "or more" beyond that). Where the action takes mail
-  out of view, only mail really from that sender is counted, since only that is changed. The count is taken when the
+  out of view, only mail really from that sender is counted, since only that is changed. The sender comes from the
+  local history; for mail not collected yet it is read from Gmail for at most `PREVIEW_LOOKUPS` messages per dialog
+  (default 100), and the rest is shown as "up to" a number. The count is taken when the
   dialog opens, so mail that arrives in between is not in it. Bulk actions still run inside the request; one action
   handles at most `MAX_BULK` messages per account.
 - **Protected** senders (an address, or a whole domain like `@yourbank.com`) can't be unsubscribed, archived, deleted,
