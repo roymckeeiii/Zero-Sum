@@ -274,13 +274,16 @@ STOPPED_NOTE = ("stopped here: the part already applied stays, and so do its Gma
 def skip(d):
     """Skip a plan, or (undo) put it back up for review. A partly applied plan is not "skipped": its filters are
     active, so it is marked applied (stopped where it got to) and the answer says its filters stay. An applied plan
-    put back up for review is "partial" again, not new: its filters are still active, so skipping it later stops it
-    again instead of marking it skipped."""
+    put back up for review is "partial" again, not new, while its filters are still on record (unified.filter, made
+    by a plan): skipping it later stops it again instead of marking it skipped. Once they are gone (Keep or Reset on
+    the sender, or another action replaced them) it is simply new."""
     addr = str(d.get("addr") or "").strip().lower()
     with db() as c:
         old = c.execute("SELECT status FROM unified.ai_plan WHERE addr = %s FOR UPDATE", (addr,)).fetchone()
         if d.get("undo"):
-            status = "partial" if old and old[0] in ("applied", "partial") else "new"
+            live = old and old[0] in ("applied", "partial") and c.execute(
+                "SELECT 1 FROM unified.filter WHERE addr = %s AND source LIKE 'plan%%' LIMIT 1", (addr,)).fetchone()
+            status = "partial" if live else "new"
         else:
             status = "applied" if old and old[0] == "partial" else "skipped"
         c.execute("UPDATE unified.ai_plan SET status = %s, updated_at = now() WHERE addr = %s", (status, addr))

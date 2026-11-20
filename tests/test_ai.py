@@ -291,6 +291,7 @@ class PartlyAppliedPlan(unittest.TestCase):
 
     def test_review_again_after_stop_here_keeps_it_marked_filters_active(self):
         self.db.on("SELECT status FROM unified.ai_plan", [("applied",)])   # Stop here was pressed earlier
+        self.db.on("FROM unified.filter WHERE addr", [(1,)])               # its filters are still on record
         r = ai.skip({"addr": "deals@shop.com", "undo": True})              # Review again
         self.assertEqual((r["status"], self.status_set("UPDATE unified.ai_plan SET status")[-1]),
                          ("partial", ("partial", "deals@shop.com")))
@@ -298,6 +299,14 @@ class PartlyAppliedPlan(unittest.TestCase):
         r = ai.skip({"addr": "deals@shop.com"})                            # then Skip (labelled Stop here)
         self.assertEqual(self.status_set("UPDATE unified.ai_plan SET status")[-1], ("applied", "deals@shop.com"))
         self.assertIn("Gmail filters", r["note"])
+
+    def test_review_again_after_its_filters_were_removed_is_a_new_plan(self):
+        for was in ("applied", "partial"):
+            self.db.on("SELECT status FROM unified.ai_plan", [(was,)])     # then Keep or Reset removed its filters
+            self.assertEqual(ai.skip({"addr": "deals@shop.com", "undo": True})["status"], "new", was)
+        filt = self.db.said("FROM unified.filter WHERE addr")[-1]
+        self.assertEqual(filt[1], ("deals@shop.com",))
+        self.assertIn("source LIKE 'plan%%'", filt[0])
 
     def test_review_again_after_a_skip_is_a_new_plan(self):
         self.db.on("SELECT status FROM unified.ai_plan", [("skipped",)])
