@@ -28,6 +28,12 @@ try {
   at("2026-11-19T03:00:00Z");   // a zone the browser does not know falls back to UTC, as the server does
   assert.deepStrictEqual(days(t.dailyChart([], 1, "Not/AZone").list), ["2026-11-19"]);
   assert.strictEqual(typeof t.viewerZone(), "string");
+  // drawn as wide as the room it has, so a phone shows its labels at their size instead of scaled down from 900
+  const narrow = t.dailyChart([], 30, "UTC", 290).svg, wide = t.dailyChart([], 30, "UTC").svg;
+  assert.ok(narrow.includes('viewBox="0 0 290 200"'), narrow.slice(0, 80));
+  assert.ok(wide.includes('viewBox="0 0 900 200"'));
+  const labels = (svg) => (svg.match(/text-anchor="middle"/g) || []).length;
+  assert.ok(labels(narrow) <= 4 && labels(narrow) < labels(wide), `${labels(narrow)} vs ${labels(wide)} day labels`);
   console.log("DAILY-CHART OK");
 } finally {
   Date.now = realNow;

@@ -197,8 +197,8 @@ async function open(i) {
   const gmailUrl = `https://mail.google.com/mail/?authuser=${encodeURIComponent(m.email)}#all/${encodeURIComponent(m.threadId)}`;
   r.innerHTML = `<div class="hd"><h2>${esc(m.subject || "(no subject)")}</h2>
     <div class="meta"><b>${esc(m.from)}</b><br>to ${esc(m.to)}${m.cc ? `, cc ${esc(m.cc)}` : ""}<br>${esc(m.date)} · ${acctChip(it.account, m.email)}</div>
-    <div class="tools"><button id="r-archive">Archive (e)</button><button id="r-star">${it.starred ? "Unstar" : "Star"} (s)</button>
-      <button id="r-unread">Mark unread (u)</button><button id="r-delete">Delete (#)</button>
+    <div class="tools"><button id="r-archive">Archive<span class="key"> (e)</span></button><button id="r-star">${it.starred ? "Unstar" : "Star"}<span class="key"> (s)</span></button>
+      <button id="r-unread">Mark unread<span class="key"> (u)</span></button><button id="r-delete">Delete<span class="key"> (#)</span></button>
       <a href="${gmailUrl}" target="_blank" rel="noopener"><button>Reply in Gmail ↗</button></a>
       ${m.kind === "html" ? `<button id="r-img">${images ? "Hide" : "Show"} images</button>` : ""}
       <button id="r-close" class="mobile">Close</button></div></div>` +
@@ -761,13 +761,15 @@ function dayIn(tz, ms) {
   return `${p.year}-${p.month}-${p.day}`;
 }
 function viewerZone() { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch { return ""; } }
-function dailyChart(daily, days, tz) {
+// `width`: the room the chart has, in CSS pixels. The drawing is made that wide (at least 280, at most 900), so its
+// labels stay 11px on a phone instead of being scaled down with a 900-wide drawing
+function dailyChart(daily, days, tz, width = 900) {
   const byDay = {};
   for (const d of daily) { (byDay[d.day] ||= { total: 0, parts: {} }); byDay[d.day].total += d.count; byDay[d.day].parts[d.email] = d.count; }
   // today in that zone, then whole calendar days back from it (counted on UTC dates: no daylight-saving gaps)
   const today = Date.parse(dayIn(tz, Date.now()) + "T00:00:00Z"), list = [];
   for (let i = days - 1; i >= 0; i--) { const dt = new Date(today - i * 864e5).toISOString().slice(0, 10); list.push({ day: dt, ...(byDay[dt] || { total: 0, parts: {} }) }); }
-  const W = 900, H = 200, L = 40, B = 22, T = 8, max = Math.max(1, ...list.map((x) => x.total));
+  const W = Math.round(Math.max(280, Math.min(900, width || 900))), H = 200, L = 40, B = 22, T = 8, max = Math.max(1, ...list.map((x) => x.total));
   const raw = max / 4, mag = Math.pow(10, Math.floor(Math.log10(raw))), step = [1, 2, 5, 10].map((m) => m * mag).find((v) => v >= raw);
   const top = Math.ceil(max / step) * step, nt = Math.round(top / step);
   const bw = (W - L) / list.length, gap = Math.min(2, bw * 0.25), y = (v) => T + (H - B - T) * (1 - v / top);
@@ -779,7 +781,7 @@ function dailyChart(daily, days, tz) {
     const x = L + i * bw + gap / 2, w = Math.max(1, bw - gap), h = (H - B - T) * (d.total / top), yy = H - B - h, r = Math.min(4, w / 2, h);
     if (h > 0) svg += `<path d="M${x},${H - B} V${yy + r} Q${x},${yy} ${x + r},${yy} H${x + w - r} Q${x + w},${yy} ${x + w},${yy + r} V${H - B} Z" fill="var(--bar)"/>`;
     svg += `<rect x="${L + i * bw}" y="${T}" width="${bw}" height="${H - B - T}" fill="transparent" data-i="${i}"/>`;
-    if (i % Math.ceil(list.length / 8) === 0) svg += `<text x="${x + w / 2}" y="${H - 6}" text-anchor="middle" font-size="11" fill="var(--muted)">${d.day.slice(5)}</text>`;
+    if (i % Math.ceil(list.length / Math.max(3, Math.min(8, Math.floor((W - L) / 70)))) === 0) svg += `<text x="${x + w / 2}" y="${H - 6}" text-anchor="middle" font-size="11" fill="var(--muted)">${d.day.slice(5)}</text>`;
   });
   svg += "</svg>";
   return { svg, list };
@@ -792,15 +794,16 @@ async function loadAnalytics() {
   const t = d.totals, cv = d.coverage;
   $("#a-cover").textContent = `Mail history: ${cv.backfilled}/${cv.accounts} accounts fully collected${cv.since ? `, since ${stamp(cv.since).slice(0, 10)}` : ""}.`;
   const tile = (v, k) => `<div class="tile"><div class="v">${v}</div><div class="k">${k}</div></div>`;
-  const chart = dailyChart(d.daily, days, d.tz);
+  const room = $("#a-body").clientWidth;   // 0 while the tab is hidden: then the full-size drawing
+  const chart = dailyChart(d.daily, days, d.tz, room > 0 ? room - 38 : 900);   // less the card's padding and border
   $("#a-body").innerHTML = `<div class="tiles">${tile(fmt(t.received), "emails received")}${tile(t.readPct == null ? "–" : t.readPct + "%", "read")}
       ${tile(fmt(t.inboxNow), "in inboxes now")}${tile(fmt(t.senders), "senders")}${tile(fmt(t.ruleActions), "rule actions by Inbox Zero")}
       ${tile(fmt(t.unsubscribed + t.autoArchived), "senders unsubscribed / auto-archived")}</div>
     <div class="card"><h3>Emails received per day, all accounts</h3><div id="a-chart">${chart.svg}</div></div>
-    <div class="card wide"><h3>By account</h3><table><thead><tr><th>Account</th><th class="num">Received</th><th class="num">Read</th>
+    <div class="card wide"><h3>By account</h3><table class="acct-table"><thead><tr><th>Account</th><th class="num">Received</th><th class="num">Read</th>
       <th class="num">Senders</th><th class="num">In inbox now</th><th class="num">Unread threads now</th></tr></thead><tbody>` +
-      d.accounts.map((a) => `<tr><td>${esc(a.email)}</td><td class="num">${fmt(a.received)}</td><td class="num">${a.readPct == null ? "–" : a.readPct + "%"}</td>
-        <td class="num">${fmt(a.senders)}</td><td class="num">${fmt(a.inboxNow)}</td><td class="num">${fmt(a.unreadThreadsNow)}</td></tr>`).join("") + `</tbody></table></div>
+      d.accounts.map((a) => `<tr><td>${esc(a.email)}</td><td class="num" data-k="Received">${fmt(a.received)}</td><td class="num" data-k="Read">${a.readPct == null ? "–" : a.readPct + "%"}</td>
+        <td class="num" data-k="Senders">${fmt(a.senders)}</td><td class="num" data-k="In inbox">${fmt(a.inboxNow)}</td><td class="num" data-k="Unread threads">${fmt(a.unreadThreadsNow)}</td></tr>`).join("") + `</tbody></table></div>
     <div class="grid2"><div class="card"><h3>Top senders</h3>${hbars(d.topSenders, (r) => esc(r.name || r.addr), (r) => r.count,
         (r) => `${r.addr}: ${fmt(r.count)} emails, ${fmt(r.unread)} unread, ${r.accounts} account(s)`) || '<div class="note">No data yet.</div>'}</div>
       <div class="card"><h3>Top domains</h3>${hbars(d.topDomains, (r) => esc(r.domain), (r) => r.count,

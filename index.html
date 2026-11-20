@@ -213,6 +213,35 @@ select.cleanup { padding:3px 6px; font-size:12px; }
   #c-table td.acts-cell button, #c-table td.acts-cell select { height:32px; padding:0 5px; font-size:12px; }
   #c-table td.acts-cell select { max-width:96px; padding:0 2px; }
   #c-table tr.peek-row td { flex:1 1 100%; }
+  /* peek and Quarantine rows: the subject gets the whole first line (up to two), account and date go under it */
+  .peek .pm { display:flex; flex-wrap:wrap; gap:2px 8px; padding:6px 8px; }
+  .peek .pm .s, .qgroup .qm .s { white-space:normal; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2;
+    overflow-wrap:anywhere; }
+  .peek .pm .s { flex:1 1 100%; order:-1; }
+  .peek .pm > .note:last-child { margin-left:auto; }
+  .qgroup .qm { grid-template-columns:auto 1fr auto; gap:2px 8px; padding:6px 10px; }
+  .qgroup .qm > input { grid-row:1 / span 2; }
+  .qgroup .qm > .s { grid-column:2 / 4; grid-row:1; }
+  .qgroup .qm > .chip { grid-column:2; grid-row:2; justify-self:start; }
+  .qgroup .qm > .note { grid-column:3; grid-row:2; }
+  .qgroup .qh .who { min-width:0; flex:1 1 calc(100% - 40px); overflow-wrap:anywhere; }
+  .qgroup .qh button { height:32px; padding:0 8px; font-size:12px; }
+  /* Quarantine toolbar: two even columns instead of a ragged wrap */
+  #q-bar { display:grid; grid-template-columns:1fr 1fr; }
+  #q-bar #q-summary { grid-column:1 / -1; } #q-bar .spacer { display:none; }
+  #q-bar button { padding:0 6px; font-size:13px; } #q-bar #q-refresh { grid-column:1 / -1; order:1; }
+  .tiles { grid-template-columns:1fr 1fr; gap:8px; } .tile { padding:10px 12px; } .tile .v { font-size:22px; }
+  /* Analytics by account: one card per account, each number named */
+  table.acct-table thead { display:none; }
+  table.acct-table, table.acct-table tbody { display:block; border:0; box-shadow:none; }
+  table.acct-table tr { display:flex; flex-wrap:wrap; gap:2px 12px; padding:8px 0; border-bottom:1px solid var(--line); }
+  table.acct-table tr:last-child { border-bottom:0; }
+  table.acct-table td { border:0; padding:0; font-size:12px; }
+  table.acct-table td:first-child { flex:1 1 100%; font-size:14px; font-weight:500; overflow-wrap:anywhere; }
+  table.acct-table td[data-k]::before { content:attr(data-k) " "; color:var(--muted); }
+  /* reader: compact buttons, without the keyboard hints */
+  #reader .tools { gap:4px; } #reader .tools button { height:32px; padding:0 8px; font-size:12px; }
+  #reader .tools .key { display:none; }
 }
 </style>
 </head>
@@ -263,7 +292,7 @@ select.cleanup { padding:3px 6px; font-size:12px; }
     <div id="ai-result"></div><div id="ai-body"><div class="empty">Loading…</div></div>
   </div></section>
   <section class="view" id="v-quarantine"><div class="page">
-    <div class="bar-row">
+    <div class="bar-row" id="q-bar">
       <span id="q-summary" class="note"></span><span class="spacer"></span>
       <button id="q-refresh">Refresh</button>
       <button id="q-archive-sel" disabled>Archive selected</button><button id="q-delete-sel" class="danger" disabled>Delete selected</button>

@@ -30,5 +30,32 @@ class PhoneCleanup(unittest.TestCase):
             self.assertIn(f'data-k="{k}"', js)
 
 
+class PhoneOtherTabs(unittest.TestCase):
+    """At 390 and 320 px: peek and Quarantine rows give the subject its own line, the Quarantine toolbar is two even
+    columns, Analytics' By account table becomes named numbers per account, and the reader's buttons are compact."""
+    phone_css = PhoneCleanup.phone_css
+
+    def test_rows_put_the_subject_on_its_own_line(self):
+        css = self.phone_css()
+        self.assertIn(".peek .pm .s { flex:1 1 100%; order:-1; }", css)
+        self.assertIn(".qgroup .qm > .s { grid-column:2 / 4; grid-row:1; }", css)
+        self.assertIn("-webkit-line-clamp:2", css)
+
+    def test_quarantine_toolbar_is_two_columns(self):
+        self.assertIn("#q-bar { display:grid; grid-template-columns:1fr 1fr; }", self.phone_css())
+        self.assertIn('<div class="bar-row" id="q-bar">', read("index.html"))
+
+    def test_analytics_accounts_are_named_numbers(self):
+        self.assertIn("table.acct-table td[data-k]::before", self.phone_css())
+        js = read("app.js")
+        self.assertIn('<table class="acct-table">', js)
+        for k in ("Received", "Read", "Senders", "In inbox", "Unread threads"):
+            self.assertIn(f'data-k="{k}"', js)
+
+    def test_reader_buttons_are_compact_without_key_hints(self):
+        self.assertIn("#reader .tools .key { display:none; }", self.phone_css())
+        self.assertIn('Archive<span class="key"> (e)</span>', read("app.js"))
+
+
 if __name__ == "__main__":
     unittest.main()
