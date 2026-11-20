@@ -89,6 +89,16 @@ class Retry(unittest.TestCase):
         self.assertEqual(len(seen), 1)
 
 
+class Documented(unittest.TestCase):
+    def test_the_readme_says_what_is_asked_again(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "README.md"), encoding="utf-8") as f:
+            text = " ".join(f.read().split())
+        # core.gmail asks again after a dropped connection only for a GET, not for a label change
+        self.assertIn("A dropped connection (reset, timeout) is asked again only for reads:", text)
+        self.assertNotIn("a dropped connection is asked again only for reads and label changes", text)
+
+
 class LabelExists(unittest.TestCase):
     def test_a_label_made_meanwhile_is_used_instead_of_failing(self):
         made = []

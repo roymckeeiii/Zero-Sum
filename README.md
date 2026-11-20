@@ -237,10 +237,12 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
   a key derived from `EMAIL_ENCRYPT_SECRET` / `EMAIL_ENCRYPT_SALT`). Refreshed access tokens stay in memory: it never
   writes Inbox Zero's account table.
 - It calls the Gmail API directly, rate-limited per account (`GMAIL_UNITS_PER_SEC`, well under Google's per-user quota,
-  which Inbox Zero shares). A busy Gmail (429, 500, 503) is asked again with back-off. A gateway error (502, 504) or
-  a dropped connection is asked again only for reads and label changes, which are harmless twice; a new filter or
-  label is not, since Gmail may have made it already. If a repeated request finds its filter already there, that
-  filter is recorded as Zero Sum's, so Protect, Keep and Reset can still remove it.
+  which Inbox Zero shares). A busy Gmail (429, 500, 503) is asked again with back-off. A gateway error (502, 504) is
+  asked again only for reads and label changes, which are harmless twice; a new filter or label is not, since Gmail
+  may have made it already. A dropped connection (reset, timeout) is asked again only for reads: a change that lost
+  its connection fails, and the action says so. If a request repeated after a 500 or 503 finds its filter already
+  there, and that filter was not there before the first try, it is recorded as Zero Sum's, so Protect, Keep and Reset
+  can still remove it; a matching filter made by hand is left alone.
 - It uses its own database role (`grants.sql`): read access to a few columns of `Account`, `EmailAccount` and
   `ExecutedRule`; write access only to `Rule`, `Action`, `Newsletter` and its own `unified` schema.
 - The Inbox Zero tables, columns and enums it depends on are declared once, in `izdb.py`. `grants.sql` grants exactly
