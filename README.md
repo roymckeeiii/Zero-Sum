@@ -380,12 +380,16 @@ All settings are environment variables; see [`.env.example`](.env.example).
 | `RULES_AUTO_MAX_DELETES` | `3` | most rule copies the automatic sync deletes between two "Sync now" (counted across runs); the rest wait for "Sync now" |
 | `BACKFILL_DAYS`, `BACKFILL_STEP` | `0` (all history), `2000` | how far back the collector reads (days; 0 = to the account's first email), and how much per run per account |
 | `MAX_BULK` | `200000` | most emails one bulk action touches per account |
+| `PREVIEW_MAX`, `PREVIEW_LOOKUPS` | `20000`, `100` | the confirm dialog's count: most emails it counts per account and step (shown as "or more" beyond), and most senders it reads from Gmail for mail not collected yet (the rest shown as "up to") |
 | `BULK_LOOKUPS` | `300` | most message senders one bulk action reads from Gmail per request (mail not collected yet), split evenly over the accounts; the rest is left for "run it again" |
 | `UNDO_REFRESH` | `500` | most restored messages one undo reads back from Gmail (in the background, about 50 seconds of quota at the default `GMAIL_UNITS_PER_SEC`, used only while nothing else needs it); the rest stay marked as in the inbox |
+| `SENDER_WAIT` | `30` | seconds an action waits for another action on the same sender (two tabs, Block then Auto-archive) before it skips that sender and says it is busy |
 | `OPENROUTER_API_KEY`, `AI_MODEL`, `AI_BASE_URL` | empty, `anthropic/claude-haiku-5.5`, OpenRouter | all AI features: AI Cleanup, AI sort, AI suggest, background analyst (off without a key; the background analyst is also off until turned on in AI Cleanup) |
 | `AI_MAX_CALLS_PER_DAY`, `AI_PLANS_PER_RUN`, `AI_MIN_EMAILS` | `400`, `4`, `5` | daily AI call cap; senders the background analyst plans per run; minimum emails before a sender is planned |
+| `AI_SORT_RETRIES` | `5` | how often an AI sort pass stopped by a busy AI provider or Gmail is picked up again (15, 30, 45... minutes apart) before it is given up |
 | `QUARANTINE_LABEL`, `QUARANTINE_SHOW` | `Quarantine`, `600` | Gmail label for held mail; messages per account listed on the Quarantine tab |
 | `GMAIL_UNITS_PER_SEC` | `50` | Gmail quota units per second per account |
+| `INBOX_ZERO_REPO` | `elie222/inbox-zero` | tools only: the GitHub repository `tools/check_upstream.py` compares the pinned Inbox Zero version against |
 
 ## Security notes
 

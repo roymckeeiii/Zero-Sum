@@ -121,7 +121,7 @@ _filter_locks, _filter_locks_guard = {}, threading.Lock()
 # How long an action waits for another action on the same sender (one holding its lock can take a minute and more on
 # a big sender) before it gives up on that sender and says so, instead of holding a request slot with no limit and
 # running long after its page has stopped waiting.
-SENDER_WAIT = 30
+SENDER_WAIT = float(os.environ.get("SENDER_WAIT", "30"))
 BUSY_NOTE = "another action on this sender is still running: try again when it has finished"
 
 

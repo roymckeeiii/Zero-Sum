@@ -30,6 +30,11 @@ class EnvContract(unittest.TestCase):
             self.assertEqual(c[name], "required", name)
         self.assertEqual(c["ALLOW_HEADER_TRUST"], "optional")
 
+    def test_every_variable_is_in_the_readme_configuration_table(self):
+        rows = "\n".join(ln for ln in read("README.md").splitlines() if ln.startswith("| `"))
+        for name in contract():
+            self.assertIn(f"`{name}`", rows, name)
+
     def test_every_setting_a_user_can_change_is_in_the_example_file(self):
         example = read(".env.example")
         for name, kind in contract().items():
