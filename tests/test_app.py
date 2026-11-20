@@ -192,6 +192,20 @@ class Gate(unittest.TestCase):
             self.assertLess(time.monotonic() - t, 3)
         self.assertEqual(len(self.ran), 1)
 
+    def test_a_client_still_sending_after_the_deadline_gets_the_408_not_a_reset(self):
+        self.mode(token=True, header=False)
+        body = json.dumps({"text": "a" * 20000}).encode()
+        with Patched(app.H, read_deadline=0.3), Patched(app, BODY_MIN_RATE=10 ** 9), \
+                contextlib.redirect_stdout(io.StringIO()):
+            # keeps sending past the deadline (10 pieces over ~0.6 s), then reads the answer
+            self.assertTrue(self.slow_post(body, 10, 0.06).startswith(b"HTTP/1.0 408"))
+        self.assertEqual(self.ran, [])
+
+    def test_the_longest_read_deadline_is_what_the_readme_says(self):
+        longest = app.READ_DEADLINE + app.MAX_BODY / app.BODY_MIN_RATE
+        with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "README.md")) as f:
+            self.assertIn(f"{longest:.0f} seconds at most", " ".join(f.read().split()))
+
     def test_a_body_nested_too_deep_is_refused_not_dropped(self):
         self.mode(token=True, header=False)
         body = b"[" * 100000

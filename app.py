@@ -33,9 +33,10 @@ INBOX_ZERO_URL = os.environ.get("INBOX_ZERO_URL", "").rstrip("/")
 MAX_BODY = 512 * 1000
 READ_DEADLINE = 15   # seconds a client has to send its whole request, headers and body
 # ... plus the time a body of Content-Length bytes takes at BODY_MIN_RATE bytes a second (a long paste on a slow
-# link), the whole request at most READ_DEADLINE_MAX seconds. DEFAULT - Roy may change: 8 KB/s, 90 s
+# link). The longest a request can take is then READ_DEADLINE + MAX_BODY / BODY_MIN_RATE = 15 + 64 = 79 seconds.
+# DEFAULT - Roy may change: 8 KB/s
 BODY_MIN_RATE = 8000
-READ_DEADLINE_MAX = 90
+DRAIN_408 = 1.0   # seconds a late request's remaining bytes are read (and dropped) after the 408, so it arrives
 SLOT_WAIT = 60   # seconds a request read in full waits for a free request slot before it is answered 503
 STATIC = {"/": ("index.html", "text/html; charset=utf-8"), "/app.js": ("app.js", "text/javascript; charset=utf-8")}
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
@@ -193,6 +194,23 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
 
+    def drain(self, seconds):
+        """After an early answer: say no more is coming, then read and drop what the client is still sending for a
+        moment. Closing with unread bytes would make the system send a reset, which can arrive before the answer."""
+        import socket
+        try:
+            self.connection.shutdown(socket.SHUT_WR)
+        except OSError:
+            return
+        end, buf = time.monotonic() + seconds, bytearray(65536)
+        while (left := end - time.monotonic()) > 0:
+            try:
+                self.connection.settimeout(left)
+                if not self.connection.recv_into(buf):
+                    return
+            except OSError:
+                return
+
     def allowed(self):
         if access.ENABLED:   # the signed Access token decides; the plain email header is not trusted
             user = access.email_from(self.headers.get("Cf-Access-Jwt-Assertion"))
@@ -252,13 +270,13 @@ class H(BaseHTTPRequestHandler):
         if n > MAX_BODY:     # refused, never cut short: a truncated body only ever read as "bad json"
             return self.send(413, {"error": f"request too large (at most {MAX_BODY // 1000} KB)"})
         # a large body gets more time, by its size: a slow link is not cut off half way, a small one gains nothing
-        self.deadline.deadline = max(self.deadline.deadline, self.started + min(
-            READ_DEADLINE_MAX, self.read_deadline + n / BODY_MIN_RATE))
+        self.deadline.deadline = max(self.deadline.deadline, self.started + self.read_deadline + n / BODY_MIN_RATE)
         try:
             raw = self.rfile.read(n)
         except TimeoutError:   # answered, not dropped: the page can say what happened
             self.close_connection = True
-            return self.send(408, {"error": "the request took too long to arrive"})
+            self.send(408, {"error": "the request took too long to arrive"})
+            return self.drain(DRAIN_408)
         try:
             d = json.loads(raw or b"{}")
         except (ValueError, RecursionError):   # RecursionError: nested too deep ("[[[[..."), not a ValueError
