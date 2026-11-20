@@ -669,10 +669,13 @@ def apply_plan(d):
             c.execute("INSERT INTO unified.ai_sort (addr, rule, action) VALUES (%s, %s, %s) ON CONFLICT (addr) DO UPDATE "
                       "SET rule = EXCLUDED.rule, action = EXCLUDED.action, status = 'sorting', done = 0, total = 0, kept = 0, retries = 0",
                       (addr, rule, default))
-            c.execute("UPDATE unified.ai_plan SET status = 'applied', updated_at = now() WHERE addr = %s", (addr,))
+            # an old filter left in place (busy, or Gmail failed) keeps moving new mail before the AI judges it: the
+            # plan stays open as partly applied, with its Apply button, as a word plan does
+            c.execute("UPDATE unified.ai_plan SET status = %s, updated_at = now() WHERE addr = %s",
+                      ("partial" if stale else "applied", addr))
         start_ai_sort(addr, rule, default)
         log("ai-cleanup", f"apply {addr}: AI sort, rest {default}: {rule}")
-        return {"results": [{"email": "all accounts", "ok": True,
+        return {"results": [{"email": "all accounts", "ok": not stale,
                              "note": f"AI sort started: existing mail is being sorted in the background (rest: {default}); "
                                      "new mail from this sender is sorted every 15 minutes"
                                      + (f"; its earlier Gmail filters could not be removed in {', '.join(stale)} "

@@ -285,6 +285,13 @@ class BoundedWait(World):
             r = cleanup.apply_plan({"addr": S, "groups": [], "default": "delete", "mode": "ai", "rule": "keep receipts"})
         self.assertEqual(removed, ["acc2"])
         self.assertIn("could not be removed in me@x.com", r["results"][0]["note"])
+        self.assertFalse(r["results"][0]["ok"])
+        # the plan stays open to apply again, as a word plan does
+        self.assertEqual(self.db.said("UPDATE unified.ai_plan SET status")[-1][1], ("partial", S))
+        with Patched(cleanup, start_ai_sort=lambda *a: None):
+            r = cleanup.apply_plan({"addr": S, "groups": [], "default": "delete", "mode": "ai", "rule": "keep receipts"})
+        self.assertTrue(r["results"][0]["ok"])
+        self.assertEqual(self.db.said("UPDATE unified.ai_plan SET status")[-1][1], ("applied", S))
 
     def test_a_word_plan_with_a_busy_account_stays_partly_applied(self):
         with self.holding("acc1", S):
