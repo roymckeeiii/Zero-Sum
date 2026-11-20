@@ -370,6 +370,20 @@ class Startup(unittest.TestCase):
             self.assertNotIn('("0.0.0.0"', f.read())
 
 
+class Backlog(unittest.TestCase):
+    def test_the_listen_queue_takes_a_burst(self):
+        self.assertGreaterEqual(app.Server.request_queue_size, 64)
+        srv = app.Server(("127.0.0.1", 0), app.H)
+        try:
+            # 40 connections at once, none accepted yet: all of them are queued, none refused or left hanging
+            srv.socket.settimeout(0)
+            socks = [socket.create_connection(srv.server_address, timeout=2) for _ in range(40)]
+            for s in socks:
+                s.close()
+        finally:
+            srv.server_close()
+
+
 class FirstRun(unittest.TestCase):
     """A database that is not set up yet ends the program with one sentence that says what to do, not a traceback."""
 

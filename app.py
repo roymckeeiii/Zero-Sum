@@ -303,6 +303,9 @@ class Server(ThreadingHTTPServer):
     H.read_deadline; only then does it wait for one of `max_threads` request slots (H.work). /healthz takes no slot.
     So a few slow or idle clients cannot stop the server: they are dropped after the deadline and hold no slot."""
     daemon_threads = True
+    # connections the system queues while the accept loop is busy (socketserver's default is 5): a burst of page loads
+    # beyond that was refused at the door before Zero Sum ever saw it
+    request_queue_size = 64
 
     def __init__(self, address, handler, max_threads=MAX_THREADS, max_connections=MAX_CONNECTIONS):
         self.slots = threading.BoundedSemaphore(max_threads)

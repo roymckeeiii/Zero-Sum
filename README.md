@@ -385,7 +385,8 @@ All settings are environment variables; see [`.env.example`](.env.example).
   dropped, or answered 408 once its headers have arrived; what it is still sending is read and dropped for a second
   after the 408, so the answer is not lost to a reset. The same goes for a POST refused before its body is read
   (403 not signed in, 400 bad request, 413 too large). At most 32 requests are worked on at once, counted only once a request has arrived in full, and at most
-  256 connections are open at once (more are answered 503 straight away). `/healthz` needs no request slot.
+  256 connections are open at once (more are answered 503 straight away); up to 64 new connections can wait to be
+  accepted during a burst. `/healthz` needs no request slot.
 - Failed requests are logged by path only, without query strings (search words, account and message ids). An
   unexpected error reaches the page only as a short reference; its details are in the container log under it.
 - One-click unsubscribe POSTs to a URL taken from the sender's own `List-Unsubscribe` header, so it is held to the
