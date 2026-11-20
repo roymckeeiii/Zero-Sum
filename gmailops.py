@@ -2,7 +2,7 @@
 and only those are ever removed), label changes on existing mail (_batch: recorded with the messages they touch
 before Gmail is called, refused for protected senders and own addresses), and the undo journal built from that
 record (unified.action_log)."""
-import email.utils, os, re, threading, urllib.error
+import email.utils, os, re, threading, time, urllib.error
 
 from collector import CPOOL, SKIP, _store, qs
 from core import ACC, POOL, db, gmail, gmail_list, header, label_id, log
@@ -99,6 +99,15 @@ def _sender_lock(acc_id, addr):
         return _filter_locks.setdefault((acc_id, (addr or "").lower()), threading.Lock())
 
 
+# After a filter POST that got no answer, Zero Sum looks for the filter right away and again after these many seconds,
+# so one Gmail makes a moment late is still found and recorded. What it claims is a filter that matches exactly and
+# was not there just before the POST. Gmail filters carry no creation time, so one edge remains: an identical filter
+# made by hand in Gmail (or by another tool) in those few seconds, while Zero Sum's own POST was lost, would be
+# recorded as Zero Sum's (with source "... (claimed)"), and a later Keep, Protect or Reset would remove it.
+CLAIM_DELAYS = (2, 5)
+_claim_wait = time.sleep
+
+
 def _claim_new(acc_id, before, crit, action):
     """The filter matching `crit` -> `action` exactly that was not there before the POST, or None."""
     return next((x for x in gmail(acc_id, "/settings/filters").get("filter", [])
@@ -121,14 +130,22 @@ def _create_filter(acc_id, addr, action, kind, crit, source):
         # (else Protect, Keep and Reset could never remove it); one that was there before is left alone
         f = _claim_new(acc_id, before, crit, action)
     except (urllib.error.URLError, TimeoutError, ConnectionError):
-        # no answer at all: Gmail may have made the filter before the connection dropped. Look, and record it if so
-        # (a new filter matching exactly); if it is not there, nothing was made and the error stands
-        try:
-            f = _claim_new(acc_id, before, crit, action)
-        except Exception:  # noqa: BLE001 - cannot look now: report the original error
-            f = None
+        # no answer at all: Gmail may have made the filter before the connection dropped, or may still be making it
+        # (a read timeout). Look now and again after CLAIM_DELAYS, and record it if a new filter matching exactly shows
+        # up; if none does, nothing was made and the error stands
+        f = None
+        for wait in (0,) + tuple(CLAIM_DELAYS):
+            if wait:
+                _claim_wait(wait)
+            try:
+                f = _claim_new(acc_id, before, crit, action)
+            except Exception:  # noqa: BLE001 - cannot look now: try again, else report the original error
+                f = None
+            if f:
+                break
         if not f:
             raise
+        source = f"{source} (claimed)"   # kept apart in the record: see CLAIM_DELAYS for the case it cannot tell
     fid = (f or {}).get("id")
     if not fid:
         return None

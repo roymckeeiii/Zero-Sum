@@ -251,8 +251,11 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
   its connection fails, and the action says so. If a request repeated after a 500 or 503 finds its filter already
   there, and that filter was not there before the first try, it is recorded as Zero Sum's, so Protect, Keep and Reset
   can still remove it; a matching filter made by hand is left alone. The same goes for a new filter whose connection
-  dropped: the filters are listed again, and one that matches exactly and was not there before is recorded. Filters
-  for one sender are made one at a time, so two actions at once never claim each other's filter. An expired token
+  dropped: the filters are listed again, right away and after 2 and 5 seconds (a timed-out request may still land),
+  and one that matches exactly and was not there before is recorded, marked "(claimed)". One edge remains, since
+  Gmail filters carry no creation time: an identical filter you make by hand in Gmail in those few seconds, while
+  Zero Sum's own request was lost, would be taken for Zero Sum's. Filters for one sender are made one at a time, so
+  two actions at once never claim each other's filter. An expired token
   (401) is refreshed once and the request asked again, keeping track of whether an earlier try may have done the
   work.
 - It uses its own database role (`grants.sql`): read access to a few columns of `Account`, `EmailAccount` and

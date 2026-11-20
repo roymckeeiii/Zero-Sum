@@ -104,6 +104,32 @@ class Recorded(World):
 class Dropped(World):
     """The POST that makes a filter gets no answer at all (reset, timeout): Gmail may have made it."""
 
+    def setUp(self):
+        super().setUp()
+        import gmailops
+        self.waits = []
+        p = Patched(gmailops, _claim_wait=self.waits.append)
+        p.__enter__()
+        self.addCleanup(p.__exit__)
+
+    def test_a_filter_that_lands_a_moment_late_is_still_recorded(self):
+        real, gets = self.g, []
+
+        def gmail(acc, path, method="GET", body=None, retry=True):
+            if path == "/settings/filters" and method == "POST":
+                self.posted = body
+                raise TimeoutError("read timed out")
+            if path == "/settings/filters" and method == "GET":
+                gets.append(1)
+                if len(gets) == 3:   # Gmail finishes the timed-out POST after the first look
+                    real(acc, path, "POST", self.posted)
+            return real(acc, path, method, body)
+        with Patched(cleanup, gmail=gmail):
+            fid = cleanup._filter("acc1", S, cleanup.TRASH_FILTER, "trash")
+        self.assertEqual(fid, "F1")
+        self.assertEqual(self.waits, [2])
+        self.assertEqual([(f[1], f[3], f[4]) for f in self.db.filters], [("F1", "trash", " (claimed)")])
+
     def dropping(self, made):
         real = self.g
 
@@ -127,6 +153,7 @@ class Dropped(World):
         with self.dropping(made=False), self.assertRaises(TimeoutError):
             cleanup._filter("acc1", S, cleanup.TRASH_FILTER, "trash")
         self.assertEqual(self.db.filters, [])
+        self.assertEqual(self.waits, [2, 5])     # looked again twice before giving up
 
     def test_a_matching_filter_that_was_there_before_is_not_claimed(self):
         self.g.filters["acc1"] = [dict(HAND_MADE)]
