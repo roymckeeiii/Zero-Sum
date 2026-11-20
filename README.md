@@ -261,7 +261,10 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
   Gmail filters carry no creation time: an identical filter you make by hand in Gmail in those few seconds, while
   Zero Sum's own request was lost, would be taken for Zero Sum's. One sender's filters are changed by one action at a time
   (its old filters removed and the new ones made as one step), so two actions at once on the same sender never claim
-  each other's filter or leave both sets behind. An expired token
+  each other's filter or leave both sets behind. That covers every path that replaces filters: sender actions,
+  word plans and AI-sort plans, Protect (one or a pasted list), Unprotect and Quarantine release. An action waits
+  at most 30 seconds for another one on the same sender; after that it leaves that sender (in that account) alone
+  and says another action is still running, instead of holding a request open with no limit. An expired token
   (401) is refreshed once and the request asked again, keeping track of whether an earlier try may have done the
   work.
 - It uses its own database role (`grants.sql`): read access to a few columns of `Account`, `EmailAccount` and

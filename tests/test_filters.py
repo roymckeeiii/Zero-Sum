@@ -218,6 +218,90 @@ class OneAtATime(World):
         self.assertEqual(gmailops._filter_locks, {})
 
 
+class BoundedWait(World):
+    """Every path that replaces a sender's filters takes its lock, and nobody waits for it without limit: after
+    SENDER_WAIT seconds that sender is skipped and the answer says another action is still running."""
+
+    def setUp(self):
+        super().setUp()
+        import gmailops
+        p = Patched(gmailops, SENDER_WAIT=0.2)
+        p.__enter__()
+        self.addCleanup(p.__exit__)
+
+    def holding(self, acc, addr):
+        """A context in which another thread holds acc/addr's lock."""
+        import contextlib, threading, gmailops
+        got, done = threading.Event(), threading.Event()
+
+        def hold():
+            with gmailops._sender_lock(acc, addr, wait=5):
+                got.set()
+                done.wait(5)
+
+        @contextlib.contextmanager
+        def ctx():
+            t = threading.Thread(target=hold)
+            t.start()
+            got.wait(5)
+            try:
+                yield
+            finally:
+                done.set()
+                t.join(5)
+        return ctx()
+
+    def test_a_wait_for_a_busy_sender_ends(self):
+        import gmailops, time
+        with self.holding("acc1", S):
+            t = time.monotonic()
+            with self.assertRaises(gmailops.SenderBusy):
+                with gmailops._sender_lock("acc1", S.upper()):
+                    pass
+            self.assertLess(time.monotonic() - t, 2)
+        self.assertEqual(gmailops._filter_locks, {})
+
+    def test_a_sender_action_skips_an_account_where_another_action_is_running(self):
+        with self.holding("acc1", S):
+            r = cleanup.sender_action({"addr": S, "action": "block"})
+        by = {x["email"]: x for x in r["results"]}
+        self.assertFalse(by["me@x.com"]["ok"])
+        self.assertIn("another action on this sender is still running", by["me@x.com"]["note"])
+        self.assertTrue(by["two@x.com"]["ok"])
+        self.assertEqual(self.kinds("acc1"), [])
+        self.assertEqual(self.kinds("acc2"), ["trash"])
+
+    def test_ai_mode_apply_does_not_replace_filters_another_action_is_working_on(self):
+        cleanup._filter("acc1", S, cleanup.TRASH_FILTER, "trash")
+        cleanup._filter("acc2", S, cleanup.TRASH_FILTER, "trash")
+        removed = []
+        real = self.g
+
+        def gmail(acc, path, method="GET", body=None, retry=True):
+            if method == "DELETE":
+                removed.append(acc)
+            return real(acc, path, method, body)
+        with Patched(cleanup, gmail=gmail, start_ai_sort=lambda *a: None), self.holding("acc1", S):
+            r = cleanup.apply_plan({"addr": S, "groups": [], "default": "delete", "mode": "ai", "rule": "keep receipts"})
+        self.assertEqual(removed, ["acc2"])
+        self.assertIn("could not be removed in me@x.com", r["results"][0]["note"])
+
+    def test_bulk_protect_skips_a_sender_another_action_is_working_on(self):
+        logged = []
+        with Patched(cleanup, log=lambda kind, text, *a: logged.append(text)), self.holding("acc1", S):
+            cleanup._protect_in_gmail([S, "news@other.com"])
+        self.assertEqual(self.kinds("acc1"), ["never_spam"])          # news@other.com only
+        self.assertEqual(self.kinds("acc2"), ["never_spam", "never_spam"])
+        self.assertTrue(any("skipped 1 sender(s)" in t and S in t for t in logged), logged)
+
+    def test_protect_says_where_its_filters_were_not_changed(self):
+        with self.holding("acc2", S):
+            r = cleanup.sender_action({"addr": S, "action": "protect"})
+        self.assertIn("Gmail filters not changed in two@x.com", r["results"][0]["note"])
+        self.assertEqual(self.kinds("acc1"), ["never_spam"])
+        self.assertEqual(self.kinds("acc2"), [])
+
+
 class Removed(World):
     def setUp(self):
         super().setUp()

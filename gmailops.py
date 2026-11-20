@@ -105,11 +105,23 @@ def _filter(acc_id, addr, action, kind, keep=None, query=None, negated=None, sou
 _filter_locks, _filter_locks_guard = {}, threading.Lock()
 
 
+# How long an action waits for another action on the same sender (one holding its lock can take a minute and more on
+# a big sender) before it gives up on that sender and says so, instead of holding a request slot with no limit and
+# running long after its page has stopped waiting.
+SENDER_WAIT = 30
+BUSY_NOTE = "another action on this sender is still running: try again when it has finished"
+
+
+class SenderBusy(RuntimeError):
+    """_sender_lock waited SENDER_WAIT seconds for another action on the sender, and gave up."""
+
+
 @contextlib.contextmanager
-def _sender_lock(acc_id, addr):
+def _sender_lock(acc_id, addr, wait=None):
     """One sender's filters in one account are changed by one action at a time: the old filters removed and the new
     ones made as one step, so two actions at once (two tabs, Block then Auto-archive) cannot leave both sets. Re-entrant:
-    an action holding it may create filters (_filter takes it again)."""
+    an action holding it may create filters (_filter takes it again). Waits at most `wait` (default SENDER_WAIT)
+    seconds for another action, then raises SenderBusy and changes nothing."""
     key = (acc_id, (addr or "").lower())
     with _filter_locks_guard:
         ent = _filter_locks.get(key)
@@ -117,8 +129,12 @@ def _sender_lock(acc_id, addr):
             ent = _filter_locks[key] = [threading.RLock(), 0]
         ent[1] += 1
     try:
-        with ent[0]:
+        if not ent[0].acquire(timeout=SENDER_WAIT if wait is None else wait):
+            raise SenderBusy(BUSY_NOTE)
+        try:
             yield
+        finally:
+            ent[0].release()
     finally:
         with _filter_locks_guard:
             ent[1] -= 1

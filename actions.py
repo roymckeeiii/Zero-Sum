@@ -7,10 +7,10 @@ import http.client, ipaddress, os, re, socket, ssl, threading, urllib.parse
 from aisort import start_ai_sort, stop_automation
 from collector import BACKFILL_DAYS, collect_status, qs
 from core import ACC, POOL, db, gmail_list, label_id, log, new_id
-from gmailops import (ARCHIVE_FILTER, AUTOMATION_KINDS, FOREIGN_NOTE, MAX_BULK, NEVER_SPAM_FILTER, QUARANTINE, STAR_FILTER,
-                      TRASH_FILTER, _ACTION, _batch, _filter, _modify_existing, _sender_lock, bulk_query, foreign_filters,
-                      held_note, held_start, lookup_budget, lookups_account, lookups_end, lookups_start,
-                      remove_app_filters, senders_of, unchecked_note)
+from gmailops import (ARCHIVE_FILTER, AUTOMATION_KINDS, BUSY_NOTE, FOREIGN_NOTE, MAX_BULK, NEVER_SPAM_FILTER, QUARANTINE,
+                      STAR_FILTER, TRASH_FILTER, _ACTION, SenderBusy, _batch, _filter, _modify_existing, _sender_lock,
+                      bulk_query, foreign_filters, held_note, held_start, lookup_budget, lookups_account, lookups_end,
+                      lookups_start, remove_app_filters, senders_of, unchecked_note)
 from guard import (SENDER_KEY, frm, guard_sender, is_protected, keep_query, own_address, own_set, parse_protect_keys,
                    protected_set, sender_addr)
 from inbox import meta
@@ -60,15 +60,22 @@ def _protect_in_gmail(keys):
     quarantine) and add "never send to Spam" for each. Runs in the background; the protection itself is already in the database."""
     for acc in ACC.list():
         done = cleared = 0
+        busy = []
         try:
-            cleared = remove_app_filters(acc["id"], keys)
+            for k in keys:   # per sender, under its lock: an action running on it finishes first, or k is skipped
+                try:
+                    with _sender_lock(acc["id"], k):
+                        cleared += remove_app_filters(acc["id"], k)
+                        _filter(acc["id"], k, NEVER_SPAM_FILTER, "never_spam", source="protect")
+                    done += 1
+                except SenderBusy:
+                    busy.append(k)
             left = foreign_filters(acc["id"], keys)
-            for k in keys:
-                _filter(acc["id"], k, NEVER_SPAM_FILTER, "never_spam", source="protect")
-                done += 1
             log("cleanup", f"bulk protect: {done} never-spam filter(s), {cleared} of Zero Sum's own filter(s) removed"
                 + (f"; {left} filter(s) Zero Sum did not create still move mail from these senders (left in place)"
-                   if left else ""), acc["email"])
+                   if left else "")
+                + (f"; skipped {len(busy)} sender(s) another action was still working on (protect them again to add "
+                   f"their filters): {', '.join(busy[:10])}" if busy else ""), acc["email"])
         except Exception as e:  # noqa: BLE001 - protection in Zero Sum still applies
             log("cleanup-error", f"bulk protect stopped after {done} of {len(keys)}: {e}"[:300], acc["email"])
 
@@ -227,17 +234,22 @@ def sender_action(d):
             else:
                 c.execute("DELETE FROM unified.protected WHERE key = %s", (addr,))
         cleared = left = 0
+        busy = []
         if act == "protect":
             stop_automation(addr)
         for acc in ACC.list():
             try:
-                if act == "protect":  # what was set up before the protection must stop moving its mail: Trash,
-                    with _sender_lock(acc["id"], addr):   # archive and quarantine filters alike
-                        cleared += remove_app_filters(acc["id"], addr)
+                with _sender_lock(acc["id"], addr):
+                    if act == "protect":  # what was set up before the protection must stop moving its mail: Trash,
+                        cleared += remove_app_filters(acc["id"], addr)   # archive and quarantine filters alike
                         _filter(acc["id"], addr, NEVER_SPAM_FILTER, "never_spam", source="protect")
+                    else:
+                        remove_app_filters(acc["id"], addr, kinds=("never_spam",), exact=True)
+                if act == "protect":
                     left += foreign_filters(acc["id"], addr)
-                else:
-                    remove_app_filters(acc["id"], addr, kinds=("never_spam",), exact=True)
+            except SenderBusy:
+                busy.append(acc["email"])
+                log("cleanup-error", f"{act} {addr}: filters not changed: {BUSY_NOTE}", acc["email"])
             except Exception as e:  # noqa: BLE001 - protection in Zero Sum still applies
                 log("cleanup-error", f"{act} {addr}: filters: {e}"[:300], acc["email"])
         if cleared:
@@ -251,7 +263,9 @@ def sender_action(d):
         log("cleanup", f"{act} {addr}")
         return {"results": [{"email": "all accounts", "ok": True, "note": f"{addr} {act}ed"
                              + (f"; {cleared} filter(s) removed" if cleared else "")
-                             + ("; " + FOREIGN_NOTE.format(n=left) if left else "")}], "manual": []}
+                             + ("; " + FOREIGN_NOTE.format(n=left) if left else "")
+                             + (f"; Gmail filters not changed in {', '.join(busy)}: {BUSY_NOTE}, then "
+                                f"{act} it again" if busy else "")}], "manual": []}
     addr = sender_addr(addr)
     if act in DESTRUCTIVE and is_protected(addr):
         raise PermissionError(f"{addr} is protected: unprotect it first")
@@ -481,8 +495,13 @@ def quarantine_action(d):
                 note += f"; {other} from another sender (or sender unknown) left in {QUARANTINE}"
             if unchecked:
                 note += "; " + unchecked_note(unchecked, n)
-            if act == "release" and sender and remove_app_filters(a["id"], sender, kinds=("quarantine",), exact=True):
-                note += ", quarantine filter removed"
+            if act == "release" and sender:
+                try:
+                    with _sender_lock(a["id"], sender):
+                        if remove_app_filters(a["id"], sender, kinds=("quarantine",), exact=True):
+                            note += ", quarantine filter removed"
+                except SenderBusy:
+                    note += f"; quarantine filter not removed: {BUSY_NOTE}"
             results.append({"email": a["email"], "ok": True, "note": note})
         except Exception as e:  # noqa: BLE001
             results.append({"email": a["email"], "ok": False, "note": str(e)[:200]})
@@ -638,10 +657,13 @@ def apply_plan(d):
         rule = re.sub(r"\s+", " ", str(d.get("rule") or ""))[:400]
         if not rule:
             raise ValueError("write what to keep first")
+        stale = []
         for acc in ACC.list():  # an older Trash or archive filter would move new mail before the AI ever judged it
             try:
-                remove_app_filters(acc["id"], addr)
+                with _sender_lock(acc["id"], addr):   # not while another action is replacing them
+                    remove_app_filters(acc["id"], addr)
             except Exception as e:  # noqa: BLE001
+                stale.append(acc["email"])
                 log("cleanup-error", f"apply {addr}: old filters: {e}"[:300], acc["email"])
         with db() as c:
             c.execute("INSERT INTO unified.ai_sort (addr, rule, action) VALUES (%s, %s, %s) ON CONFLICT (addr) DO UPDATE "
@@ -652,7 +674,10 @@ def apply_plan(d):
         log("ai-cleanup", f"apply {addr}: AI sort, rest {default}: {rule}")
         return {"results": [{"email": "all accounts", "ok": True,
                              "note": f"AI sort started: existing mail is being sorted in the background (rest: {default}); "
-                                     "new mail from this sender is sorted every 15 minutes"}]}
+                                     "new mail from this sender is sorted every 15 minutes"
+                                     + (f"; its earlier Gmail filters could not be removed in {', '.join(stale)} "
+                                        "(another action on this sender was still running, or Gmail failed): apply "
+                                        "again to remove them" if stale else "")}]}
     stop_automation(addr)  # a word plan replaces an earlier AI sort
     with db() as c:
         acc_ids = [r[0] for r in c.execute("SELECT DISTINCT account_id FROM unified.msg WHERE from_addr = %s",
@@ -681,8 +706,9 @@ def apply_plan(d):
         status = {"keep": "APPROVED", "archive": "AUTO_ARCHIVED", "quarantine": "AUTO_ARCHIVED", "delete": "AUTO_ARCHIVED"}[default]
         for a in acc_ids:
             _newsletter(c, a, addr, status)
-        partial = lookups_end()
-        # partly done: the plan stays open on the AI tab, with its Apply button, so it can simply be applied again
+        partial = lookups_end() or not all(r["ok"] for r in results)
+        # partly done (look-ups left, or an account failed or was busy): the plan stays open on the AI tab, with its
+        # Apply button, so it can simply be applied again
         c.execute("UPDATE unified.ai_plan SET status = %s, updated_at = now() WHERE addr = %s",
                   ("partial" if partial else "applied", addr))
     log("ai-cleanup", f"apply {addr}: " + "; ".join(f"{r['email']}: {r['note']}" for r in results))
