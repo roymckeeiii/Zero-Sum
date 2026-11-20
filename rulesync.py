@@ -219,10 +219,12 @@ def set_include(d):
 def _backup_rule(c, target_id, account_id, reason, edited_since=None):
     """Save a target rule and its actions, every column as it is now, before it is overwritten. With edited_since (a
     master rule id), only when the rule was changed after its copy was last synced (Rule."updatedAt", which Inbox
-    Zero keeps in UTC, against rule_map.synced_at)."""
+    Zero keeps in UTC, against rule_map.synced_at). "updatedAt" is kept to the millisecond and Postgres rounds the
+    one this app writes, so it can be up to half a millisecond after synced_at: compared with a 1 ms margin."""
     since = ""
     if edited_since is not None:
-        since = (' AND r."updatedAt" > (SELECT m.synced_at AT TIME ZONE \'UTC\' FROM unified.rule_map m WHERE '
+        since = (' AND r."updatedAt" > (SELECT date_trunc(\'milliseconds\', m.synced_at AT TIME ZONE \'UTC\') '
+                 '+ interval \'1 millisecond\' FROM unified.rule_map m WHERE '
                  'm.master_rule_id = %s AND m.account_id = %s)')
     c.execute('INSERT INTO unified.rule_backup (account_id, rule_id, reason, rule, actions) '
               'SELECT r."emailAccountId", r.id, %s, to_jsonb(r), '

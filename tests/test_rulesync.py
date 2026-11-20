@@ -137,9 +137,19 @@ class Sync(World):
         self.assertIn('UPDATE "Rule"', w[1])
         sql, params = self.db.said("INSERT INTO unified.rule_backup")[0]
         # only a copy edited after it was synced (Inbox Zero keeps updatedAt in UTC) is saved, not every update
-        self.assertIn('r."updatedAt" > (SELECT m.synced_at AT TIME ZONE \'UTC\' FROM unified.rule_map m', sql)
+        self.assertIn('r."updatedAt" > (SELECT date_trunc(\'milliseconds\', m.synced_at AT TIME ZONE \'UTC\')', sql)
         self.assertEqual(params[1:], ("t1", "acc2", "m1", "acc2"))
         self.assertIn("now() AT TIME ZONE 'UTC'", self.db.said('UPDATE "Rule"')[0][0])  # and so is ours
+
+    def test_the_copy_as_written_does_not_count_as_changed_in_that_account(self):
+        # "updatedAt" is timestamp(3): the now() this app writes is rounded to the millisecond and can be up to half a
+        # millisecond after rule_map.synced_at (microseconds). Without a margin about half of all updates of a copy
+        # nobody touched were saved as "changed in this account since the last sync"
+        self.rules["acc2"] = [rule("t1", "Receipts")]
+        self.map = [("m1", "acc2", "t1", "old")]
+        rulesync.sync()
+        sql = self.db.said("INSERT INTO unified.rule_backup")[0][0]
+        self.assertIn("date_trunc('milliseconds', m.synced_at AT TIME ZONE 'UTC') + interval '1 millisecond'", sql)
 
     def test_adopting_a_pre_existing_rule_saves_it_first(self):
         self.rules["acc2"] = [rule("old1", "Receipts", instructions="hand-written before the sync")]
