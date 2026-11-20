@@ -157,6 +157,34 @@ class Gate(unittest.TestCase):
         self.assertEqual(self.raw_post("abc")[0], 400)
         self.assertEqual(len(self.ran), 1)
 
+    def test_an_answer_sent_before_the_body_was_read_drains_it_first(self):
+        # closing with the body unread makes the system send a reset, which can arrive before the 413 / 400 / 403
+        self.mode(token=True, header=False)
+        drained = []
+        with Patched(app.H, drain=lambda h, s: drained.append(s)):
+            self.assertEqual(self.raw_post(str(app.MAX_BODY + 1), b"{}")[0], 413)
+            self.assertEqual(self.raw_post("-5")[0], 400)
+            self.assertEqual(self.call("POST", "/api/nope", {"Cf-Access-Jwt-Assertion": "good",
+                                                            "X-Requested-With": "zero-sum"}, {})[0], 400)
+            self.assertEqual(self.call("POST", "/api/sender", {"X-Requested-With": "zero-sum"}, {"a": 1})[0], 403)
+            self.assertEqual(self.call("GET", "/api/accounts", {})[0], 403)    # nothing follows a GET: not drained
+        self.assertEqual(drained, [app.DRAIN_408] * 4)
+
+    def test_a_large_refused_body_still_gets_its_413(self):
+        self.mode(token=True, header=False)
+        port, n = self.srv.server_address[1], app.MAX_BODY * 3
+        for _ in range(5):
+            s = socket.create_connection(("127.0.0.1", port), timeout=5)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+            try:
+                s.sendall(b"POST /api/sender HTTP/1.1\r\nHost: x\r\nCf-Access-Jwt-Assertion: good\r\n"
+                          b"X-Requested-With: zero-sum\r\nContent-Length: %d\r\n\r\n" % n)
+                s.sendall(b"x" * n)      # like a browser: the whole body first, then the answer
+                got = s.recv(200)
+            finally:
+                s.close()
+            self.assertTrue(got.startswith(b"HTTP/1.0 413"), got)
+
     def test_a_body_that_is_not_a_json_object_is_refused(self):
         self.mode(token=True, header=False)
         for body in (b"[1, 2]", b'"text"', b"42", b"null", b"true"):

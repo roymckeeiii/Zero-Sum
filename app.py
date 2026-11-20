@@ -211,7 +211,14 @@ class H(BaseHTTPRequestHandler):
             except OSError:
                 return
 
-    def allowed(self):
+    def refuse(self, code, body):
+        """An answer sent before the request body was read (403, 400, 413): the body is drained as after a 408, so the
+        client gets this answer and not a reset (which the page could only report as "could not reach Zero Sum")."""
+        self.close_connection = True
+        self.send(code, body)
+        self.drain(DRAIN_408)
+
+    def allowed(self, body_follows=False):
         if access.ENABLED:   # the signed Access token decides; the plain email header is not trusted
             user = access.email_from(self.headers.get("Cf-Access-Jwt-Assertion"))
         elif HEADER_TRUST:   # explicit override: whoever can reach the port can write this header
@@ -220,7 +227,7 @@ class H(BaseHTTPRequestHandler):
             user = None
         if user and user in ALLOWED:
             return True
-        self.send(403, {"error": "not allowed"})
+        (self.refuse if body_follows else self.send)(403, {"error": "not allowed"})
         return False
 
     def run(self, fn, arg):
@@ -257,18 +264,18 @@ class H(BaseHTTPRequestHandler):
         self.send(404, {"error": "not found"})
 
     def do_POST(self):
-        if not self.allowed():
+        if not self.allowed(body_follows=True):
             return
         if self.path not in POST or self.headers.get("X-Requested-With") != "zero-sum":
-            return self.send(400, {"error": "bad request"})
+            return self.refuse(400, {"error": "bad request"})
         try:
             n = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             n = -1
         if n < 0:            # read(-1) would wait for the client to close the connection
-            return self.send(400, {"error": "bad request"})
+            return self.refuse(400, {"error": "bad request"})
         if n > MAX_BODY:     # refused, never cut short: a truncated body only ever read as "bad json"
-            return self.send(413, {"error": f"request too large (at most {MAX_BODY // 1000} KB)"})
+            return self.refuse(413, {"error": f"request too large (at most {MAX_BODY // 1000} KB)"})
         # a large body gets more time, by its size: a slow link is not cut off half way, a small one gains nothing
         self.deadline.deadline = max(self.deadline.deadline, self.started + self.read_deadline + n / BODY_MIN_RATE)
         try:

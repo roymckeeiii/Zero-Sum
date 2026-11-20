@@ -381,7 +381,8 @@ All settings are environment variables; see [`.env.example`](.env.example).
 - A client has 15 seconds to send its whole request (and may pause at most 30 seconds between bytes); a large POST
   body gets more time by its size (at least 8 KB a second; 79 seconds at most, for the largest body). A slow one is
   dropped, or answered 408 once its headers have arrived; what it is still sending is read and dropped for a second
-  after the 408, so the answer is not lost to a reset. At most 32 requests are worked on at once, counted only once a request has arrived in full, and at most
+  after the 408, so the answer is not lost to a reset. The same goes for a POST refused before its body is read
+  (403 not signed in, 400 bad request, 413 too large). At most 32 requests are worked on at once, counted only once a request has arrived in full, and at most
   256 connections are open at once (more are answered 503 straight away). `/healthz` needs no request slot.
 - Failed requests are logged by path only, without query strings (search words, account and message ids). An
   unexpected error reaches the page only as a short reference; its details are in the container log under it.
