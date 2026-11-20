@@ -248,7 +248,7 @@ class H(BaseHTTPRequestHandler):
             return self.send(413, {"error": f"request too large (at most {MAX_BODY // 1000} KB)"})
         try:
             d = json.loads(self.rfile.read(n) or b"{}")
-        except ValueError:
+        except (ValueError, RecursionError):   # RecursionError: nested too deep ("[[[[..."), not a ValueError
             d = None
         if not isinstance(d, dict):   # every handler takes an object: a list, string or number is refused here
             return self.send(400, {"error": "bad json"})

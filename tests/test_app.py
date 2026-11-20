@@ -163,6 +163,17 @@ class Gate(unittest.TestCase):
             self.assertEqual((status, out), (400, {"error": "bad json"}), body)
         self.assertEqual(self.ran, [])
 
+    def test_a_body_nested_too_deep_is_refused_not_dropped(self):
+        self.mode(token=True, header=False)
+        body = b"[" * 100000
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            try:
+                out = self.raw_post(str(len(body)), body)
+            except (http.client.HTTPException, OSError) as e:   # the old code hung up without an answer
+                out = repr(e)
+        self.assertEqual(out, (400, {"error": "bad json"}))
+        self.assertEqual(self.ran, [])
+
 
 class Limits(unittest.TestCase):
     """Unauthenticated connections cannot tie the server up: an idle or slow one is dropped and holds no request slot,
