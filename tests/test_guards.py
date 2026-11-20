@@ -22,7 +22,8 @@ class World(unittest.TestCase):
         self.g.found["from:"] = ["aa11bb", "aa22cc"]
         self.p = Patched(cleanup, db=self.db, gmail=self.g, ACC=self.acc, log=lambda *a, **k: None,
                          gmail_list=lambda a, path, key, limit: self.g(a, path).get(key, []),
-                         label_id=lambda a, name, create=True: "Label_Q", _one_click=lambda url: True)
+                         label_id=lambda a, name, create=True: "Label_Q", _one_click=lambda url: True,
+                         _background=lambda fn, *a: fn(*a))   # background work runs at once here
         self.p.__enter__()
         self.addCleanup(self.p.__exit__)
 
@@ -246,8 +247,39 @@ class EntryPoints(World):
         with Patched(cleanup, UNDO_REFRESH=5):
             cleanup.undo_action({"id": 7})
         self.assertEqual(len([p for p in self.g.reads if p.startswith("/messages/")]), 5)
-        # the rest are marked in the inbox, as the undo put INBOX back on them
-        self.assertEqual(self.db.said("UPDATE unified.msg SET inbox")[0][1], (True, "acc1", many[5:]))
+        # all are marked in the inbox at once, as the undo put INBOX back on them; only the first 5 are read back
+        self.assertEqual(self.db.said("UPDATE unified.msg SET inbox")[0][1], (True, "acc1", many))
+
+    def test_undo_answers_before_it_reads_anything_back(self):
+        many = [f"m{i}" for i in range(50)]
+        self.db.on("UPDATE unified.action_log SET undone_at = now()", [("acc1", [], ["INBOX"], many)])
+        self.g.meta = {i: JUNK for i in many}
+        jobs, spare = [], []
+        with Patched(cleanup, _background=lambda fn, *a: jobs.append((fn, a)),
+                     gmail_spare=lambda acc, timeout=300: spare.append(acc) or True):
+            r = cleanup.undo_action({"id": 7})
+            self.assertEqual(r["restored"], 50)
+            self.assertEqual([p for p in self.g.reads if p.startswith("/messages/")], [])   # nothing read yet
+            self.assertEqual(len(jobs), 1)
+            fn, a = jobs[0]
+            fn(*a)
+        self.assertEqual(len([p for p in self.g.reads if p.startswith("/messages/")]), 50)
+        self.assertEqual(len(spare), 3)   # asks for spare quota before each step of UNDO_STEP (20) reads
+
+    def test_undo_read_back_stops_while_the_accounts_quota_is_busy(self):
+        many = [f"m{i}" for i in range(50)]
+        self.db.on("UPDATE unified.action_log SET undone_at = now()", [("acc1", [], ["INBOX"], many)])
+        self.g.meta = {i: JUNK for i in many}
+        answers = iter([True, False])
+        with Patched(cleanup, gmail_spare=lambda acc, timeout=300: next(answers)):
+            cleanup.undo_action({"id": 7})
+        self.assertEqual(len([p for p in self.g.reads if p.startswith("/messages/")]), 20)
+
+    def test_undo_read_back_is_capped_at_500_by_default(self):
+        import gmailops
+        self.assertEqual(gmailops.UNDO_REFRESH, int(os.environ.get("UNDO_REFRESH", "500")))
+        if "UNDO_REFRESH" not in os.environ:
+            self.assertEqual(gmailops.UNDO_REFRESH, 500)
 
     def test_batch_with_a_sender_leaves_out_mail_the_history_says_is_someone_elses(self):
         self.db.on("SELECT id, from_addr FROM unified.msg", [("m1", JUNK), ("m2", BANK), ("m3", "x@y.org")])

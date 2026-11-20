@@ -145,6 +145,14 @@ class Quota(unittest.TestCase):
             b.take(50)
         self.assertGreater(time.monotonic() - t, 0.8)
 
+    def test_background_work_waits_for_spare_quota(self):
+        b = core.Bucket()
+        b.RATE, b.tokens, b.at = 1.0, 0.0, time.monotonic()   # another job has just spent it all
+        self.assertFalse(b.spare(0.2))
+        b.RATE, b.tokens, b.at = 100.0, 300.0, time.monotonic()   # nobody else is using it
+        self.assertTrue(b.spare(0.2))
+        self.assertGreaterEqual(b.tokens, 300.0)   # waiting takes nothing
+
 
 if __name__ == "__main__":
     unittest.main()

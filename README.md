@@ -211,11 +211,13 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
   it touched before Gmail is called. **Cleanup > Undo a bulk action** lists the last 28 days and puts a change's
   messages back where they were. Undo does not remove filters: use Keep or Reset on the sender for that. The one
   exception: mail from a sender protected since the change (or your own address) is never put back out of view, so
-  undoing a delete from Quarantine brings that mail out of Trash into the inbox instead, and the result says how many. The local history is updated
-  at once: the restored messages are read back from Gmail (only those, up to 5,000 per undo), so mail that is back
-  in the inbox shows as in the inbox unless Gmail has it in Trash or Spam now (e.g. an archive undone after the mail
-  was deleted by hand), and deleted mail shows its sender again. Past 5,000, the rest is marked as in the inbox and
-  the collector's 30-day refresh corrects it.
+  undoing a delete from Quarantine brings that mail out of Trash into the inbox instead, and the result says how many. The undo answers as soon as
+  the mail is restored, and the local history marks it as in the inbox at once. Then, in the background, up to
+  `UNDO_REFRESH` (default 500) of the restored messages are read back from Gmail, a few at a time and only while
+  nothing else is using the account's Gmail quota, so mail Gmail has in Trash or Spam now (e.g. an archive undone
+  after the mail was deleted by hand) is shown as out of the inbox again, and deleted mail shows its sender again.
+  Past that cap, restored mail stays marked as in the inbox: the collector's refresh corrects mail dated within the
+  last 30 days, but older mail that was trashed by hand since keeps showing as in the inbox in the history.
 - Every Clean up action and every word plan asks for confirmation with the real number of emails per account: the
   server counts them in Gmail with the same searches the action then runs (`POST /api/sender/preview`; up to
   `PREVIEW_MAX`, default 20,000, per account and step, shown as "or more" beyond that). Where the action takes mail
@@ -378,6 +380,7 @@ All settings are environment variables; see [`.env.example`](.env.example).
 | `BACKFILL_DAYS`, `BACKFILL_STEP` | `0` (all history), `2000` | how far back the collector reads (days; 0 = to the account's first email), and how much per run per account |
 | `MAX_BULK` | `200000` | most emails one bulk action touches per account |
 | `BULK_LOOKUPS` | `300` | most message senders one bulk action reads from Gmail per request (mail not collected yet), split evenly over the accounts; the rest is left for "run it again" |
+| `UNDO_REFRESH` | `500` | most restored messages one undo reads back from Gmail (in the background, about 50 seconds of quota at the default `GMAIL_UNITS_PER_SEC`, used only while nothing else needs it); the rest stay marked as in the inbox |
 | `OPENROUTER_API_KEY`, `AI_MODEL`, `AI_BASE_URL` | empty, `anthropic/claude-haiku-5.5`, OpenRouter | all AI features: AI Cleanup, AI sort, AI suggest, background analyst (off without a key; the background analyst is also off until turned on in AI Cleanup) |
 | `AI_MAX_CALLS_PER_DAY`, `AI_PLANS_PER_RUN`, `AI_MIN_EMAILS` | `400`, `4`, `5` | daily AI call cap; senders the background analyst plans per run; minimum emails before a sender is planned |
 | `QUARANTINE_LABEL`, `QUARANTINE_SHOW` | `Quarantine`, `600` | Gmail label for held mail; messages per account listed on the Quarantine tab |

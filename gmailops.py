@@ -5,13 +5,16 @@ record (unified.action_log)."""
 import contextlib, email.utils, os, re, threading, time, urllib.error
 
 from collector import CPOOL, SKIP, _store, qs
-from core import ACC, POOL, db, gmail, gmail_list, header, label_id, log
+from core import ACC, POOL, db, gmail, gmail_list, gmail_spare, header, label_id, log
 from guard import (frm, guard_sender, is_protected, own_address, own_set, protected_set, removes_mail, sender_addr,
                    sender_matches, SENDER_KEY)
 from inbox import meta
 
 MAX_BULK = int(os.environ.get("MAX_BULK", "200000"))  # most messages one bulk action touches per account
-UNDO_REFRESH = 5000  # most restored messages an undo reads back from Gmail (one metadata read each)
+# Most restored messages one undo reads back from Gmail (one metadata read each, 5 quota units), after the undo has
+# answered and only while nothing else uses the account's quota. Past it, the local flag stays as the undo set it.
+UNDO_REFRESH = int(os.environ.get("UNDO_REFRESH", "500"))
+UNDO_STEP = 20   # read back this many at a time, checking for spare quota before each step
 
 
 # How long a sender read from Gmail is remembered (unified.sender_seen) for mail the local history does not hold, so that
@@ -392,37 +395,54 @@ def undo_action(d):
             c.execute("UPDATE unified.action_log SET undone_at = NULL WHERE id = %s", (aid,))
         raise
     try:
-        # Where the restored mail is now. Mail the undo took out of the inbox is out of it. Mail it put INBOX back on
-        # is read back from Gmail (only those ids, up to UNDO_REFRESH: the account's whole Trash is never listed),
-        # since INBOX goes back on even where the mail has been put in Trash or Spam since (an archive undone after a
-        # delete), and Gmail does not count that as in the inbox. _store(refill=True) sets the flag from the labels
-        # Gmail returns, and also reads back the rows Delete/Block dropped, so the sender shows up again.
+        # Where the restored mail is now. Mail the undo took out of the inbox is out of it; mail it put INBOX back on is
+        # marked as in the inbox right away. INBOX also goes back on mail that has been put in Trash or Spam since (an
+        # archive undone after a delete), which Gmail does not count as in the inbox, so up to UNDO_REFRESH of the
+        # restored messages (only those ids: the account's whole Trash is never listed) are read back from Gmail in the
+        # background, after this request has answered. _store(refill=True) sets the flag from the labels Gmail
+        # returns, and also reads back the rows Delete/Block dropped, so the sender shows up again.
         inbox = held + (ids if "INBOX" in back_add else [])
         out = ids if "INBOX" in back_rem else []
-        check, guess = inbox[:UNDO_REFRESH], inbox[UNDO_REFRESH:]
         with db() as c:
-            # beyond the cap: the undo did put INBOX on, so in the inbox (the collector's 30-day refresh corrects any
-            # of them that were trashed since)
-            for flag, which in ((True, guess), (False, out)):
+            for flag, which in ((True, inbox), (False, out)):
                 for i in range(0, len(which), 5000):
                     c.execute("UPDATE unified.msg SET inbox = %s WHERE account_id = %s AND id = ANY(%s)",
                               (flag, acc, which[i:i + 5000]))
+        check = inbox[:UNDO_REFRESH]
         seen = set(check)
         rest = [i for i in list(ids) + held if i not in seen][:max(0, UNDO_REFRESH - len(check))]
-        failed = []
-        for part, refill in ((check, True), (rest, False)):
-            try:
-                _store(acc, part, refill=refill)
-            except Exception as e:  # noqa: BLE001 - one part failing must not skip the other
-                failed.append(e)
-        if failed:
-            raise failed[0]
+        if check or rest:
+            _background(_undo_read_back, aid, acc, check, rest)
     except Exception as e:  # noqa: BLE001 - the mail itself is restored; the collector fills the rest
         log("cleanup-error", f"undo #{aid}: history not refreshed: {e}"[:300], ACC.email(acc))
     note = (f"{len(held)} from a protected sender or your own address went back to the inbox, not to where the "
             "change had taken them from") if held else ""
     log("cleanup", f"undo #{aid}: {n} messages restored" + (f"; {note}" if note else ""), ACC.email(acc))
     return {"ok": True, "restored": n, **({"held": len(held), "note": note} if held else {})}
+
+
+def _background(fn, *args):
+    """Run fn(*args) on the shared pool, after the current request has answered."""
+    return POOL.submit(fn, *args)
+
+
+def _undo_read_back(aid, acc, check, rest):
+    """undo_action's read-back, in the background: `check` is read again (refill), `rest` only where the local history
+    lacks it. A few messages at a time, and only while nothing else is spending the account's Gmail quota (a request
+    or the collector goes first); after waiting too long it stops, and the flags stay as the undo set them."""
+    failed = []
+    for part, refill in ((check, True), (rest, False)):
+        for i in range(0, len(part), UNDO_STEP):
+            try:
+                if not gmail_spare(acc):
+                    log("cleanup-error", f"undo #{aid}: read-back stopped, the account's Gmail quota stayed busy",
+                        ACC.email(acc))
+                    return
+                _store(acc, part[i:i + UNDO_STEP], refill=refill)
+            except Exception as e:  # noqa: BLE001 - one step failing must not skip the others
+                failed.append(e)
+    if failed:   # the mail itself is restored; the collector fills the rest
+        log("cleanup-error", f"undo #{aid}: history not fully refreshed: {failed[0]}"[:300], ACC.email(acc))
 
 
 def bulk_query(query):

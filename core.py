@@ -149,8 +149,33 @@ class Bucket:
                 wait = (cost - self.tokens) / self.RATE
             time.sleep(wait)
 
+    def spare(self, timeout):
+        """Wait until the bucket is at least half full, i.e. nothing else is spending this account's quota right now,
+        and take nothing. True when it is, False after `timeout` seconds. Background work calls this before each small
+        step, so that a request (or the collector) running at the same time is never slowed down by it."""
+        end = time.monotonic() + timeout
+        while True:
+            with self.lock:
+                now = time.monotonic()
+                self.tokens = min(self.RATE * 5, self.tokens + (now - self.at) * self.RATE)
+                self.at = now
+                if self.tokens >= self.RATE * 2.5:
+                    return True
+                wait = (self.RATE * 2.5 - self.tokens) / self.RATE
+            left = end - time.monotonic()
+            if left <= 0:
+                return False
+            time.sleep(min(wait + 0.5, left))
+
 
 _buckets, _bucket_lock = {}, threading.Lock()
+
+
+def gmail_spare(account_id, timeout=300):
+    """Bucket.spare for one account: wait until its Gmail quota is not being used by anything else."""
+    with _bucket_lock:
+        bucket = _buckets.setdefault(account_id, Bucket())
+    return bucket.spare(timeout)
 
 
 def _cost(method, path):
