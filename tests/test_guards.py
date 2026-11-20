@@ -218,6 +218,14 @@ class EntryPoints(World):
         self.assertEqual((r["restored"], r["held"]), (2, 1))
         self.assertIn("protected", r["note"])
 
+    def test_undoing_an_archive_does_not_call_mail_trashed_since_in_the_inbox(self):
+        self.db.on("UPDATE unified.action_log SET undone_at = now()", [("acc1", [], ["INBOX"], ["aa11bb", "aa22cc"])])
+        self.g.found = {"in:trash OR in:spam": ["aa22cc"]}     # deleted by hand after it was archived
+        cleanup.undo_action({"id": 7})
+        self.assertEqual([c[3] for c in self.g.changes("batchModify")],
+                         [{"ids": ["aa11bb", "aa22cc"], "addLabelIds": ["INBOX"], "removeLabelIds": []}])
+        self.assertEqual(self.db.said("UPDATE unified.msg SET inbox")[0][1], (True, "acc1", ["aa11bb"]))
+
     def test_batch_with_a_sender_leaves_out_mail_the_history_says_is_someone_elses(self):
         self.db.on("SELECT id, from_addr FROM unified.msg", [("m1", JUNK), ("m2", BANK), ("m3", "x@y.org")])
         self.assertEqual(cleanup._batch("acc1", ["m1", "m2", "m3", "m4"], add=["TRASH"], sender=JUNK), 2)

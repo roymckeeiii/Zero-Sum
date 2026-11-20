@@ -371,6 +371,15 @@ def undo_action(d):
         # the held ones are in the inbox now, and so is the rest when the undo put INBOX back on (or took it off)
         inbox = held + (ids if "INBOX" in back_add else [])
         out = ids if "INBOX" in back_rem else []
+        if inbox:
+            # INBOX goes back on even where the mail has been put in Trash or Spam since (an archive undone after a
+            # delete): Gmail does not count that as in the inbox, so neither may the local row
+            try:
+                gone = set(where_not_inbox(acc))
+                inbox = [i for i in inbox if i not in gone]
+            except Exception as e:  # noqa: BLE001 - not told where they are: left for the collector to say
+                log("cleanup-error", f"undo #{aid}: inbox flags not updated: {e}"[:300], ACC.email(acc))
+                inbox = []
         with db() as c:
             for flag, which in ((True, inbox), (False, out)):
                 for i in range(0, len(which), 5000):
@@ -384,6 +393,12 @@ def undo_action(d):
             "change had taken them from") if held else ""
     log("cleanup", f"undo #{aid}: {n} messages restored" + (f"; {note}" if note else ""), ACC.email(acc))
     return {"ok": True, "restored": n, **({"held": len(held), "note": note} if held else {})}
+
+
+def where_not_inbox(acc_id):
+    """The ids of the account's mail in Trash or Spam right now (up to MAX_BULK)."""
+    return [m["id"] for m in gmail_list(acc_id, qs("in:trash OR in:spam") + "&includeSpamTrash=true", "messages",
+                                        MAX_BULK)]
 
 
 def bulk_query(query):
