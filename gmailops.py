@@ -337,12 +337,14 @@ def _modify_existing(acc_id, query, add=(), remove=(), *, sender):
         prot = protected_set()
         for s in ([sender] if isinstance(sender, str) else sorted(sender or ())):
             guard_sender(s, prot)   # the sender itself first: refused outright, whatever the messages turn out to be
-        who = senders_of(acc_id, ids)
+        who = senders_of(acc_id, ids, lookup_budget())
         mine = [i for i in ids if who.get(i) == sender]
         held, own = getattr(_ACTION, "held", None), own_set()
         if held is not None:
             for i in ids:
-                if who.get(i) != sender:
+                if i not in who:
+                    held["unchecked"] += 1
+                elif who.get(i) != sender:
                     w = who.get(i)
                     held["protected" if w and (own_address(w, own) or is_protected(w, prot)) else "other"] += 1
         ids = mine
@@ -351,7 +353,10 @@ def _modify_existing(acc_id, query, add=(), remove=(), *, sender):
 
 def held_start():
     """Start counting what _modify_existing leaves alone for this request (per account)."""
-    _ACTION.held = {"protected": 0, "other": 0}
+    _ACTION.held = {"protected": 0, "other": 0, "unchecked": 0}
+
+
+UNCHECKED_NOTE = "{n} not done yet (their senders were not looked up in this run): run it again to continue"
 
 
 def held_note():
@@ -362,8 +367,44 @@ def held_note():
         out.append(f"{h['protected']} from a protected sender or your own address left alone")
     if h.get("other"):
         out.append(f"{h['other']} sent by someone else (or sender unknown) left alone")
+    if h.get("unchecked"):
+        out.append(UNCHECKED_NOTE.format(n=h["unchecked"]))
+        _ACTION.partial = True
     held_start()
     return "; ".join(out)
+
+
+# Most message senders one request (a Cleanup action, a plan, a Quarantine action) reads from Gmail for mail the local
+# history does not have yet, over all its accounts: each read is one messages.get, about 10 a second per account at the
+# default GMAIL_UNITS_PER_SEC, and the request has to answer well inside the proxy's timeout (Cloudflare: 100 s). The
+# messages not looked up are left alone and the result says "run it again". Background work (AI sort) has no limit.
+# DEFAULT - Roy may change: 300 (about 30 s)
+BULK_LOOKUPS = int(os.environ.get("BULK_LOOKUPS", "300"))
+
+
+def lookups_start(n=None):
+    """Give this request (thread) its budget of Gmail sender look-ups; see BULK_LOOKUPS."""
+    _ACTION.lookups, _ACTION.partial = [BULK_LOOKUPS if n is None else n], False
+
+
+def lookups_end():
+    """True when some of this request's work was left for another run; ends the budget."""
+    partial = bool(getattr(_ACTION, "partial", False))
+    _ACTION.lookups, _ACTION.partial = None, False
+    return partial
+
+
+def lookup_budget():
+    """senders_of's `budget` for this request, or None (no limit) outside one."""
+    left = getattr(_ACTION, "lookups", None)
+    if left is None:
+        return None
+
+    def budget(n):
+        k = min(n, max(0, left[0]))
+        left[0] -= k
+        return k
+    return budget
 
 
 _ACTION = threading.local()   # .note: what the person asked for ("block deals@shop.com"), for the undo list

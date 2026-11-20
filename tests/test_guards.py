@@ -236,6 +236,50 @@ class EntryPoints(World):
         self.assertEqual(started, [JUNK])
 
 
+class LookupBudget(World):
+    """A bulk action reads at most BULK_LOOKUPS senders from Gmail per request, so it answers inside the proxy's timeout;
+    the messages it could not check are left alone and the answer says to run it again."""
+
+    def setUp(self):
+        super().setUp()
+        import gmailops
+        self.g.found["from:"] = ["aa0001", "aa0002", "aa0003", "aa0004", "aa0005"]
+        self.g.meta = {i: JUNK for i in self.g.found["from:"]}            # none in the local history yet
+        p = Patched(gmailops, BULK_LOOKUPS=2)
+        p.__enter__()
+        self.addCleanup(p.__exit__)
+
+    def test_a_sender_action_stops_looking_up_at_the_budget_and_says_run_it_again(self):
+        read = []
+        real = self.g
+
+        def gmail(acc, path, method="GET", body=None, retry=True):
+            if path.startswith("/messages/") and method == "GET":
+                read.append(path)
+            return real(acc, path, method, body)
+        with Patched(cleanup, gmail=gmail):
+            r = cleanup.sender_action({"addr": JUNK, "action": "delete"})
+        self.assertEqual(len(read), 2)
+        self.assertEqual([c[3]["ids"] for c in self.g.changes("batchModify")], [["aa0001", "aa0002"]])
+        self.assertTrue(r["partial"])
+        self.assertIn("3 not done yet", r["results"][0]["note"])
+        self.assertIn("run it again", r["results"][0]["note"])
+        r = cleanup.sender_action({"addr": JUNK, "action": "star"})   # no look-ups needed: not partial
+        self.assertFalse(r["partial"])
+
+    def test_quarantine_delete_keeps_to_the_budget_too(self):
+        self.g.found = {"labelIds=Label_Q": ["aa0001", "aa0002", "aa0003"]}
+        self.acc.accs = self.acc.accs[:1]
+        r = cleanup.quarantine_action({"action": "delete", "all": True})
+        self.assertEqual([c[3]["ids"] for c in self.g.changes("batchModify")], [["aa0001", "aa0002"]])
+        self.assertTrue(r["partial"])
+        self.assertIn("1 not done yet", r["results"][0]["note"])
+
+    def test_background_work_has_no_budget(self):
+        import gmailops
+        self.assertIsNone(gmailops.lookup_budget())
+
+
 class Quarantine(World):
     def setUp(self):
         super().setUp()

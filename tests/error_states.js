@@ -24,6 +24,12 @@ const fail = (why) => { console.log(`ERROR-STATES FAIL ${why}`); process.exit(1)
   let msg = "";
   try { await p3; } catch (e) { msg = e.message; }
   if (!/sign-in|reload/i.test(msg)) fail(`network error not explained: ${msg}`);
+  // the proxy gave up waiting on a long action (Cloudflare 524, an HTML page): it may still be running
+  const p4 = api("/api/sender", { addr: "a@b.c", action: "delete" });
+  pending.splice(0)[0].resolve({ ok: false, status: 524, json: async () => { throw new SyntaxError("not JSON"); } });
+  msg = "";
+  try { await p4; } catch (e) { msg = e.message; }
+  if (!/may still be running/.test(msg) || !/Undo/.test(msg)) fail(`a 524 is not explained: ${msg}`);
   await settle();
   console.log("ERROR-STATES OK");
   process.exit(0);

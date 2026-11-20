@@ -9,7 +9,8 @@ from collector import BACKFILL_DAYS, collect_status, qs
 from core import ACC, POOL, db, gmail_list, label_id, log, new_id
 from gmailops import (ARCHIVE_FILTER, AUTOMATION_KINDS, FOREIGN_NOTE, MAX_BULK, NEVER_SPAM_FILTER, QUARANTINE, STAR_FILTER,
                       TRASH_FILTER, _ACTION, _batch, _filter, _modify_existing, bulk_query, foreign_filters,
-                      held_note, held_start, remove_app_filters, senders_of)
+                      held_note, held_start, lookup_budget, lookups_end, lookups_start, remove_app_filters,
+                      senders_of, UNCHECKED_NOTE)
 from guard import (SENDER_KEY, frm, guard_sender, is_protected, keep_query, own_address, own_set, parse_protect_keys,
                    protected_set, sender_addr)
 from inbox import meta
@@ -271,6 +272,7 @@ def sender_action(d):
     if d.get("accounts"):
         acc_ids = [a for a in acc_ids if a in set(d["accounts"])]
     results, manual = [], []
+    lookups_start()
     for a in acc_ids:
         em = ACC.email(a)
         held_start()
@@ -354,8 +356,9 @@ def sender_action(d):
         except Exception as e:  # noqa: BLE001
             results.append({"email": em, "ok": False, "note": str(e)[:200]})
     _ACTION.held = None
+    partial = lookups_end()
     log("cleanup", f"{act} {addr}{' keep ' + kq if kq else ''}: " + "; ".join(f"{r['email']}: {r['note']}" for r in results))
-    return {"results": results, "manual": manual}
+    return {"results": results, "manual": manual, "partial": partial}
 
 
 def _qlabel(acc_id):
@@ -421,7 +424,8 @@ def quarantine_action(d):
     if not (chosen or sender or d.get("all")):
         raise ValueError("choose messages, a sender, or all")
     _ACTION.note = f"quarantine {act}" + (f" {sender}" if sender else " (all)" if d.get("all") else " (chosen)")
-    results = []
+    results, partial = [], False
+    lookups_start()
     accounts = ACC.list()
     unknown = sum(len(set(v)) for k, v in chosen.items() if k not in {a["id"] for a in accounts})
     if unknown:
@@ -450,9 +454,11 @@ def quarantine_action(d):
                                     "note": f"0 {QACTIONS[act]}; {refused} not in {QUARANTINE}, left alone"})
                 continue
             add = {"delete": ["TRASH"], "archive": [], "release": ["INBOX"]}[act]
-            senders, left, other = None, 0, 0
+            senders, left, other, unchecked = None, 0, 0, 0
             if act == "delete" or sender:
-                who = senders_of(a["id"], ids)
+                who = senders_of(a["id"], ids, lookup_budget())
+                looked = [i for i in ids if i in who]   # the rest waits for another run (BULK_LOOKUPS)
+                unchecked, ids = len(ids) - len(looked), looked
             if sender:   # Gmail's from: search is a token match (deals@shop.com.au, display names): only mail really
                 mine = [i for i in ids if who.get(i) == sender]   # from this sender, as its group on the page shows
                 other, ids = len(ids) - len(mine), mine
@@ -469,6 +475,9 @@ def quarantine_action(d):
                 note += f"; {left} left in {QUARANTINE} (protected sender, your own address, or sender unknown)"
             if other:
                 note += f"; {other} from another sender (or sender unknown) left in {QUARANTINE}"
+            if unchecked:
+                note += "; " + UNCHECKED_NOTE.format(n=unchecked)
+                partial = True
             if act == "release" and sender and remove_app_filters(a["id"], sender, kinds=("quarantine",), exact=True):
                 note += ", quarantine filter removed"
             results.append({"email": a["email"], "ok": True, "note": note})
@@ -480,9 +489,10 @@ def quarantine_action(d):
                 c.execute('UPDATE "Newsletter" SET status = NULL, "updatedAt" = now() '
                           'WHERE lower(email) = %s AND "emailAccountId" = %s AND status::text = \'AUTO_ARCHIVED\'',
                           (sender, acc))
+    lookups_end()
     log("quarantine", f"{act} {sender or ('selected' if chosen else 'all')}: "
         + "; ".join(f"{r['email']}: {r['note']}" for r in results))
-    return {"results": results}
+    return {"results": results, "partial": partial}
 
 
 PLAN_ACTIONS = ("keep", "archive", "quarantine", "delete")
@@ -645,6 +655,7 @@ def apply_plan(d):
         acc_ids = [r[0] for r in c.execute("SELECT DISTINCT account_id FROM unified.msg WHERE from_addr = %s",
                                            (addr,)).fetchall()]
     results = []
+    lookups_start()
     for a in acc_ids:
         em = ACC.email(a)
         try:
@@ -666,5 +677,6 @@ def apply_plan(d):
         for a in acc_ids:
             _newsletter(c, a, addr, status)
         c.execute("UPDATE unified.ai_plan SET status = 'applied', updated_at = now() WHERE addr = %s", (addr,))
+    partial = lookups_end()
     log("ai-cleanup", f"apply {addr}: " + "; ".join(f"{r['email']}: {r['note']}" for r in results))
-    return {"results": results}
+    return {"results": results, "partial": partial}

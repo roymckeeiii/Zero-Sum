@@ -12,10 +12,16 @@ async function api(path, body) {
   } catch (e) {  // never reached the app: offline, or an expired sign-in redirected to the login page
     throw new Error("Could not reach Zero Sum. Reload the page (your sign-in may have expired).");
   }
-  const d = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
-  if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-  return d;
+  const d = await r.json().catch(() => null);
+  if (!d && body && (r.status >= 500 || r.status === 408)) {  // the proxy gave up waiting (524, 504), not the app
+    throw new Error(`No answer in time (HTTP ${r.status}). The action may still be running: wait a minute, then check ` +
+      "Cleanup > Undo a bulk action before trying again.");
+  }
+  if (!r.ok) throw new Error(d?.error || `HTTP ${r.status}`);
+  return d ?? { error: `HTTP ${r.status}` };
 }
+/* a bulk action that left messages for another run (BULK_LOOKUPS) says so above its per-account notes */
+const partlyDone = (r) => r.partial ? `<p class="err"><b>Partly done: run it again to continue.</b> Some messages' senders could not be looked up in one go and were left alone.</p>` : "";
 
 /* account colors: fixed categorical order by account (sorted by email), never by rank; past 8 -> neutral */
 function slotOf(id) { const i = S.slot[id]; return i == null || i >= 8 ? "var(--s9)" : `var(--s${i + 1})`; }
@@ -368,7 +374,7 @@ async function runSender(s, a, b, ai) {
     const next = ["delete", "quarantine", "block", "archive", "unsubscribe"].filter((x) => x !== a)
       .map((x) => `<button data-next="${x}" class="${["delete", "block"].includes(x) ? "danger" : ""}">${LABELS[x]}</button>`).join(" ");
     $("#c-result").innerHTML = `<div class="card"><b>${esc(LABELS[a] || a)}: ${esc(s.addr)}</b>
-      ${s.protected ? "" : `<div class="grp" style="margin:6px 0">Next for this sender: ${next}</div>`}<ul>` +
+      ${s.protected ? "" : `<div class="grp" style="margin:6px 0">Next for this sender: ${next}</div>`}${partlyDone(r)}<ul>` +
       r.results.map((x) => `<li class="${x.ok ? "" : "err"}">${esc(x.email)}: ${esc(x.note)}</li>`).join("") + "</ul>" +
       (r.manual.length ? `<p>Finish unsubscribing by opening these (one per account):</p><ul>` +
         r.manual.map((m) => `<li>${esc(m.email)}: <a href="${esc(m.url)}" target="_blank" rel="noopener noreferrer">${esc(m.url.slice(0, 80))}</a></li>`).join("") + "</ul>" : "") + "</div>";
@@ -649,7 +655,7 @@ $("#ai-body").onclick = async (e) => {
     b.disabled = true; b.textContent = "Applying…";
     try {
       const r = await api("/api/ai/apply", { addr: p.addr, groups: p.groups, default: p.default, mode: p.mode || "words", rule: p.keep_rule || "" });
-      $("#ai-result").innerHTML = `<div class="card"><b>Applied: ${esc(p.addr)}</b><ul>` + r.results.map((x) => `<li class="${x.ok ? "" : "err"}">${esc(x.email)}: ${esc(x.note)}</li>`).join("") + "</ul></div>";
+      $("#ai-result").innerHTML = `<div class="card"><b>Applied: ${esc(p.addr)}</b>${partlyDone(r)}<ul>` + r.results.map((x) => `<li class="${x.ok ? "" : "err"}">${esc(x.email)}: ${esc(x.note)}</li>`).join("") + "</ul></div>";
     } catch (err) { $("#ai-result").innerHTML = `<div class="err">${esc(err.message)}</div>`; }
     loadPlans();
   }
@@ -705,7 +711,7 @@ async function qact(body, ask) {
   $("#q-result").innerHTML = `<div class="note">Working…</div>`;
   try {
     const r = await api("/api/quarantine", body);
-    $("#q-result").innerHTML = `<div class="card"><ul>` + (r.results.length ? r.results.map((x) => `<li class="${x.ok ? "" : "err"}">${esc(x.email)}: ${esc(x.note)}</li>`).join("")
+    $("#q-result").innerHTML = `<div class="card">${partlyDone(r)}<ul>` + (r.results.length ? r.results.map((x) => `<li class="${x.ok ? "" : "err"}">${esc(x.email)}: ${esc(x.note)}</li>`).join("")
       : "<li>Nothing to do.</li>") + "</ul></div>";
   } catch (e) { $("#q-result").innerHTML = `<div class="err">${esc(e.message)}</div>`; }
   loadQuarantine();
