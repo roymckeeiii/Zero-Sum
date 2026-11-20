@@ -181,12 +181,41 @@ class OneAtATime(World):
 
         def gmail(acc, path, method="GET", body=None, retry=True):
             if method == "POST":
-                held.append((gmailops._sender_lock(acc, S.upper()).locked(),
-                             gmailops._sender_lock(acc, "other@x.com").locked()))
+                held.append((gmailops.sender_busy(acc, S.upper()), gmailops.sender_busy(acc, "other@x.com")))
             return real(acc, path, method, body)
         with Patched(cleanup, gmail=gmail):
             cleanup._filter("acc1", S, cleanup.TRASH_FILTER, "trash")
         self.assertEqual(held, [(True, False)])
+        self.assertEqual(gmailops._filter_locks, {})        # nobody needs it any more: the entry is gone
+
+    def test_two_actions_on_one_sender_at_once_leave_one_set_of_filters(self):
+        # Block and Auto-archive from two tabs: each removes the old filters, then makes its own. Interleaved as
+        # remove, remove, create, create, both filters stayed; as one step per action, the second replaces the first
+        import gmailops, threading, time
+        self.db.on("SELECT DISTINCT account_id FROM unified.msg", [("acc1",)])
+        real, first_post, go = self.g, threading.Event(), threading.Event()
+
+        def gmail(acc, path, method="GET", body=None, retry=True):
+            if path == "/settings/filters" and method == "POST" and not first_post.is_set():
+                first_post.set()
+                go.wait(5)          # the first action is held here, between its remove and its create
+            return real(acc, path, method, body)
+        out = []
+        with Patched(cleanup, gmail=gmail):
+            a = threading.Thread(target=lambda: out.append(cleanup.sender_action({"addr": S, "action": "block"})))
+            a.start()
+            first_post.wait(5)
+            b = threading.Thread(target=lambda: out.append(cleanup.sender_action({"addr": S, "action": "autoarchive"})))
+            b.start()
+            time.sleep(0.3)         # the second action gets as far as it can
+            go.set()
+            a.join(5)
+            b.join(5)
+        self.assertTrue(all(r["results"][0]["ok"] for r in out), out)
+        mine = [f for f in self.g.filters["acc1"] if f["criteria"]["from"] == S]
+        self.assertEqual(len(mine), 1, mine)
+        self.assertEqual(self.kinds(), ["archive"])
+        self.assertEqual(gmailops._filter_locks, {})
 
 
 class Removed(World):

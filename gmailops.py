@@ -2,7 +2,7 @@
 and only those are ever removed), label changes on existing mail (_batch: recorded with the messages they touch
 before Gmail is called, refused for protected senders and own addresses), and the undo journal built from that
 record (unified.action_log)."""
-import email.utils, os, re, threading, time, urllib.error
+import contextlib, email.utils, os, re, threading, time, urllib.error
 
 from collector import CPOOL, SKIP, _store, qs
 from core import ACC, POOL, db, gmail, gmail_list, header, label_id, log
@@ -91,12 +91,36 @@ def _filter(acc_id, addr, action, kind, keep=None, query=None, negated=None, sou
         return _create_filter(acc_id, addr, action, kind, crit, source)
 
 
+# (account, sender) -> [lock, how many threads hold or wait for it]; an entry goes once nobody needs it, so the dict
+# only ever holds the senders being worked on right now
 _filter_locks, _filter_locks_guard = {}, threading.Lock()
 
 
+@contextlib.contextmanager
 def _sender_lock(acc_id, addr):
+    """One sender's filters in one account are changed by one action at a time: the old filters removed and the new
+    ones made as one step, so two actions at once (two tabs, Block then Auto-archive) cannot leave both sets. Re-entrant:
+    an action holding it may create filters (_filter takes it again)."""
+    key = (acc_id, (addr or "").lower())
     with _filter_locks_guard:
-        return _filter_locks.setdefault((acc_id, (addr or "").lower()), threading.Lock())
+        ent = _filter_locks.get(key)
+        if ent is None:
+            ent = _filter_locks[key] = [threading.RLock(), 0]
+        ent[1] += 1
+    try:
+        with ent[0]:
+            yield
+    finally:
+        with _filter_locks_guard:
+            ent[1] -= 1
+            if not ent[1]:
+                _filter_locks.pop(key, None)
+
+
+def sender_busy(acc_id, addr):
+    """True while some action holds or waits for this sender's lock."""
+    with _filter_locks_guard:
+        return (acc_id, (addr or "").lower()) in _filter_locks
 
 
 # After a filter POST that got no answer, Zero Sum looks for the filter right away and again after these many seconds,

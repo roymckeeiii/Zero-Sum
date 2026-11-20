@@ -8,7 +8,7 @@ from aisort import start_ai_sort, stop_automation
 from collector import BACKFILL_DAYS, collect_status, qs
 from core import ACC, POOL, db, gmail_list, label_id, log, new_id
 from gmailops import (ARCHIVE_FILTER, AUTOMATION_KINDS, FOREIGN_NOTE, MAX_BULK, NEVER_SPAM_FILTER, QUARANTINE, STAR_FILTER,
-                      TRASH_FILTER, _ACTION, _batch, _filter, _modify_existing, bulk_query, foreign_filters,
+                      TRASH_FILTER, _ACTION, _batch, _filter, _modify_existing, _sender_lock, bulk_query, foreign_filters,
                       held_note, held_start, lookup_budget, lookups_account, lookups_end, lookups_start,
                       remove_app_filters, senders_of, unchecked_note)
 from guard import (SENDER_KEY, frm, guard_sender, is_protected, keep_query, own_address, own_set, parse_protect_keys,
@@ -232,8 +232,9 @@ def sender_action(d):
         for acc in ACC.list():
             try:
                 if act == "protect":  # what was set up before the protection must stop moving its mail: Trash,
-                    cleared += remove_app_filters(acc["id"], addr)  # archive and quarantine filters alike
-                    _filter(acc["id"], addr, NEVER_SPAM_FILTER, "never_spam", source="protect")
+                    with _sender_lock(acc["id"], addr):   # archive and quarantine filters alike
+                        cleared += remove_app_filters(acc["id"], addr)
+                        _filter(acc["id"], addr, NEVER_SPAM_FILTER, "never_spam", source="protect")
                     left += foreign_filters(acc["id"], addr)
                 else:
                     remove_app_filters(acc["id"], addr, kinds=("never_spam",), exact=True)
@@ -278,82 +279,84 @@ def sender_action(d):
         held_start()
         lookups_account(len(acc_ids) - k)
         try:
-            note = []
-            if act in FILTERING:  # a new action replaces the sender's earlier filters, it does not stack on them
-                remove_app_filters(a, addr)
-            if act in UNSUB:  # the unsubscribe part; what happens to their mail follows below
-                u, post = unsub.get(a, (None, False))
-                if u and u.startswith("https://") and post and _one_click(u):
-                    note.append("unsubscribed (one-click)")
-                elif u:
-                    manual.append({"email": em, "url": u})
-                    note.append("open the link to finish unsubscribing")
-                else:
-                    note.append("no unsubscribe link" + ("" if act != "unsubscribe" else ": use Block or Quarantine"))
-            if act == "unsub_delete":  # and clear it out: Trash now, future mail straight to Trash
-                _filter(a, addr, TRASH_FILTER, "trash", keep=kq, source=act)
-                note.append(f"{_modify_existing(a, sender_query(act, addr, kq), add=['TRASH'], sender=addr)} moved to Trash, "
-                            "future mail goes to Trash")
-                if not kq:
-                    _drop_rows(a, addr)
-            if act in ("quarantine", "unsub_quarantine"):  # held for review on the Quarantine tab, now and in future
-                lid = label_id(a, QUARANTINE)
-                _filter(a, addr, {"addLabelIds": [lid], "removeLabelIds": ["INBOX"]}, "quarantine", keep=kq, source=act)
-                n = _modify_existing(a, sender_query(act, addr, kq), add=[lid],
-                                     remove=["INBOX"], sender=addr)  # every folder, every year
-                note.append(f"filter added, {n} moved to {QUARANTINE}")
+            # the old filters go and the new ones come as one step: another action on this sender waits
+            with _sender_lock(a, addr):
+                note = []
+                if act in FILTERING:  # a new action replaces the sender's earlier filters, it does not stack on them
+                    remove_app_filters(a, addr)
+                if act in UNSUB:  # the unsubscribe part; what happens to their mail follows below
+                    u, post = unsub.get(a, (None, False))
+                    if u and u.startswith("https://") and post and _one_click(u):
+                        note.append("unsubscribed (one-click)")
+                    elif u:
+                        manual.append({"email": em, "url": u})
+                        note.append("open the link to finish unsubscribing")
+                    else:
+                        note.append("no unsubscribe link" + ("" if act != "unsubscribe" else ": use Block or Quarantine"))
+                if act == "unsub_delete":  # and clear it out: Trash now, future mail straight to Trash
+                    _filter(a, addr, TRASH_FILTER, "trash", keep=kq, source=act)
+                    note.append(f"{_modify_existing(a, sender_query(act, addr, kq), add=['TRASH'], sender=addr)} moved to Trash, "
+                                "future mail goes to Trash")
+                    if not kq:
+                        _drop_rows(a, addr)
+                if act in ("quarantine", "unsub_quarantine"):  # held for review on the Quarantine tab, now and in future
+                    lid = label_id(a, QUARANTINE)
+                    _filter(a, addr, {"addLabelIds": [lid], "removeLabelIds": ["INBOX"]}, "quarantine", keep=kq, source=act)
+                    n = _modify_existing(a, sender_query(act, addr, kq), add=[lid],
+                                         remove=["INBOX"], sender=addr)  # every folder, every year
+                    note.append(f"filter added, {n} moved to {QUARANTINE}")
+                    with db() as c:
+                        c.execute("UPDATE unified.msg SET inbox = false WHERE account_id = %s AND from_addr = %s", (a, addr))
+                if act in ("autoarchive", "unsub_archive"):
+                    _filter(a, addr, ARCHIVE_FILTER, "archive", keep=kq, source=act)
+                    note.append(f"filter added, {_archive_existing(a, addr, kq)} archived")
+                elif act == "archive":
+                    note.append(f"{_archive_existing(a, addr, kq)} archived")
+                elif act == "delete":
+                    note.append(f"{_modify_existing(a, sender_query(act, addr, kq), add=['TRASH'], sender=addr)} moved to Trash")
+                    if not kq:
+                        _drop_rows(a, addr)
+                elif act == "block":
+                    _filter(a, addr, TRASH_FILTER, "trash", keep=kq, source=act)
+                    note.append(f"filter added (future mail goes to Trash), "
+                                f"{_modify_existing(a, sender_query(act, addr, kq), add=['TRASH'], sender=addr)} moved to Trash")
+                    if not kq:
+                        _drop_rows(a, addr)
+                elif act == "spam":
+                    note.append(f"{_modify_existing(a, sender_query(act, addr, kq), add=['SPAM'], remove=['INBOX'], sender=addr)} "
+                                "reported as spam")
+                    if not kq:
+                        _drop_rows(a, addr)
+                elif act in ("keep", "reset"):  # back to normal delivery: none of this app's filters may keep moving
+                    n = remove_app_filters(a, addr, kinds=AUTOMATION_KINDS + (("star",) if act == "reset" else ()))
+                    if n:  # this sender's mail (Trash, archive and quarantine alike)
+                        note.append(f"{n} filter(s) removed")
+                    left = foreign_filters(a, addr)
+                    if left:
+                        note.append(FOREIGN_NOTE.format(n=left))
+                elif act == "star":
+                    _filter(a, addr, STAR_FILTER, "star", source=act)
+                    note.append(f"filter added, {_modify_existing(a, sender_query(act, addr), add=['STARRED'], sender=addr)} starred")
+                elif act == "unstar":
+                    remove_app_filters(a, addr, kinds=("star",), exact=True)
+                    note.append(f"filter removed, {_modify_existing(a, sender_query(act, addr), remove=['STARRED'], sender=addr)} unstarred")
+                if kq and act in DESTRUCTIVE:  # the kept ones: starred now and in future, so they stand out
+                    _filter(a, addr, STAR_FILTER, "keep_star", query=kq, source=act)
+                    note.append(f"{_modify_existing(a, kept_query(addr, kq), add=['STARRED'], sender=addr)} kept and starred")
+                status = {"unsubscribe": "UNSUBSCRIBED", "unsub_archive": "UNSUBSCRIBED", "unsub_quarantine": "UNSUBSCRIBED",
+                          "unsub_delete": "UNSUBSCRIBED", "autoarchive": "AUTO_ARCHIVED", "quarantine": "AUTO_ARCHIVED",
+                          "block": "AUTO_ARCHIVED",
+                          "keep": "APPROVED"}.get(act)
                 with db() as c:
-                    c.execute("UPDATE unified.msg SET inbox = false WHERE account_id = %s AND from_addr = %s", (a, addr))
-            if act in ("autoarchive", "unsub_archive"):
-                _filter(a, addr, ARCHIVE_FILTER, "archive", keep=kq, source=act)
-                note.append(f"filter added, {_archive_existing(a, addr, kq)} archived")
-            elif act == "archive":
-                note.append(f"{_archive_existing(a, addr, kq)} archived")
-            elif act == "delete":
-                note.append(f"{_modify_existing(a, sender_query(act, addr, kq), add=['TRASH'], sender=addr)} moved to Trash")
-                if not kq:
-                    _drop_rows(a, addr)
-            elif act == "block":
-                _filter(a, addr, TRASH_FILTER, "trash", keep=kq, source=act)
-                note.append(f"filter added (future mail goes to Trash), "
-                            f"{_modify_existing(a, sender_query(act, addr, kq), add=['TRASH'], sender=addr)} moved to Trash")
-                if not kq:
-                    _drop_rows(a, addr)
-            elif act == "spam":
-                note.append(f"{_modify_existing(a, sender_query(act, addr, kq), add=['SPAM'], remove=['INBOX'], sender=addr)} "
-                            "reported as spam")
-                if not kq:
-                    _drop_rows(a, addr)
-            elif act in ("keep", "reset"):  # back to normal delivery: none of this app's filters may keep moving
-                n = remove_app_filters(a, addr, kinds=AUTOMATION_KINDS + (("star",) if act == "reset" else ()))
-                if n:  # this sender's mail (Trash, archive and quarantine alike)
-                    note.append(f"{n} filter(s) removed")
-                left = foreign_filters(a, addr)
-                if left:
-                    note.append(FOREIGN_NOTE.format(n=left))
-            elif act == "star":
-                _filter(a, addr, STAR_FILTER, "star", source=act)
-                note.append(f"filter added, {_modify_existing(a, sender_query(act, addr), add=['STARRED'], sender=addr)} starred")
-            elif act == "unstar":
-                remove_app_filters(a, addr, kinds=("star",), exact=True)
-                note.append(f"filter removed, {_modify_existing(a, sender_query(act, addr), remove=['STARRED'], sender=addr)} unstarred")
-            if kq and act in DESTRUCTIVE:  # the kept ones: starred now and in future, so they stand out
-                _filter(a, addr, STAR_FILTER, "keep_star", query=kq, source=act)
-                note.append(f"{_modify_existing(a, kept_query(addr, kq), add=['STARRED'], sender=addr)} kept and starred")
-            status = {"unsubscribe": "UNSUBSCRIBED", "unsub_archive": "UNSUBSCRIBED", "unsub_quarantine": "UNSUBSCRIBED",
-                      "unsub_delete": "UNSUBSCRIBED", "autoarchive": "AUTO_ARCHIVED", "quarantine": "AUTO_ARCHIVED",
-                      "block": "AUTO_ARCHIVED",
-                      "keep": "APPROVED"}.get(act)
-            with db() as c:
-                if status:
-                    _newsletter(c, a, addr, status)
-                elif act == "reset":
-                    c.execute('UPDATE "Newsletter" SET status = NULL, "updatedAt" = now() '
-                              'WHERE lower(email) = %s AND "emailAccountId" = %s', (addr, a))
-            held = held_note()   # mail Gmail's from: search found that is not really from addr
-            if held:
-                note.append(held)
-            results.append({"email": em, "ok": True, "note": "; ".join(note) or act})
+                    if status:
+                        _newsletter(c, a, addr, status)
+                    elif act == "reset":
+                        c.execute('UPDATE "Newsletter" SET status = NULL, "updatedAt" = now() '
+                                  'WHERE lower(email) = %s AND "emailAccountId" = %s', (addr, a))
+                held = held_note()   # mail Gmail's from: search found that is not really from addr
+                if held:
+                    note.append(held)
+                results.append({"email": em, "ok": True, "note": "; ".join(note) or act})
         except Exception as e:  # noqa: BLE001
             results.append({"email": em, "ok": False, "note": str(e)[:200]})
     _ACTION.held = None
@@ -661,11 +664,12 @@ def apply_plan(d):
         lookups_account(len(acc_ids) - k)
         try:
             lid = label_id(a, QUARANTINE) if "quarantine" in destructive else None
-            remove_app_filters(a, addr)  # a re-applied plan replaces the old one's filters (every kind), it doesn't add to them
             notes = []
             held_start()
-            for label, action, crit, extra in plan_steps(groups, default):
-                notes.append(f"{label}: {_plan_action(a, addr, action, crit, extra, lid)} {action}")
+            with _sender_lock(a, addr):   # replaced as one step: another action on this sender waits
+                remove_app_filters(a, addr)  # a re-applied plan replaces the old one's filters (every kind), not adds to them
+                for label, action, crit, extra in plan_steps(groups, default):
+                    notes.append(f"{label}: {_plan_action(a, addr, action, crit, extra, lid)} {action}")
             held = held_note()
             if held:
                 notes.append(held)
