@@ -178,6 +178,7 @@ def gmail(account_id, path, method="GET", body=None, retry=True):
                                  data=json.dumps(body).encode() if body is not None else None,
                                  headers={"Authorization": f"Bearer {ACC.token(account_id, force=not retry)}",
                                           "Content-Type": "application/json"})
+    maybe_applied = False   # an earlier try got an answer that does not say whether Gmail did the work
     for attempt in range(6):
         bucket.take(_cost(method, path))
         try:
@@ -194,10 +195,12 @@ def gmail(account_id, path, method="GET", body=None, retry=True):
             # harmless (a read, a label change); a new filter or label would be made twice, or fail as "exists"
             busy = e.code in (500, 503) or (e.code in (502, 504) and _idempotent(method, path))
             if (limited or busy) and attempt < 5:  # quota is per minute: back off up to a minute
+                # a rate limit is a refusal (nothing was done); a 5xx may come after the work was done
+                maybe_applied = maybe_applied or busy
                 time.sleep(min(60, 4 * 2 ** attempt) if limited else 2 ** attempt)
                 continue
             err = RuntimeError(f"Gmail {method} {path.split('?')[0]}: {e.code} {detail}")
-            err.retried = attempt > 0   # this answer came to a repeat: the first try may have been applied
+            err.retried = maybe_applied   # this answer came to a repeat of a try that may have been applied
             raise err from None
         except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
             # no answer at all (reset, timeout, DNS): a read is simply asked again; a change is not, since Gmail may

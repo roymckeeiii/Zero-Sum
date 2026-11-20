@@ -61,6 +61,14 @@ class Retry(unittest.TestCase):
                               method="POST", path="/settings/filters")
         self.assertTrue(out.retried)
 
+    def test_an_error_after_a_rate_limit_is_not_marked_as_a_repeat(self):
+        # 429 and a 403 rate limit are refusals: Gmail did nothing, so "exists" on the next try is not this app's
+        for first in (self.http(429), urllib.error.HTTPError("u", 403, "x", {}, io.BytesIO(b"rateLimitExceeded"))):
+            out, seen, _ = self.call([first, urllib.error.HTTPError("u", 400, "x", {}, io.BytesIO(b"exists"))],
+                                     method="POST", path="/settings/filters")
+            self.assertEqual(len(seen), 2)
+            self.assertFalse(out.retried, first.code)
+
     def test_a_dropped_connection_is_retried_for_a_read(self):
         for err in (urllib.error.URLError("reset"), TimeoutError("read timed out"), ConnectionResetError()):
             out, seen, _ = self.call([err, '{"ok": 1}'])

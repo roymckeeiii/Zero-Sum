@@ -55,6 +55,8 @@ def _filter(acc_id, addr, action, kind, keep=None, query=None, negated=None, sou
         crit["query"] = query
     if keep or negated:
         crit["negatedQuery"] = keep or negated
+    # the filters there before: a repeated POST answered "exists" may only claim one that was not among them
+    before = {x.get("id") for x in gmail(acc_id, "/settings/filters").get("filter", [])}
     try:
         f = gmail(acc_id, "/settings/filters", "POST", {"criteria": crit, "action": action})
     except RuntimeError as e:
@@ -62,10 +64,12 @@ def _filter(acc_id, addr, action, kind, keep=None, query=None, negated=None, sou
             raise
         if not getattr(e, "retried", False):
             return None  # an identical filter is already there: recorded earlier, or not this app's (then it stays so)
-        # "exists" answered a repeat of this request: the first try made it before its answer was lost. It is this
-        # app's filter, so it is found and recorded like any other (else Protect, Keep and Reset could never remove it)
+        # "exists" answered a repeat of this request: the first try may have made it before its answer was lost. A
+        # matching filter that was not there before the POST is this app's, so it is found and recorded like any other
+        # (else Protect, Keep and Reset could never remove it); one that was there before is left alone
         f = next((x for x in gmail(acc_id, "/settings/filters").get("filter", [])
-                  if (x.get("criteria") or {}) == crit and _same_action(x.get("action") or {}, action)), None)
+                  if x.get("id") not in before and (x.get("criteria") or {}) == crit
+                  and _same_action(x.get("action") or {}, action)), None)
     fid = (f or {}).get("id")
     if not fid:
         return None

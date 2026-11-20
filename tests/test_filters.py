@@ -82,6 +82,24 @@ class Recorded(World):
         self.assertEqual(fid, "F1")
         self.assertEqual([(f[1], f[2], f[3]) for f in self.db.filters], [("F1", S, "trash")])
 
+    def test_a_repeat_answered_exists_does_not_claim_a_filter_made_by_hand(self):
+        self.g.filters["acc1"] = [dict(HAND_MADE)]
+        real = self.g
+
+        def repeated(acc, path, method="GET", body=None, retry=True):
+            if path == "/settings/filters" and method == "POST":
+                try:   # the first try did nothing (or its effect is unknown); the repeat meets the hand-made filter
+                    return real(acc, path, method, body)
+                except RuntimeError as e:
+                    e.retried = True
+                    raise
+            return real(acc, path, method, body)
+        with Patched(cleanup, gmail=repeated):
+            self.assertIsNone(cleanup._filter("acc1", S, cleanup.TRASH_FILTER, "trash"))
+        self.assertEqual(self.db.filters, [])
+        self.assertEqual(cleanup.remove_app_filters("acc1", S), 0)
+        self.assertEqual(self.live(), ["H1"])
+
 
 class Removed(World):
     def setUp(self):
