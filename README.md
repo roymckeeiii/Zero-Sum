@@ -227,8 +227,10 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
   (Cloudflare gives up after 100 seconds), one action reads at most `BULK_LOOKUPS` senders (default 300, about 30
   seconds) from Gmail for mail not collected yet, shared fairly between the accounts; the messages it could not
   check are left alone and the result says **Partly done: run it again** to continue. The senders it read are
-  remembered (`unified.sender_seen`, 30 days; a read that failed is retried after an hour), so the next run picks up
-  where this one stopped instead of reading the same messages again. A run that changed nothing and learned no sender
+  remembered (`unified.sender_seen`, 30 days; a message with no sender, or deleted since, is tried again after an
+  hour), so the next run picks up where this one stopped instead of reading the same messages again. A read Gmail
+  refused or did not answer (rate limit, server error) is not remembered: that message counts as not done yet, not
+  as someone else's mail, and the next run reads it again. A run that changed nothing and learned no sender
   does not say "run it again": it says what stopped it (Gmail not answering the look-ups, or no look-ups left). If the page still gets no answer in time, it says the action may
   still be running and to check **Undo a bulk action** before trying again.
 - **Protected** senders (an address, or a whole domain like `@yourbank.com`) can't be unsubscribed, archived, deleted,

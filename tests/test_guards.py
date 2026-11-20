@@ -330,18 +330,53 @@ class LookupBudget(World):
         self.assertEqual(len(runs), 3)
         self.assertEqual(self.db.seen[("acc1", "ab0001")], "deals@shop.com.au")
 
+    def refusing_reads(self):
+        real = self.g
+
+        def gmail(acc, path, method="GET", body=None, retry=True):
+            if path.startswith("/messages/") and method == "GET":
+                raise RuntimeError(f"Gmail GET {path}: 429 Too Many Requests")
+            return real(acc, path, method, body)
+        return Patched(cleanup, gmail=gmail)
+
     def test_a_run_that_gets_nowhere_says_why_instead_of_run_it_again(self):
         self.acc.accs = self.acc.accs[:1]
-        self.g.meta = {}                                                  # Gmail answers no metadata read
-        r = cleanup.sender_action({"addr": JUNK, "action": "delete"})
+        with self.refusing_reads():                                       # Gmail answers no metadata read
+            r = cleanup.sender_action({"addr": JUNK, "action": "delete"})
         self.assertFalse(r["partial"])
         note = r["results"][0]["note"]
         self.assertNotIn("run it again", note)
-        self.assertIn("3 not done: Gmail did not return their senders", note)
+        self.assertIn("5 not done: Gmail did not return their senders", note)   # 2 refused, 3 over the budget
         self.g.found = {"labelIds=Label_Q": ["ee0001", "ee0002", "ee0003"]}
-        r = cleanup.quarantine_action({"action": "delete", "all": True})
+        with self.refusing_reads():
+            r = cleanup.quarantine_action({"action": "delete", "all": True})
         self.assertFalse(r["partial"])
-        self.assertIn("1 not done: Gmail did not return their senders", r["results"][0]["note"])
+        self.assertIn("3 not done: Gmail did not return their senders", r["results"][0]["note"])
+
+    def test_a_failed_sender_read_is_not_remembered_as_someone_elses_mail(self):
+        # Gmail rate-limits the reads during a Delete: those messages are not done yet, not "someone else's", and a
+        # run once Gmail answers again finishes the job instead of serving the failure from the cache
+        self.acc.accs = self.acc.accs[:1]
+        self.g.found = {"from:": ["ab0001", "ab0002"]}
+        self.g.meta = {i: JUNK for i in ("ab0001", "ab0002")}
+        with self.refusing_reads():
+            r = cleanup.sender_action({"addr": JUNK, "action": "delete"})
+        note = r["results"][0]["note"]
+        self.assertNotIn("someone else", note)
+        self.assertIn("2 not done", note)
+        self.assertEqual(self.db.seen, {})
+        r = cleanup.sender_action({"addr": JUNK, "action": "delete"})
+        self.assertEqual([c[3]["ids"] for c in self.g.changes("batchModify")], [["ab0001", "ab0002"]])
+        self.assertNotIn("not done", r["results"][0]["note"])
+
+    def test_a_message_deleted_since_it_was_listed_is_left_alone(self):
+        self.acc.accs = self.acc.accs[:1]
+        self.g.found = {"from:": ["ab0001", "ab0002"]}
+        self.g.meta = {"ab0001": JUNK}                                    # ab0002: Gmail says 404
+        r = cleanup.sender_action({"addr": JUNK, "action": "delete"})
+        self.assertEqual([c[3]["ids"] for c in self.g.changes("batchModify")], [["ab0001"]])
+        self.assertIn("1 sent by someone else (or sender unknown) left alone", r["results"][0]["note"])
+        self.assertFalse(r["partial"])
 
     def test_each_account_gets_its_share_of_the_look_ups(self):
         import gmailops

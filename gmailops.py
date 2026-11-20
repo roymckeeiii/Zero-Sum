@@ -16,8 +16,10 @@ UNDO_REFRESH = 5000  # most restored messages an undo reads back from Gmail (one
 
 # How long a sender read from Gmail is remembered (unified.sender_seen) for mail the local history does not hold, so that
 # a run that is "partly done" does not read the same messages again next time (a message's sender never changes). A
-# read that failed is remembered as unknown only for SEEN_UNKNOWN_MINUTES, then tried again.
+# message with no From address (or deleted since) is remembered as unknown only for SEEN_UNKNOWN_MINUTES, then tried
+# again. A read Gmail refused or did not answer is not remembered at all.
 SEEN_DAYS, SEEN_UNKNOWN_MINUTES = 30, 60
+_FAILED = object()   # senders_of: a read that failed (not the same as a message without a sender)
 
 
 def senders_of(acc_id, ids, budget=None):
@@ -41,18 +43,24 @@ def senders_of(acc_id, ids, budget=None):
         try:
             m = gmail(acc_id, f"/messages/{mid}?format=metadata&metadataHeaders=From")
             return email.utils.parseaddr(header(m.get("payload", {}).get("headers", []), "from"))[1].lower() or None
-        except Exception:  # noqa: BLE001 - unknown stays unknown: the caller leaves that message alone
-            return None
+        except Exception as e:  # noqa: BLE001
+            if ": 404 " in str(e):   # deleted since it was listed: there is no sender to find
+                return None
+            return _FAILED   # quota, 5xx, timeout: not known, and not "unknown" either: asked again next run
     todo = [i for i in ids if i not in who]
     if budget is not None:
         todo = todo[:max(0, budget(len(todo)))]
-    got = dict(zip(todo, CPOOL.map(read, todo)))
+    answers = dict(zip(todo, CPOOL.map(read, todo)))
+    # a failed read is left out of the answer, like a message not looked up: the caller counts it as not done yet
+    # (run it again), not as someone else's mail, and it is not remembered
+    got = {k: v for k, v in answers.items() if v is not _FAILED}
     who.update(got)
-    if got:
+    if answers:
         seen = getattr(_ACTION, "seen", None)
         if seen is not None:   # this request's progress: senders it learned, and reads it spent
-            seen["read"] += len(got)
+            seen["read"] += len(answers)
             seen["known"] += sum(1 for v in got.values() if v)
+    if got:
         try:
             with db() as c:
                 with c.cursor() as cur:
