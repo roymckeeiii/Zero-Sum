@@ -549,7 +549,7 @@ async function loadPlans() {
   if (Object.values(S.sorting).some((x) => x.status === "sorting")) { clearTimeout(S.sortT); S.sortT = setTimeout(loadPlans, 8000); }
   const r = d.running;
   $("#ai-status").textContent = !d.ai ? "AI is not configured on this server." : r.busy ? `Analyzing senders… ${r.done}/${r.total}`
-    : `${d.plans.filter((p) => p.status === "new").length} plan(s) to review.` + (r.error ? ` Last error: ${r.error}` : "");
+    : `${d.plans.filter((p) => OPEN_PLAN.has(p.status)).length} plan(s) to review.` + (r.error ? ` Last error: ${r.error}` : "");
   $("#ai-run").disabled = !d.ai || r.busy;
   clearTimeout(pollT);
   if (r.busy) pollT = setTimeout(loadPlans, 5000);
@@ -561,13 +561,15 @@ async function loadPlans() {
        which emails to keep and which to clear. Nothing changes until you apply a plan.</div>`;
   d.plans.forEach((p, i) => { if (open.has(p.addr)) showPreview(i); });
 }
+const OPEN_PLAN = new Set(["new", "partial"]);
 function planCard(p, i) {
-  const done = p.status !== "new", ai = (p.mode || "words") === "ai", srt = (S.sorting || {})[p.addr];
+  // "partial": applied, but some mail was left for another run: it keeps its editor and Apply button
+  const done = !OPEN_PLAN.has(p.status), ai = (p.mode || "words") === "ai", srt = (S.sorting || {})[p.addr];
   const sampleCounts = {};
   (p.subjects || []).forEach((x) => { const c = classify(x.subject, p); sampleCounts[c.text] = (sampleCounts[c.text] || 0) + x.count; });
   return `<div class="card plan ${done ? "done" : ""}" data-i="${i}" data-addr="${esc(p.addr)}">
     <div class="ph"><div><b>${esc(p.addr)}</b> <span class="note">· ${fmt(p.count)} emails · ${p.accounts.map((a) => acctChip(a.id, a.email)).join("")}</span>
-      ${done ? `<span class="chip">${esc(p.status)}</span>` : ""}<div class="note">${esc(p.reason || "")}</div>
+      ${done ? `<span class="chip">${esc(p.status)}</span>` : p.status === "partial" ? `<span class="chip">partly applied: apply again to continue</span>` : ""}<div class="note">${esc(p.reason || "")}</div>
       ${srt ? `<div class="note">AI sort ${esc(srt.status)}: ${fmt(srt.done)}/${fmt(srt.total)} checked, ${fmt(srt.kept)} kept; the rest → ${GACT[srt.action]}.
         Rule: <i>${esc(srt.rule)}</i> <button data-pa="stop" data-i="${i}">Stop AI sort</button></div>` : ""}</div>
       <div class="grp">${done ? `<button data-pa="undo" data-i="${i}">Review again</button>` : `<button data-pa="skip" data-i="${i}">Skip</button>
@@ -593,7 +595,7 @@ function planCard(p, i) {
 }
 function readCard(i) {  // editor state back into S.plans[i]
   const card = document.querySelector(`#ai-body .plan[data-i="${i}"]`), p = S.plans[i];
-  if (!card || p.status !== "new") return p;
+  if (!card || !OPEN_PLAN.has(p.status)) return p;
   const rule = card.querySelector('[data-f="rule"]');
   if (rule) { if (rule.value !== p.keep_rule) p._verdicts = null; p.keep_rule = rule.value; }
   p.groups = [...card.querySelectorAll(".g[data-gi]")].map((g) => ({ label: g.querySelector('[data-f="label"]').value.trim(),

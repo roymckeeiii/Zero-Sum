@@ -26,6 +26,21 @@ const progress = (ai, total) => ({ collected: 120, mailboxTotal: total, withSubj
     if (ai && !/120<\/b> of 1,000 \(12%\)/.test(prog)) fail(`known total not shown: ${prog}`);
     if (!ai && (/120<\/b> of 0|120 of 0/.test(prog) || !/120<\/b> of unknown/.test(prog) || !/me@x.com: 120 of unknown/.test(prog))) fail(`unknown total shown as 0: ${prog}`);
   }
+  // a partly applied plan keeps its Apply button, so "run it again" is one click; an applied one only offers Review again
+  const plan = (status) => ({ addr: "deals@shop.com", status, count: 9, accounts: [{ id: "a1", email: "me@x.com" }], reason: "",
+    groups: [{ label: "Orders", words: ["order"], action: "keep" }], default: "archive", subjects: [], sampled: 0, mode: "words" });
+  for (const [status, apply] of [["partial", true], ["applied", false], ["new", true]]) {
+    const p = loadPlans();
+    answer("/api/ai/progress", progress(true, 1000));
+    answer("/api/ai/plans", { ai: true, running: { busy: false, done: 0, total: 0 }, plans: [plan(status)] });
+    await tick();
+    answer("/api/ai/sorting", {});
+    await p; await tick(); await tick();
+    const body = String(els["#ai-body"].innerHTML);
+    if (body.includes('data-pa="apply"') !== apply) fail(`${status} plan: Apply button shown=${!apply} expected ${apply}`);
+    if (status === "partial" && !/partly applied/.test(body)) fail(`partial plan not marked: ${body}`);
+    if (status === "partial" && !/1 plan\(s\) to review/.test(String(els["#ai-status"].textContent))) fail("partial plan not counted to review");
+  }
   console.log("AI-TEXTS OK");
   process.exit(0);
 })().catch((e) => { console.log("AI-TEXTS ERROR " + e.stack); process.exit(2); });

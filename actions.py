@@ -677,7 +677,9 @@ def apply_plan(d):
         status = {"keep": "APPROVED", "archive": "AUTO_ARCHIVED", "quarantine": "AUTO_ARCHIVED", "delete": "AUTO_ARCHIVED"}[default]
         for a in acc_ids:
             _newsletter(c, a, addr, status)
-        c.execute("UPDATE unified.ai_plan SET status = 'applied', updated_at = now() WHERE addr = %s", (addr,))
-    partial = lookups_end()
+        partial = lookups_end()
+        # partly done: the plan stays open on the AI tab, with its Apply button, so it can simply be applied again
+        c.execute("UPDATE unified.ai_plan SET status = %s, updated_at = now() WHERE addr = %s",
+                  ("partial" if partial else "applied", addr))
     log("ai-cleanup", f"apply {addr}: " + "; ".join(f"{r['email']}: {r['note']}" for r in results))
     return {"results": results, "partial": partial}

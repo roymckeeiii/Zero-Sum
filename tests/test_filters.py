@@ -223,6 +223,19 @@ class Removed(World):
         self.assertEqual(sorted(k for a, _, addr, k, _ in self.db.filters if addr == S), ["archive", "keep_star"])
         self.assertIn("H1", self.live())
 
+    def test_a_partly_applied_plan_stays_open_to_apply_again(self):
+        import gmailops
+        plan = {"addr": S, "default": "archive", "groups": []}
+        self.db.on("SELECT DISTINCT account_id FROM unified.msg", [("acc1",)])
+        status = lambda: [p[0] for s, p in self.db.said("UPDATE unified.ai_plan SET status")][-1]
+        self.g.found["from:"] = ["ab0001", "ab0002"]
+        self.g.meta = {"ab0001": S, "ab0002": S}
+        with Patched(gmailops, BULK_LOOKUPS=1):
+            self.assertTrue(cleanup.apply_plan(plan)["partial"])
+        self.assertEqual(status(), "partial")
+        self.assertFalse(cleanup.apply_plan(plan)["partial"])
+        self.assertEqual(status(), "applied")
+
     def test_unstar_and_unprotect_remove_only_their_own_filter(self):
         cleanup.sender_action({"addr": S, "action": "star", "accounts": ["acc1"]})
         star = self.live()[-1]

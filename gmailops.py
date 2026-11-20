@@ -238,7 +238,7 @@ def adopt_filters(d=None):
     apply, every = bool(d.get("apply")), bool(d.get("all"))
     prot = protected_set()
     with db() as c:
-        planned = {r[0] for r in c.execute("SELECT addr FROM unified.ai_plan WHERE status = 'applied'").fetchall()}
+        planned = {r[0] for r in c.execute("SELECT addr FROM unified.ai_plan WHERE status IN ('applied', 'partial')").fetchall()}
         handled = {(a, e) for a, e in c.execute('SELECT "emailAccountId", lower(email) FROM "Newsletter" '
                                                 "WHERE status IS NOT NULL").fetchall()}
     out = []
