@@ -358,6 +358,36 @@ def init_db():
     print("init-db: role iz_unified and schema unified are ready", flush=True)
 
 
+def setup_hint(e, during="start"):
+    """One plain sentence for a database error a first run (or a wrong DATABASE_URL) meets, or None."""
+    import psycopg
+    text = str(e).strip().splitlines()[0] if str(e).strip() else type(e).__name__
+    if during == "init-db" and isinstance(e, psycopg.errors.InsufficientPrivilege):
+        return (f"ADMIN_DATABASE_URL may not set up Zero Sum's role and grants ({text}). Use Inbox Zero's owner "
+                "connection (its DIRECT_URL / DATABASE_URL).")
+    if isinstance(e, (psycopg.errors.InvalidSchemaName, psycopg.errors.InsufficientPrivilege)) or (
+            isinstance(e, psycopg.OperationalError) and "password authentication failed" in text):
+        return (f"the database is not set up for Zero Sum yet ({text}). Run `python app.py init-db` once, with "
+                "ADMIN_DATABASE_URL set to Inbox Zero's owner connection, then start the app again. If you already did, "
+                "check that DATABASE_URL points at Inbox Zero's database.")
+    if isinstance(e, psycopg.errors.UndefinedTable):
+        return (f"Inbox Zero's tables are not in this database ({text}). Point ADMIN_DATABASE_URL and DATABASE_URL at "
+                "Inbox Zero's own database, after Inbox Zero has started once (its migrations create the tables).")
+    return None
+
+
+def first_run(step, during="start"):
+    """Run a set-up step; a known first-run database error ends the program with setup_hint, not a traceback."""
+    import psycopg
+    try:
+        return step()
+    except psycopg.Error as e:
+        hint = setup_hint(e, during)
+        if not hint:
+            raise
+        raise SystemExit("zero-sum: " + hint) from None
+
+
 def adopt_filters_cli(args):
     init_schema()
     res = gmailops.adopt_filters({"apply": "--apply" in args, "all": "--all" in args})
@@ -374,13 +404,13 @@ def adopt_filters_cli(args):
 
 if __name__ == "__main__":
     if sys.argv[1:] == ["init-db"]:
-        init_db()
+        first_run(init_db, "init-db")
         raise SystemExit(0)
     if sys.argv[1:2] == ["adopt-filters"]:
-        adopt_filters_cli(sys.argv[2:])
+        first_run(lambda: adopt_filters_cli(sys.argv[2:]))
         raise SystemExit(0)
     mode = sign_in_mode()
-    init_schema()
+    first_run(init_schema)
     if not ALLOWED:
         raise SystemExit("ALLOWED_EMAILS is empty: set it to the address(es) your auth proxy lets in")
     check_upstream_schema()

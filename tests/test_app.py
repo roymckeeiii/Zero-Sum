@@ -320,5 +320,48 @@ class Startup(unittest.TestCase):
             self.assertNotIn('("0.0.0.0"', f.read())
 
 
+class FirstRun(unittest.TestCase):
+    """A database that is not set up yet ends the program with one sentence that says what to do, not a traceback."""
+
+    def fail_with(self, err, during="start"):
+        def step():
+            raise err
+        with self.assertRaises(SystemExit) as e:
+            app.first_run(step, during)
+        return str(e.exception)
+
+    def test_starting_before_init_db_says_to_run_it(self):
+        import psycopg
+        for err in (psycopg.errors.InvalidSchemaName('schema "unified" does not exist'),
+                    psycopg.errors.InsufficientPrivilege("permission denied for schema unified"),
+                    psycopg.OperationalError('connection failed: FATAL:  password authentication failed for user '
+                                             '"iz_unified"')):
+            msg = self.fail_with(err)
+            self.assertIn("python app.py init-db", msg)
+            self.assertNotIn("Traceback", msg)
+
+    def test_init_db_without_inbox_zeros_tables_says_where_to_point_it(self):
+        import psycopg
+        msg = self.fail_with(psycopg.errors.UndefinedTable('relation "Account" does not exist'), "init-db")
+        self.assertIn("Inbox Zero's tables are not in this database", msg)
+        self.assertIn('relation "Account" does not exist', msg)
+        msg = self.fail_with(psycopg.errors.InsufficientPrivilege("must be owner of table Rule"), "init-db")
+        self.assertIn("owner connection", msg)
+
+    def test_other_errors_are_not_hidden(self):
+        import psycopg
+
+        def step():
+            raise psycopg.errors.SyntaxError("syntax error at or near x")
+        with self.assertRaises(psycopg.errors.SyntaxError):
+            app.first_run(step)
+
+    def test_the_entry_point_runs_its_set_up_through_first_run(self):
+        with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app.py")) as f:
+            main = f.read().split('if __name__ == "__main__":')[1]
+        self.assertIn('first_run(init_db, "init-db")', main)
+        self.assertIn("first_run(init_schema)", main)
+
+
 if __name__ == "__main__":
     unittest.main()
