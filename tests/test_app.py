@@ -131,11 +131,12 @@ class Gate(unittest.TestCase):
             self.quiet.old["log_message"](h, '"%s" %s %s', "GET /api/messages?q=x HTTP/1.1", "200", "-")
         self.assertEqual(out.getvalue(), '"GET /api/messages HTTP/1.1" 502 -\n')
 
-    def raw_post(self, length_header, body=b""):
+    def raw_post(self, length_header, body=b"", extra=()):
         c = http.client.HTTPConnection("127.0.0.1", self.srv.server_address[1], timeout=5)
         try:
             c.putrequest("POST", "/api/sender")
-            for k, v in (("Cf-Access-Jwt-Assertion", "good"), ("X-Requested-With", "zero-sum"), ("Content-Length", length_header)):
+            for k, v in (("Cf-Access-Jwt-Assertion", "good"), ("X-Requested-With", "zero-sum"), ("Content-Length", length_header),
+                         *extra):
                 c.putheader(k, v)
             c.endheaders(body)
             r = c.getresponse()
@@ -161,13 +162,19 @@ class Gate(unittest.TestCase):
         # closing with the body unread makes the system send a reset, which can arrive before the 413 / 400 / 403
         self.mode(token=True, header=False)
         drained = []
-        with Patched(app.H, drain=lambda h, s: drained.append(s)):
-            self.assertEqual(self.raw_post(str(app.MAX_BODY + 1), b"{}")[0], 413)
-            self.assertEqual(self.raw_post("-5")[0], 400)
+        # only this test's requests count: an earlier test's handler may still be finishing its own drain
+        probe = ("X-Probe", "drain")
+        with Patched(app.H, drain=lambda h, s: h.headers.get("X-Probe") == "drain" and drained.append(s)):
+            self.assertEqual(self.raw_post(str(app.MAX_BODY + 1), b"{}", [probe])[0], 413)
+            self.assertEqual(self.raw_post("-5", b"", [probe])[0], 400)
             self.assertEqual(self.call("POST", "/api/nope", {"Cf-Access-Jwt-Assertion": "good",
-                                                            "X-Requested-With": "zero-sum"}, {})[0], 400)
-            self.assertEqual(self.call("POST", "/api/sender", {"X-Requested-With": "zero-sum"}, {"a": 1})[0], 403)
-            self.assertEqual(self.call("GET", "/api/accounts", {})[0], 403)    # nothing follows a GET: not drained
+                                                            "X-Requested-With": "zero-sum", "X-Probe": "drain"}, {})[0], 400)
+            self.assertEqual(self.call("POST", "/api/sender", {"X-Requested-With": "zero-sum", "X-Probe": "drain"},
+                                       {"a": 1})[0], 403)
+            self.assertEqual(self.call("GET", "/api/accounts", {"X-Probe": "drain"})[0], 403)   # nothing follows a GET
+            end = time.monotonic() + 2     # a handler drains just after its answer went out: give it a moment
+            while len(drained) < 4 and time.monotonic() < end:
+                time.sleep(0.01)
         self.assertEqual(drained, [app.DRAIN_408] * 4)
 
     def test_a_large_refused_body_still_gets_its_413(self):
