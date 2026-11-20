@@ -333,7 +333,10 @@ docker compose -f docker-compose.yml -f zero-sum/compose.zero-sum.yml up -d
 It listens on `127.0.0.1:3101` (`ZERO_SUM_BIND_HOST` / `ZERO_SUM_PORT`). Point your auth proxy at it. Once `init-db` has
 run, `ADMIN_DATABASE_URL` can be removed from `.env.zero-sum`. If the app is started before `init-db` (or against the
 wrong database), it stops with one line saying to run `init-db`; `init-db` against a database without Inbox Zero's
-tables says to point it at Inbox Zero's own database, after Inbox Zero has started once.
+tables says to point it at Inbox Zero's own database, after Inbox Zero has started once. A refused login is told apart:
+`init-db` with a wrong `ADMIN_DATABASE_URL` user or password says so (running it again would not help), and at start a
+refused `DATABASE_URL` login says that either `init-db` has not run yet or the password in `DATABASE_URL` is not the
+one `init-db` set.
 
 The secrets it shares with Inbox Zero (`EMAIL_ENCRYPT_SECRET`, `EMAIL_ENCRYPT_SALT`, `GOOGLE_CLIENT_ID`,
 `GOOGLE_CLIENT_SECRET`) come from Inbox Zero's own env file (`INBOX_ZERO_ENV_FILE`, default `apps/web/.env`).

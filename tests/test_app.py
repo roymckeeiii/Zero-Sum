@@ -1,6 +1,7 @@
 """app.py's gate, over a real loopback socket: who is signed in (verified Access token, or the plain header only with
 the explicit override), the custom header every POST needs, and the refusal to start without verified sign-in."""
 import contextlib, http.client, io, json, os, socket, sys, threading, time, unittest
+from unittest import mock
 from http.server import ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -361,6 +362,36 @@ class FirstRun(unittest.TestCase):
         self.assertIn('relation "Account" does not exist', msg)
         msg = self.fail_with(psycopg.errors.InsufficientPrivilege("must be owner of table Rule"), "init-db")
         self.assertIn("owner connection", msg)
+
+    def test_a_refused_password_is_not_called_a_missing_set_up(self):
+        import psycopg
+        refused = 'connection failed: FATAL:  password authentication failed for user "postgres"'
+        err = psycopg.OperationalError(refused)
+        err.zs_conn = "admin"
+        msg = self.fail_with(err, "init-db")
+        self.assertIn("ADMIN_DATABASE_URL was refused: wrong user or password", msg)
+        self.assertNotIn("not set up", msg)
+        err = psycopg.OperationalError(refused.replace("postgres", "iz_unified"))
+        msg = self.fail_with(err)            # at start: the password in DATABASE_URL may be the wrong one
+        self.assertIn("refused DATABASE_URL's login", msg)
+        self.assertIn("fix DATABASE_URL", msg)
+        self.assertNotIn("not set up", msg)
+        err = psycopg.errors.InsufficientPrivilege("permission denied for schema unified")
+        err.zs_conn = "app"                  # init_schema after the grants: not ADMIN_DATABASE_URL's fault
+        msg = self.fail_with(err, "init-db")
+        self.assertIn("ALTER SCHEMA unified OWNER TO iz_unified", msg)
+        self.assertNotIn("ADMIN_DATABASE_URL may not", msg)
+
+    def test_init_db_marks_which_connection_failed(self):
+        import psycopg
+
+        def refuse(*a, **k):
+            raise psycopg.OperationalError("password authentication failed for user \"postgres\"")
+        env = {"ADMIN_DATABASE_URL": "postgresql://postgres:x@h/db", "DATABASE_URL": "postgresql://iz_unified:pw@h/db"}
+        with mock.patch.dict(os.environ, env), mock.patch.object(psycopg, "connect", refuse):
+            with self.assertRaises(SystemExit) as e:
+                app.first_run(app.init_db, "init-db")
+        self.assertIn("ADMIN_DATABASE_URL was refused", str(e.exception))
 
     def test_other_errors_are_not_hidden(self):
         import psycopg

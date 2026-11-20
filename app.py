@@ -369,22 +369,55 @@ def init_db():
     pw = urllib.parse.urlparse(os.environ["DATABASE_URL"]).password
     if not pw:
         raise SystemExit("DATABASE_URL must contain the iz_unified password (postgresql://iz_unified:<password>@...)")
-    with open(os.path.join(HERE, "grants.sql")) as f, psycopg.connect(admin, autocommit=True) as c:
-        c.execute(f.read())
-        c.execute(sql.SQL("ALTER ROLE iz_unified WITH LOGIN PASSWORD {}").format(sql.Literal(pw)))
-    init_schema()
+    try:
+        with open(os.path.join(HERE, "grants.sql")) as f, psycopg.connect(admin, autocommit=True) as c:
+            c.execute(f.read())
+            c.execute(sql.SQL("ALTER ROLE iz_unified WITH LOGIN PASSWORD {}").format(sql.Literal(pw)))
+    except psycopg.Error as e:
+        e.zs_conn = "admin"   # which connection failed, for setup_hint
+        raise
+    try:
+        init_schema()
+    except psycopg.Error as e:
+        e.zs_conn = "app"
+        raise
     print("init-db: role iz_unified and schema unified are ready", flush=True)
 
 
+def _refused(e, text):
+    """True for a login the server refused: a wrong password (Postgres says the same when the role does not exist), or
+    none given where one is needed."""
+    import psycopg
+    return isinstance(e, psycopg.OperationalError) and any(
+        x in text for x in ("password authentication failed", "no password supplied"))
+
+
 def setup_hint(e, during="start"):
-    """One plain sentence for a database error a first run (or a wrong DATABASE_URL) meets, or None."""
+    """One plain sentence for a database error a first run (or a wrong DATABASE_URL) meets, or None. A refused login
+    (wrong password) and a database that is simply not set up yet get different instructions: running init-db again
+    does not help when ADMIN_DATABASE_URL itself is refused."""
     import psycopg
     text = str(e).strip().splitlines()[0] if str(e).strip() else type(e).__name__
+    conn = getattr(e, "zs_conn", None)   # init-db: "admin" (ADMIN_DATABASE_URL) or "app" (DATABASE_URL, after the grants)
+    if during == "init-db" and _refused(e, text):
+        if conn == "app":
+            return (f"DATABASE_URL was refused right after init-db set the iz_unified password ({text}). Check that "
+                    "DATABASE_URL and ADMIN_DATABASE_URL point at the same database server and database.")
+        return (f"ADMIN_DATABASE_URL was refused: wrong user or password ({text}). Set it to Inbox Zero's owner "
+                "connection (its DIRECT_URL / DATABASE_URL, with that password) and run init-db again.")
     if during == "init-db" and isinstance(e, psycopg.errors.InsufficientPrivilege):
+        if conn == "app":
+            return (f"the iz_unified role may not create Zero Sum's tables ({text}). The schema \"unified\" probably "
+                    "belongs to another role: as Inbox Zero's owner run ALTER SCHEMA unified OWNER TO iz_unified, "
+                    "then init-db again.")
         return (f"ADMIN_DATABASE_URL may not set up Zero Sum's role and grants ({text}). Use Inbox Zero's owner "
                 "connection (its DIRECT_URL / DATABASE_URL).")
-    if isinstance(e, (psycopg.errors.InvalidSchemaName, psycopg.errors.InsufficientPrivilege)) or (
-            isinstance(e, psycopg.OperationalError) and "password authentication failed" in text):
+    if _refused(e, text):
+        return (f"the database refused DATABASE_URL's login for iz_unified ({text}). Either init-db has not been run "
+                "yet (it creates that role and sets its password: run `python app.py init-db` once, with "
+                "ADMIN_DATABASE_URL set to Inbox Zero's owner connection), or the password in DATABASE_URL is not the "
+                "one init-db set: fix DATABASE_URL, or run init-db again with this DATABASE_URL to set it.")
+    if isinstance(e, (psycopg.errors.InvalidSchemaName, psycopg.errors.InsufficientPrivilege)):
         return (f"the database is not set up for Zero Sum yet ({text}). Run `python app.py init-db` once, with "
                 "ADMIN_DATABASE_URL set to Inbox Zero's owner connection, then start the app again. If you already did, "
                 "check that DATABASE_URL points at Inbox Zero's database.")
