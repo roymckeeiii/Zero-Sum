@@ -347,6 +347,12 @@ def sync(apply=True, only_account=None, confirm=None, auto=False):
                     for k, v in put:
                         _put(c, k, v)
                     if why and allow["removals"]:   # confirmed: the new master's rules are no longer copies
+                        # their rule_map rows were all that kept the backups of that account's own earlier rules
+                        # (saved when they were adopted) from being pruned: keep those backups for good first
+                        c.execute("UPDATE unified.rule_backup SET reason = %s || reason WHERE account_id = %s AND "
+                                  "rule_id IN (SELECT target_rule_id FROM unified.rule_map WHERE account_id = %s) "
+                                  "AND reason NOT LIKE %s",
+                                  (KEEP_PREFIX, master["id"], master["id"], KEEP_PREFIX + "%"))
                         c.execute("DELETE FROM unified.rule_map WHERE account_id = %s", (master["id"],))
         return {"ops": ops, "applied": apply,
                 "masterChanged": {"from": prev, "to": master["email"], "detail": why} if why else None}
@@ -531,13 +537,15 @@ def _prune_backups(c):
 def backups():
     """The saved rules, newest first, for the accounts this app may use (ACCOUNT_OWNERS). Sync only ever saves rules of
     the accounts it copies to, so a backup of the master's account is from before MASTER_EMAIL moved to it: shown
-    too, so that account's own earlier rules can still be put back."""
+    too, so that account's own earlier rules can still be put back. The newest 200, and every kept backup however
+    old (those are never pruned, so they must stay reachable)."""
     accs = {a["id"]: a["email"] for a in ACC.list()}
     with db() as c:
         rows = c.execute("SELECT b.id, b.at, b.account_id, b.rule_id, b.reason, b.rule->>'name', "
                          'EXISTS (SELECT 1 FROM "Rule" r WHERE r.id = b.rule_id AND r."emailAccountId" = b.account_id) '
-                         "FROM unified.rule_backup b WHERE b.account_id = ANY(%s) ORDER BY b.id DESC LIMIT 200",
-                         (list(accs),)).fetchall()
+                         "FROM unified.rule_backup b WHERE b.account_id = ANY(%s) AND (b.reason LIKE %s OR b.id IN "
+                         "(SELECT id FROM unified.rule_backup WHERE account_id = ANY(%s) ORDER BY id DESC LIMIT 200)) "
+                         "ORDER BY b.id DESC", (list(accs), KEEP_PREFIX + "%", list(accs))).fetchall()
     return {"backups": [{"id": i, "at": at.isoformat() if hasattr(at, "isoformat") else at, "account": accs[a],
                          "rule": name, "reason": reason, "exists": bool(ex)} for i, at, a, _, reason, name, ex in rows]}
 

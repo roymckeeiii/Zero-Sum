@@ -414,6 +414,20 @@ class Removals(World):
         self.assertEqual(self.map, [])
         self.assertEqual(self.db.said("DELETE FROM unified.rule_map WHERE account_id = %s")[-1][1], ("acc1",))
 
+    def test_a_confirmed_master_change_keeps_the_new_masters_adopted_backups_from_pruning_first(self):
+        # acc1's own rule was adopted while it was a target; its backup was protected only by the rule_map row
+        self.settings = {"rules_master": "two@x.com", "rules_master_id": "acc2"}
+        self.rules["acc1"] = [rule("c1", "R1")]
+        self.include = set()
+        self.map = [("a1", "acc1", "c1", "h", True)]
+        rulesync.sync(confirm=["master-change"])
+        sql = [s for s, _ in self.db.sql]
+        keep = [i for i, s in enumerate(sql) if s.startswith("UPDATE unified.rule_backup SET reason")]
+        drop = sql.index("DELETE FROM unified.rule_map WHERE account_id = %s")
+        self.assertTrue(keep and keep[0] < drop, sql)
+        self.assertIn("SELECT target_rule_id FROM unified.rule_map WHERE account_id = %s", sql[keep[0]])
+        self.assertEqual(self.db.sql[keep[0]][1], (rulesync.KEEP_PREFIX, "acc1", "acc1", rulesync.KEEP_PREFIX + "%"))
+
     def test_the_master_account_id_is_recorded(self):
         self.settings = {"rules_master": "master@x.com"}
         rulesync.sync()
@@ -486,6 +500,15 @@ class Restore(World):
         self.row = ("acc1", "r1", {"name": "Mine", "enabled": True}, [])
         self.assertEqual(rulesync.restore({"id": 5})["account"], "master@x.com")
         self.assertEqual(self.db.said('INSERT INTO "Rule"')[0][1][:2], ["r1", "acc1"])
+
+    def test_kept_backups_stay_listed_however_old(self):
+        seen = []
+        self.db.on("FROM unified.rule_backup b WHERE b.account_id = ANY", lambda p: seen.append(p) or [])
+        rulesync.backups()
+        sql = self.db.said("FROM unified.rule_backup b WHERE b.account_id = ANY")[0][0]
+        self.assertIn("b.reason LIKE %s OR b.id IN", sql)
+        self.assertNotIn("ORDER BY b.id DESC LIMIT", sql)
+        self.assertEqual(seen[0][1], rulesync.KEEP_PREFIX + "%")
 
     def test_a_name_clash_is_refused_before_anything_is_written(self):
         self.rules["acc2"] = [rule("old1", "Receipts"), rule("x", "Mine")]
