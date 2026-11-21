@@ -5,7 +5,7 @@ AES-256-GCM, key = scrypt(EMAIL_ENCRYPT_SECRET, EMAIL_ENCRYPT_SALT, 32) with Nod
 stored as hex IV(16) + tag(16) + ciphertext. Refreshed access tokens are kept in memory only: this app never writes
 the Account table, so it cannot break Inbox Zero's own logins.
 """
-import hashlib, json, os, re, secrets, string, threading, time, urllib.error, urllib.parse, urllib.request
+import hashlib, json, os, random, re, secrets, string, threading, time, urllib.error, urllib.parse, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 import psycopg
@@ -13,6 +13,9 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me"
 MASTER = os.environ.get("MASTER_EMAIL", "").strip().lower()  # whose rules are copied to the others; empty = no rule sync
+# Optional tenant scope: Inbox Zero user ids and/or login e-mails whose linked mailboxes this app may use. Empty (the
+# default) = every Google mailbox in the database, as before: fine when the Inbox Zero instance has one user.
+OWNERS = [x.strip() for x in os.environ.get("ACCOUNT_OWNERS", "").split(",") if x.strip()]
 POOL = ThreadPoolExecutor(max_workers=24)
 _key = None
 
@@ -53,6 +56,19 @@ def decrypt(value):
         return None
 
 
+def accounts_query(owners=None):
+    """(sql, params) for the one query that decides which mailboxes exist for this app."""
+    owners = OWNERS if owners is None else owners
+    sql = ('SELECT ea.id, ea.email, ea.name, a.access_token, a.refresh_token, a.expires_at '
+           'FROM "EmailAccount" ea JOIN "Account" a ON a.id = ea."accountId" WHERE a.provider = \'google\'')
+    params = ()
+    if owners:
+        sql += (' AND (ea."userId" = ANY(%s) OR ea."userId" IN '
+                '(SELECT u.id FROM "User" u WHERE lower(u.email) = ANY(%s)))')
+        params = ([o for o in owners if "@" not in o], [o.lower() for o in owners if "@" in o])
+    return sql + " ORDER BY ea.email", params
+
+
 class Accounts:
     """The linked Gmail accounts (EmailAccount + its Google Account row), cached for a minute."""
 
@@ -63,10 +79,8 @@ class Accounts:
         with self.lock:
             if time.time() - self.at > 60:
                 with db() as c:
-                    self.rows = [dict(zip(("id", "email", "name", "access", "refresh", "expires"), r)) for r in c.execute(
-                        'SELECT ea.id, ea.email, ea.name, a.access_token, a.refresh_token, a.expires_at '
-                        'FROM "EmailAccount" ea JOIN "Account" a ON a.id = ea."accountId" '
-                        "WHERE a.provider = 'google' ORDER BY ea.email").fetchall()]
+                    self.rows = [dict(zip(("id", "email", "name", "access", "refresh", "expires"), r))
+                                 for r in c.execute(*accounts_query()).fetchall()]
                 self.at = time.time()
 
     def list(self):
@@ -122,6 +136,7 @@ class Bucket:
 
     def __init__(self):
         self.lock, self.tokens, self.at = threading.Lock(), self.RATE * 5, time.monotonic()
+        self.spare_after = 0.0   # spare() lets no other caller go before this (monotonic seconds)
 
     def take(self, cost):
         while True:
@@ -135,8 +150,38 @@ class Bucket:
                 wait = (cost - self.tokens) / self.RATE
             time.sleep(wait)
 
+    def spare(self, timeout, cost=0):
+        """Wait until the bucket is at least half full, i.e. nothing else is spending this account's quota right now,
+        and take nothing. True when it is, False after `timeout` seconds. `cost` is about how many units the caller
+        spends next: no other spare() caller is let go until the bucket has had time to earn them back (cost / RATE
+        seconds), so several jobs waiting on the same account start one after another, not all at once.
+        Background work calls this before each small step, so it only starts a step while the quota is idle. Nothing
+        is reserved: a request (or the collector) starting during that step shares the bucket with it for those few
+        seconds."""
+        end = time.monotonic() + timeout
+        while True:
+            with self.lock:
+                now = time.monotonic()
+                self.tokens = min(self.RATE * 5, self.tokens + (now - self.at) * self.RATE)
+                self.at = now
+                if self.tokens >= self.RATE * 2.5 and now >= self.spare_after:
+                    self.spare_after = now + cost / self.RATE
+                    return True
+                wait = max((self.RATE * 2.5 - self.tokens) / self.RATE, self.spare_after - now)
+            left = end - time.monotonic()
+            if left <= 0:
+                return False
+            time.sleep(min(wait + random.uniform(0.1, 0.5), left))   # spread out: waiters do not all wake together
+
 
 _buckets, _bucket_lock = {}, threading.Lock()
+
+
+def gmail_spare(account_id, timeout=300, cost=0):
+    """Bucket.spare for one account: wait until its Gmail quota is not being used by anything else."""
+    with _bucket_lock:
+        bucket = _buckets.setdefault(account_id, Bucket())
+    return bucket.spare(timeout, cost)
 
 
 def _cost(method, path):
@@ -151,6 +196,12 @@ def _cost(method, path):
     return 5
 
 
+def _idempotent(method, path):
+    """Can this request be sent twice with the same result as once?"""
+    return method in ("GET", "PUT", "DELETE") or path.split("?")[0].rsplit("/", 1)[-1] in (
+        "batchModify", "modify", "trash", "untrash")
+
+
 def gmail(account_id, path, method="GET", body=None, retry=True):
     with _bucket_lock:
         bucket = _buckets.setdefault(account_id, Bucket())
@@ -158,22 +209,43 @@ def gmail(account_id, path, method="GET", body=None, retry=True):
                                  data=json.dumps(body).encode() if body is not None else None,
                                  headers={"Authorization": f"Bearer {ACC.token(account_id, force=not retry)}",
                                           "Content-Type": "application/json"})
-    for attempt in range(6):
+    maybe_applied = False   # an earlier try got an answer that does not say whether Gmail did the work
+    attempt, refreshed = 0, not retry
+    while True:
         bucket.take(_cost(method, path))
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 raw = resp.read()
                 return json.loads(raw) if raw else {}
         except urllib.error.HTTPError as e:
-            if e.code == 401 and retry:
-                return gmail(account_id, path, method, body, retry=False)
+            if e.code == 401 and not refreshed:
+                # asked again here with a fresh token, so what the earlier tries may have done (maybe_applied) is kept
+                refreshed = True
+                req.add_header("Authorization", f"Bearer {ACC.token(account_id, force=True)}")
+                continue
             detail = e.read()[:300].decode("utf-8", "replace")
             low = detail.lower()
             limited = e.code == 429 or (e.code == 403 and ("ratelimit" in low.replace(" ", "") or "quota exceeded" in low))
-            if (limited or e.code in (500, 503)) and attempt < 5:  # quota is per minute: back off up to a minute
+            # 502 / 504: a gateway gave up, but Gmail may have done the work: asked again only when doing it twice is
+            # harmless (a read, a label change); a new filter or label would be made twice, or fail as "exists"
+            busy = e.code in (500, 503) or (e.code in (502, 504) and _idempotent(method, path))
+            if (limited or busy) and attempt < 5:  # quota is per minute: back off up to a minute
+                # a rate limit is a refusal (nothing was done); a 5xx may come after the work was done
+                maybe_applied = maybe_applied or busy
                 time.sleep(min(60, 4 * 2 ** attempt) if limited else 2 ** attempt)
+                attempt += 1
                 continue
-            raise RuntimeError(f"Gmail {method} {path.split('?')[0]}: {e.code} {detail}") from None
+            err = RuntimeError(f"Gmail {method} {path.split('?')[0]}: {e.code} {detail}")
+            err.retried = maybe_applied   # this answer came to a repeat of a try that may have been applied
+            raise err from None
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            # no answer at all (reset, timeout, DNS): a read is simply asked again; a change is not, since Gmail may
+            # have applied it before the connection dropped, and the caller decides what to do about that
+            if method == "GET" and attempt < 5:
+                time.sleep(2 ** attempt)
+                attempt += 1
+                continue
+            raise
 
 
 def gmail_list(account_id, path, key_, limit):
@@ -212,8 +284,16 @@ def label_id(account_id, name, create=True):
             return lid
     if not create:
         return None
-    d = gmail(account_id, "/labels", "POST", {"name": name, "labelListVisibility": "labelShow",
-                                               "messageListVisibility": "show"})
+    try:
+        d = gmail(account_id, "/labels", "POST", {"name": name, "labelListVisibility": "labelShow",
+                                                   "messageListVisibility": "show"})
+    except RuntimeError as e:   # made meanwhile (or by a first try whose answer was lost): use that one
+        if ": 409 " not in str(e) and "exists" not in str(e).lower():
+            raise
+        found = [lid for lid, n in labels(account_id, fresh=True).items() if n.lower() == name.lower()]
+        if not found:
+            raise
+        return found[0]
     labels(account_id, fresh=True)
     return d["id"]
 
@@ -233,6 +313,9 @@ CREATE TABLE IF NOT EXISTS unified.rule_map (
   hash text NOT NULL, synced_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (master_rule_id, account_id));
 CREATE TABLE IF NOT EXISTS unified.rule_include (
   master_rule_id text NOT NULL, account_id text NOT NULL, PRIMARY KEY (master_rule_id, account_id));
+ALTER TABLE unified.rule_map ADD COLUMN IF NOT EXISTS adopted boolean NOT NULL DEFAULT false;
+ALTER TABLE unified.rule_include ADD COLUMN IF NOT EXISTS outbound boolean NOT NULL DEFAULT false;
+ALTER TABLE unified.rule_include ADD COLUMN IF NOT EXISTS outbound_key text;
 CREATE TABLE IF NOT EXISTS unified.log (
   id bigserial PRIMARY KEY, at timestamptz NOT NULL DEFAULT now(), kind text NOT NULL, account text, msg text NOT NULL);
 CREATE TABLE IF NOT EXISTS unified.settings (k text PRIMARY KEY, v text NOT NULL);
@@ -250,11 +333,22 @@ CREATE TABLE IF NOT EXISTS unified.ai_plan (
 CREATE TABLE IF NOT EXISTS unified.ai_sort (
   addr text PRIMARY KEY, rule text NOT NULL, action text NOT NULL, last_ts timestamptz, status text NOT NULL DEFAULT 'sorting',
   done int NOT NULL DEFAULT 0, total int NOT NULL DEFAULT 0, kept int NOT NULL DEFAULT 0, updated_at timestamptz NOT NULL DEFAULT now());
+ALTER TABLE unified.ai_sort ADD COLUMN IF NOT EXISTS retries int NOT NULL DEFAULT 0;
 CREATE TABLE IF NOT EXISTS unified.protected (
   key text PRIMARY KEY, created_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS unified.action_log (
   id bigserial PRIMARY KEY, at timestamptz NOT NULL DEFAULT now(), account_id text NOT NULL, note text NOT NULL DEFAULT '',
   add_labels text[] NOT NULL, remove_labels text[] NOT NULL, ids text[] NOT NULL, undone_at timestamptz);
+CREATE TABLE IF NOT EXISTS unified.rule_backup (
+  id bigserial PRIMARY KEY, at timestamptz NOT NULL DEFAULT now(), account_id text NOT NULL, rule_id text NOT NULL,
+  reason text NOT NULL DEFAULT '', rule jsonb NOT NULL, actions jsonb NOT NULL);
+CREATE TABLE IF NOT EXISTS unified.filter (
+  account_id text NOT NULL, filter_id text NOT NULL, addr text NOT NULL, kind text NOT NULL, source text NOT NULL DEFAULT '',
+  created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (account_id, filter_id));
+CREATE INDEX IF NOT EXISTS filter_addr ON unified.filter (addr);
+CREATE TABLE IF NOT EXISTS unified.sender_seen (
+  account_id text NOT NULL, id text NOT NULL, from_addr text, seen_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (account_id, id));
 CREATE TABLE IF NOT EXISTS unified.collect_state (
   account_id text PRIMARY KEY, newest timestamptz, oldest timestamptz, backfill_done boolean NOT NULL DEFAULT false,
   updated_at timestamptz NOT NULL DEFAULT now(), error text);

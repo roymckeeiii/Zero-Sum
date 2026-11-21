@@ -14,7 +14,8 @@ TEAM = os.environ.get("CF_ACCESS_TEAM_DOMAIN", "").strip().lower().removeprefix(
 AUD = os.environ.get("CF_ACCESS_AUD", "").strip()
 ENABLED = bool(TEAM and AUD)
 CERT_TTL, LEEWAY = 3600, 60
-_keys, _fetched, _lock = {}, 0.0, threading.Lock()
+REFETCH_MIN, RETRY_AFTER = 60, 60   # seconds between refetches for an unknown kid; before retrying a failed fetch
+_keys, _fetched, _retry_at, _lock = {}, 0.0, 0.0, threading.Lock()
 
 
 def _b64(s):
@@ -34,15 +35,22 @@ def _fetch_keys():
 
 def keys(force=False):
     """Access's signing keys by kid, refetched hourly. A failed fetch keeps the keys already held (a Cloudflare blip
-    must not lock the owner out); with none held yet, nobody gets in."""
-    global _keys, _fetched
+    must not lock the owner out); with none held yet, nobody gets in.
+
+    Every request is checked here, signed in or not, under one lock. So a token naming an unknown kid (`force`, for
+    a rotated key) refetches at most once a minute, and a failed fetch is retried after a minute, not on every
+    request: otherwise anyone who can reach the port could make each request wait on a fetch to Cloudflare, and
+    hold up everyone else's sign-in behind it."""
+    global _keys, _fetched, _retry_at
     with _lock:
-        if force or not _keys or time.time() - _fetched > CERT_TTL:
+        now = time.time()
+        due = not _keys or now - _fetched > CERT_TTL or (force and now - _fetched > REFETCH_MIN)
+        if due and now >= _retry_at:
             try:
-                _keys, _fetched = _fetch_keys(), time.time()
+                _keys, _fetched = _fetch_keys(), now
             except Exception as e:  # noqa: BLE001
                 print(f"[access] could not fetch certs: {e}", flush=True)
-                _fetched = time.time() - CERT_TTL + 60  # try again in a minute
+                _retry_at = now + RETRY_AFTER
         return _keys
 
 

@@ -8,9 +8,9 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&display=swap">
 <style>
 :root { color-scheme:light; /* Inbox Zero / shadcn-ui slate theme */
-  --bg:#ffffff; --panel:#ffffff; --side:#fafafa; --line:#e2e8f0; --text:#0f172a; --muted:#64748b; --faint:#94a3b8;
+  --bg:#ffffff; --panel:#ffffff; --side:#fafafa; --line:#e2e8f0; --text:#0f172a; --muted:#5d6b7f; --faint:#94a3b8;
   --accent:#0f172a; --accent-t:#f8fafc; --link:#2563eb; --hover:#f1f5f9; --chip:#f1f5f9; --rule:#dbeafe; --rule-t:#1e40af;
-  --err:#dc2626; --danger:#ef4444; --ok:#15803d; --bar:#3b82f6; --grid:#e2e8f0; --ring:#94a3b8;
+  --err:#b91c1c; --danger:#dc2626; --ok:#15803d; --bar:#3b82f6; --grid:#e2e8f0; --ring:#94a3b8;
   --shadow:0 1px 2px rgba(15,23,42,.05); --radius:8px;
   --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a; --s4:#eda100; --s5:#e87ba4; --s6:#008300; --s7:#6250d6; --s8:#e34948; --s9:#94a3b8; }
 @media (prefers-color-scheme: dark) { :root { color-scheme:dark;
@@ -102,7 +102,8 @@ td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
 .row .snip { color:var(--muted); }
 .row.unread .from, .row.unread .subj { font-weight:650; }
 .row .acts { grid-column:3; grid-row:1; display:none; gap:4px; }
-.row:hover .acts { display:flex; } .row:hover .when { display:none; }
+.row:hover .acts, .row:focus-within .acts { display:flex; } .row:hover .when, .row:focus-within .when { display:none; }
+.row:focus-visible, td.who:focus-visible, #accounts a:focus-visible { outline:2px solid var(--ring); outline-offset:-2px; }
 .row .acts button { padding:1px 6px; font-size:12px; }
 #more { margin:12px; }
 #reader { background:var(--panel); display:flex; flex-direction:column; }
@@ -118,7 +119,9 @@ td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
 .st { font-size:11px; padding:1px 8px; border-radius:9999px; font-weight:500; }
 .st.synced { background:var(--rule); color:var(--rule-t); }
 .st.pending, .st.changed { background:#fff1d6; color:#7a4b00; }
-.st.removing { background:var(--chip); color:var(--faint); }
+.st.removing { background:var(--chip); color:var(--muted); }  /* --faint is below 4.5:1 for small text */
+.st.not-sending { background:#fde2e1; color:#8a1c14; }
+@media (prefers-color-scheme: dark) { .st.not-sending { background:#3d1714; color:#f4a29b; } }
 @media (prefers-color-scheme: dark) { .st.pending, .st.changed { background:#3a2c0f; color:#f3c26b; } }
 .ops li { margin:2px 0; }
 .qgroup { background:var(--panel); border:1px solid var(--line); border-radius:8px; margin-bottom:10px; }
@@ -143,6 +146,7 @@ tr.peek-row td { background:var(--side); padding:8px 12px 12px; }
   .chip.act-delete { background:#450a0a; color:#fca5a5; border-color:#7f1d1d; } }
 .plan .ph { display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; align-items:flex-start; }
 .plan.done { opacity:.7; }
+.plan .chip.partial { white-space:normal; max-width:100%; border-radius:10px; }
 .plan .groups { display:flex; flex-direction:column; gap:6px; margin:12px 0 8px; }
 .plan .g { display:grid; grid-template-columns:160px 1fr 150px 36px; gap:8px; align-items:center; }
 .plan .g input { height:34px; padding:0 10px; border:1px solid var(--line); border-radius:6px; background:var(--panel); color:var(--text); font:inherit; }
@@ -156,7 +160,7 @@ tr.peek-row td { background:var(--side); padding:8px 12px 12px; }
 .plan label.rule { display:flex; flex-direction:column; gap:6px; color:var(--text); white-space:normal; align-items:stretch; }
 .plan textarea { font:inherit; padding:8px 10px; border:1px solid var(--line); border-radius:6px; background:var(--panel); color:var(--text); resize:vertical; }
 .plan details summary { cursor:pointer; color:var(--link); font-size:13px; margin:6px 0; }
-@media (max-width: 900px) { .plan .g { grid-template-columns:1fr 1fr; } }
+@media (max-width: 900px) { .plan .g { grid-template-columns:minmax(0,1fr) minmax(0,1fr); } .plan .g > * { min-width:0; } }
 dialog#dlg { border:1px solid var(--line); border-radius:12px; padding:20px 22px; max-width:640px; width:calc(100% - 32px);
   background:var(--panel); color:var(--text); box-shadow:0 10px 40px rgba(15,23,42,.25); }
 dialog#dlg::backdrop { background:rgba(15,23,42,.45); }
@@ -178,12 +182,67 @@ select.cleanup { padding:3px 6px; font-size:12px; }
 #toast button { background:none; color:var(--panel); border:1px solid currentColor; }
 @media (max-width: 900px) {
   #v-inbox.on { grid-template-columns:1fr; grid-template-rows:auto 1fr; }
-  #accounts { display:flex; overflow-x:auto; border-right:0; border-bottom:1px solid var(--line); padding:0; }
-  #accounts a { flex:none; } #accounts .tools { display:none; }
+  #accounts { display:flex; flex-wrap:wrap; border-right:0; border-bottom:1px solid var(--line); padding:4px; }
+  #accounts a { flex:none; max-width:100%; }
+  /* search, scope and Unread only stay usable on a phone: a full-width row under the accounts */
+  #accounts .tools { flex:1 1 100%; flex-direction:row; flex-wrap:wrap; align-items:center; padding:4px; }
+  #accounts .tools input[type=search] { flex:1 1 160px; min-width:0; }
+  /* the tab bar scrolls sideways instead of pushing Analytics and Rules off the screen */
+  header .tabs { max-width:100%; overflow-x:auto; } .tabs button { flex:none; white-space:nowrap; }
   #reader { display:none; position:fixed; inset:0; z-index:5; }
   body.reading #reader { display:flex; } .mobile { display:inline-block; }
   .grid2 { grid-template-columns:1fr; }
   .wide { overflow-x:auto; }
+}
+/* phone: each sender is a card, its numbers on one line and its actions under it, so nothing needs sideways scrolling */
+@media (max-width: 600px) {
+  #c-table thead { display:none; }
+  #c-table table, #c-table tbody { display:block; }
+  #c-table tbody tr { display:flex; flex-wrap:wrap; align-items:baseline; gap:2px 10px; padding:8px;
+    border-bottom:1px solid var(--line); }
+  #c-table tbody tr:last-child { border-bottom:0; }
+  #c-table tbody tr:hover { background:var(--hover); } #c-table tbody tr:hover td { background:none; }
+  #c-table td { border:0; padding:0; }
+  /* name and date on the first line, the numbers and accounts on the next, then one line of actions */
+  #c-table td.who { flex:0 0 calc(100% - 82px); min-width:0; overflow-wrap:anywhere; }
+  #c-table td.last { order:1; flex:0 0 72px; text-align:right; font-size:12px; }
+  #c-table td.num, #c-table td.accs { order:2; }
+  #c-table td.num { text-align:left; font-size:12px; }
+  #c-table td[data-k]::before { content:attr(data-k) " "; color:var(--muted); }
+  #c-table td.acts-cell { order:3; flex:1 1 100%; display:flex; flex-wrap:wrap; gap:3px; align-items:center; margin-top:4px; }
+  #c-table td.acts-cell .grp { display:contents; }
+  #c-table td.acts-cell button, #c-table td.acts-cell select { height:32px; padding:0 5px; font-size:12px; }
+  #c-table td.acts-cell select { max-width:96px; padding:0 2px; }
+  #c-table tr.peek-row td { flex:1 1 100%; }
+  /* peek and Quarantine rows: the subject gets the whole first line (up to two), account and date go under it */
+  .peek .pm { display:flex; flex-wrap:wrap; gap:2px 8px; padding:6px 8px; }
+  .peek .pm .s, .qgroup .qm .s { white-space:normal; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2;
+    overflow-wrap:anywhere; }
+  .peek .pm .s { flex:1 1 100%; order:-1; }
+  .peek .pm > .note:last-child { margin-left:auto; }
+  .qgroup .qm { grid-template-columns:auto 1fr auto; gap:2px 8px; padding:6px 10px; }
+  .qgroup .qm > input { grid-row:1 / span 2; }
+  .qgroup .qm > .s { grid-column:2 / 4; grid-row:1; }
+  .qgroup .qm > .chip { grid-column:2; grid-row:2; justify-self:start; }
+  .qgroup .qm > .note { grid-column:3; grid-row:2; }
+  .qgroup .qh .who { min-width:0; flex:1 1 calc(100% - 40px); overflow-wrap:anywhere; }
+  .qgroup .qh button { height:32px; padding:0 8px; font-size:12px; }
+  /* Quarantine toolbar: two even columns instead of a ragged wrap */
+  #q-bar { display:grid; grid-template-columns:1fr 1fr; }
+  #q-bar #q-summary { grid-column:1 / -1; } #q-bar .spacer { display:none; }
+  #q-bar button { padding:0 6px; font-size:13px; } #q-bar #q-refresh { grid-column:1 / -1; order:1; }
+  .tiles { grid-template-columns:1fr 1fr; gap:8px; } .tile { padding:10px 12px; } .tile .v { font-size:22px; }
+  /* Analytics by account: one card per account, each number named */
+  table.acct-table thead { display:none; }
+  table.acct-table, table.acct-table tbody { display:block; border:0; box-shadow:none; }
+  table.acct-table tr { display:flex; flex-wrap:wrap; gap:2px 12px; padding:8px 0; border-bottom:1px solid var(--line); }
+  table.acct-table tr:last-child { border-bottom:0; }
+  table.acct-table td { border:0; padding:0; font-size:12px; }
+  table.acct-table td:first-child { flex:1 1 100%; font-size:14px; font-weight:500; overflow-wrap:anywhere; }
+  table.acct-table td[data-k]::before { content:attr(data-k) " "; color:var(--muted); }
+  /* reader: compact buttons, without the keyboard hints */
+  #reader .tools { gap:4px; } #reader .tools button { height:32px; padding:0 8px; font-size:12px; }
+  #reader .tools .key { display:none; }
 }
 </style>
 </head>
@@ -191,7 +250,7 @@ select.cleanup { padding:3px 6px; font-size:12px; }
 <header>
   <h1><span class="logo" aria-hidden="true">Σ</span>Zero Sum</h1>
   <nav class="tabs" id="tabs">
-    <button data-tab="inbox" class="on">Inbox</button><button data-tab="cleanup">Cleanup</button>
+    <button data-tab="inbox" class="on" aria-current="page">Inbox</button><button data-tab="cleanup">Cleanup</button>
     <button data-tab="ai">✨ AI Cleanup</button>
     <button data-tab="quarantine">Quarantine <span id="q-count" class="n"></span></button>
     <button data-tab="analytics">Analytics</button><button data-tab="rules">Rules</button>
@@ -207,12 +266,12 @@ select.cleanup { padding:3px 6px; font-size:12px; }
   </section>
   <section class="view" id="v-cleanup"><div class="page">
     <div class="bar-row">
-      <input type="search" id="c-q" placeholder="Filter senders">
-      <select id="c-days"><option value="30">Last 30 days</option><option value="90" selected>Last 90 days</option>
+      <input type="search" id="c-q" placeholder="Filter senders" aria-label="Filter senders">
+      <select id="c-days" aria-label="Period"><option value="30">Last 30 days</option><option value="90" selected>Last 90 days</option>
         <option value="180">Last 180 days</option><option value="365">Last year</option>
         <option value="1825">Last 5 years</option><option value="3650">Last 10 years</option><option value="36500">All time</option></select>
       <label><input type="checkbox" id="c-handled"> Show handled</label>
-      <input type="search" id="c-protect" placeholder="Protect name@x.com or @x.com"><button id="c-protect-btn">Protect</button><button id="c-protect-many" title="Paste a list of senders to protect">Protect many…</button>
+      <input type="search" id="c-protect" placeholder="Protect name@x.com or @x.com" aria-label="Sender or domain to protect"><button id="c-protect-btn">Protect</button><button id="c-protect-many" title="Paste a list of senders to protect">Protect many…</button>
       <span class="spacer"></span><button id="c-collect">Collect now</button>
     </div>
     <div id="c-status" class="note"></div>
@@ -223,7 +282,7 @@ select.cleanup { padding:3px 6px; font-size:12px; }
   </div></section>
   <section class="view" id="v-ai"><div class="page">
     <div class="bar-row">
-      <select id="ai-limit"><option value="10">Top 10 senders</option><option value="25" selected>Top 25 senders</option>
+      <select id="ai-limit" aria-label="How many senders"><option value="10">Top 10 senders</option><option value="25" selected>Top 25 senders</option>
         <option value="50">Top 50 senders</option></select>
       <button id="ai-run" class="primary">✨ Analyze now</button><span id="ai-status" class="note"></span>
     </div>
@@ -234,7 +293,7 @@ select.cleanup { padding:3px 6px; font-size:12px; }
     <div id="ai-result"></div><div id="ai-body"><div class="empty">Loading…</div></div>
   </div></section>
   <section class="view" id="v-quarantine"><div class="page">
-    <div class="bar-row">
+    <div class="bar-row" id="q-bar">
       <span id="q-summary" class="note"></span><span class="spacer"></span>
       <button id="q-refresh">Refresh</button>
       <button id="q-archive-sel" disabled>Archive selected</button><button id="q-delete-sel" class="danger" disabled>Delete selected</button>
@@ -245,7 +304,7 @@ select.cleanup { padding:3px 6px; font-size:12px; }
   </div></section>
   <section class="view" id="v-analytics"><div class="page">
     <div class="bar-row">
-      <select id="a-days"><option value="7">Last 7 days</option><option value="30" selected>Last 30 days</option>
+      <select id="a-days" aria-label="Period"><option value="7">Last 7 days</option><option value="30" selected>Last 30 days</option>
         <option value="90">Last 90 days</option><option value="180">Last 180 days</option></select>
       <span id="a-cover" class="note"></span>
     </div>
@@ -260,11 +319,12 @@ select.cleanup { padding:3px 6px; font-size:12px; }
     <div id="r-ops"></div>
     <div class="wide" id="r-matrix"><div class="empty">Loading…</div></div>
     <div id="r-log"></div>
+    <div id="r-backups"></div>
   </div></section>
 </main>
 <div id="tip" role="tooltip"></div>
 <dialog id="dlg"><form method="dialog">
-  <h3 id="dlg-title"></h3><p id="dlg-text"></p><div id="dlg-ai"></div>
+  <h3 id="dlg-title"></h3><p id="dlg-text"></p><p id="dlg-count" class="note"></p><div id="dlg-ai"></div>
   <label id="dlg-keep-row" class="keep">Keep emails whose subject contains <span class="note">(optional, comma-separated; kept ones get starred)</span>
     <input id="dlg-keep" type="text" placeholder="e.g. gift, surprise, order"></label>
   <div class="dlg-buttons"><button value="cancel">Cancel</button><button id="dlg-ok" value="ok" class="primary">Confirm</button></div>

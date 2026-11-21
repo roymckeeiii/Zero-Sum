@@ -1,27 +1,28 @@
-"""Merged inbox: newest inbox mail across every linked account, read, and thread-level triage (no sending).
+"""Merged inbox and search across every linked account, read, and thread-level triage (no sending).
 
-Search (RFC-001853): /api/messages takes scope=inbox (default: INBOX only), all (every folder but Spam/Trash:
-Inbox, Sent, archived, labels), sent, spamtrash, or label (with label=<name>). Scopes other than inbox drop the
-INBOX label filter and add the scope's Gmail search term to the user's query, which passes through unchanged
-(from:, to:, has:attachment, before:, older_than: ...). The label scope resolves the exact label name to each
-account's own label id (labelIds=<id>), so two labels whose search forms collide ("A/B" and "A-B" are both
-label:a-b in Gmail search) are never merged, and an account without that label is not searched. Every account is
-searched in parallel; results merge newest first. Paging, Inbox included (RFC-001886 final review): a page is
-capped at SEARCH_PAGE_MAX results; each account gets
-limit // accounts of them (at least 1), so a page is at most `limit` messages, from one messages.list call per
-account plus one metadata get per message. Every fetched message is returned (nothing is cut after the fetch), and
-`next` carries each account's nextPageToken, so "load more" continues every account where it stopped. An account
-that fails (listing, its labels, or a message's metadata: e.g. a revoked login) shows in `errors` and the others
-still answer; only a message that vanished between list and get (404) is skipped silently."""
+/api/messages takes scope=inbox (the default: INBOX only), all (every folder but Spam/Trash: Inbox, Sent, archived,
+labels), sent, spamtrash, or label (with label=<name>). The user's query passes through unchanged (from:, to:,
+has:attachment, before: ...); a scope adds its own Gmail term or label filter. The label scope resolves the exact
+label name to each account's own label id, so labels whose search forms collide ("A/B" and "A-B" are both label:a-b
+in Gmail search) are never merged, and an account without that label is not searched.
+
+Paging, every scope: a page holds at most SEARCH_PAGE_MAX messages; each account lists limit // accounts of them
+(at least 1), one messages.list call per account plus one metadata get per message. Pages are in one newest-first
+order across accounts: nothing older than the oldest candidate of an account that still has more mail is shown yet;
+those messages are held back in the page token (`next`, with each account's Gmail nextPageToken) and come first on
+"load more". An account that fails (listing, its labels, or a message's metadata, e.g. a revoked login) shows in
+`errors` and the others still answer; only a message that vanished between list and get (404) is skipped silently."""
 import base64, binascii, email.utils, json, re, time, urllib.parse
 
 from core import ACC, POOL, db, gmail, header, labels
+from guard import is_protected, protected_set
 
 _meta = {}  # (account id, message id) -> (time, item)
 
 
 SCOPES = ("inbox", "all", "sent", "spamtrash", "label")
 SEARCH_PAGE_MAX = 50  # results per search page, all accounts together
+MESSAGE_ID = re.compile(r"[0-9A-Za-z_-]{1,64}")  # path-safe; Gmail ids are hex
 
 
 def folder_of(label_ids):
@@ -30,15 +31,6 @@ def folder_of(label_ids):
         if sys_id in label_ids:
             return name
     return "Archived"
-
-
-def label_term(name):
-    """Gmail's search form of a label name: lower case, spaces and slashes become dashes (label:my-label)."""
-    t = re.sub(r"[\s/]+", "-", name.strip().lower())
-    t = re.sub(r"[^\w&.-]", "", t)
-    if not t:
-        raise ValueError("bad label")
-    return f"label:{t}"
 
 
 def scope_query(scope, label=""):
@@ -77,9 +69,11 @@ def decode_page(page):
         d = json.loads(base64.urlsafe_b64decode(page.encode()))
     except (binascii.Error, ValueError):
         raise ValueError("bad page") from None
-    ok = isinstance(d, dict) and all(
-        isinstance(k, str) and isinstance(v, dict) and isinstance(v.get("t", ""), str)
-        and isinstance(v.get("b", []), list) and all(isinstance(x, str) for x in v.get("b", [])) for k, v in d.items())
+    # held-back ids go into Gmail request paths: only the shape of a Gmail message id is accepted
+    ok = isinstance(d, dict) and len(d) <= 100 and all(
+        isinstance(k, str) and isinstance(v, dict) and isinstance(v.get("t", ""), str) and len(v.get("t", "")) <= 200
+        and isinstance(v.get("b", []), list) and len(v.get("b", [])) <= 2 * SEARCH_PAGE_MAX
+        and all(isinstance(x, str) and MESSAGE_ID.fullmatch(x) for x in v.get("b", [])) for k, v in d.items())
     if not ok:
         raise ValueError("bad page")
     return {k: {"t": v.get("t", ""), "b": list(v.get("b", []))} for k, v in d.items()}
@@ -166,7 +160,6 @@ def messages(q):
                 continue
             acct_params[a["id"]] = "".join(f"&labelIds={urllib.parse.quote(i)}" for i in found[:1])
     per = max(1, limit // max(1, len(accs)))  # per-account pages add up to at most `limit`
-    paged = True
     state = page or {}
 
     def ids(a):
@@ -174,7 +167,7 @@ def messages(q):
         when fewer than `per` are held back. Returns (pairs, gmail token or "", has_more)."""
         st = state.get(a["id"], {"t": "", "b": []})
         held, token = list(st["b"]), st["t"]
-        if paged and len(held) >= per:
+        if len(held) >= per:
             return [(a, m) for m in held], token, bool(token)
         if page is not None and not token:
             return [(a, m) for m in held], "", False
@@ -204,24 +197,22 @@ def messages(q):
     items = sorted((i for i in POOL.map(safe_meta, pairs) if i), key=lambda i: -i["ts"])
     listed = {e["email"] for e in errors}
     errors += [{"email": em, "error": err} for em, err in meta_errors.items() if em not in listed]
-    if paged:
-        # Global order across accounts and pages (RFC-001885 final review): an account that has more mail in Gmail
-        # may still hold messages newer than another account's oldest candidate, so nothing older than the newest
-        # such boundary is shown yet; the rest is held back in the page token and shown, in order, on "load more".
-        by_acc = {}
-        for it in items:
-            by_acc.setdefault(it["account"], []).append(it)
-        cutoff = max((by_acc[a["id"]][-1]["ts"] for (_, _, more), a in zip(fetched, accs)
-                      if more and by_acc.get(a["id"])), default=None)
-        shown = [it for it in items if cutoff is None or it["ts"] >= cutoff][:limit]
-        ids_shown = {(it["account"], it["id"]) for it in shown}
-        for (_, token, more), a in zip(fetched, accs):
-            held = [it["id"] for it in by_acc.get(a["id"], []) if (a["id"], it["id"]) not in ids_shown]
-            if held or token:
-                nxt[a["id"]] = {"t": token, "b": held}
-        items = shown
+    # One order across accounts and pages: an account with more mail in Gmail may still hold messages newer than
+    # another account's oldest candidate, so nothing older than the newest such boundary is shown yet; the rest is
+    # held back in the page token and shown, in order, on "load more".
+    by_acc = {}
+    for it in items:
+        by_acc.setdefault(it["account"], []).append(it)
+    cutoff = max((by_acc[a["id"]][-1]["ts"] for (_, _, more), a in zip(fetched, accs)
+                  if more and by_acc.get(a["id"])), default=None)
+    shown = [it for it in items if cutoff is None or it["ts"] >= cutoff][:limit]
+    ids_shown = {(it["account"], it["id"]) for it in shown}
+    for (_, token, more), a in zip(fetched, accs):
+        held = [it["id"] for it in by_acc.get(a["id"], []) if (a["id"], it["id"]) not in ids_shown]
+        if held or token:
+            nxt[a["id"]] = {"t": token, "b": held}
+    items = shown
     rules = rules_for(items)
-    from cleanup import is_protected, protected_set
     prot = protected_set()
     for it in items:
         it["rules"] = rules.get((it["account"], it["id"]), [])
@@ -262,18 +253,25 @@ ACTIONS = {"archive": {"removeLabelIds": ["INBOX"]}, "inbox": {"addLabelIds": ["
            "delete": None, "undelete": None}
 
 
+def _gmail_id(value):
+    """A Gmail thread or message id (hex) as sent in a request, else None: it goes into an API path."""
+    return value if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{6,32}", value) else None
+
+
 def action(d):
-    if d.get("action") not in ACTIONS or not re.fullmatch(r"[0-9a-f]{6,32}", d.get("threadId", "")):
+    act, tid, mid = d.get("action"), _gmail_id(d.get("threadId")), _gmail_id(d.get("id"))
+    if not isinstance(act, str) or act not in ACTIONS or not tid:
         raise ValueError("bad action")
-    ACC.row(d["account"])
-    if d["action"] == "delete":  # Trash (Gmail empties it after 30 days); gmail.modify cannot delete permanently
-        gmail(d["account"], f"/threads/{d['threadId']}/trash", "POST")
-    elif d["action"] == "undelete":
-        gmail(d["account"], f"/threads/{d['threadId']}/untrash", "POST")
-    elif d["action"] in ("star", "unstar") and re.fullmatch(r"[0-9a-f]{6,32}", d.get("id", "")):
-        gmail(d["account"], f"/messages/{d['id']}/modify", "POST", ACTIONS[d["action"]])  # Gmail stars one message
+    acc = d["account"]
+    ACC.row(acc)
+    if act == "delete":  # Trash (Gmail empties it after 30 days); gmail.modify cannot delete permanently
+        gmail(acc, f"/threads/{tid}/trash", "POST")
+    elif act == "undelete":
+        gmail(acc, f"/threads/{tid}/untrash", "POST")
+    elif act in ("star", "unstar") and mid:
+        gmail(acc, f"/messages/{mid}/modify", "POST", ACTIONS[act])  # Gmail stars one message
     else:
-        gmail(d["account"], f"/threads/{d['threadId']}/modify", "POST", ACTIONS[d["action"]])
-    for k in [k for k, (_, it) in list(_meta.items()) if it["threadId"] == d["threadId"] and k[0] == d["account"]]:
+        gmail(acc, f"/threads/{tid}/modify", "POST", ACTIONS[act])
+    for k in [k for k, (_, it) in list(_meta.items()) if it["threadId"] == tid and k[0] == acc]:
         _meta.pop(k, None)
     return {"ok": True}

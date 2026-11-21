@@ -5,7 +5,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("EMAIL_ENCRYPT_SECRET", "test-secret")
 os.environ.setdefault("EMAIL_ENCRYPT_SALT", "test-salt")
 
-import cleanup, inbox  # noqa: E402
+import inbox  # noqa: E402
 
 ACCOUNTS = [{"id": "A", "email": "a@x.com", "master": True}, {"id": "B", "email": "b@x.com", "master": False}]
 
@@ -57,10 +57,10 @@ class FakeGmail:
 class Search(unittest.TestCase):
     def setUp(self):
         saved = {(inbox, "ACC"): inbox.ACC, (inbox, "gmail"): inbox.gmail, (inbox, "labels"): inbox.labels,
-                 (inbox, "rules_for"): inbox.rules_for, (cleanup, "protected_set"): cleanup.protected_set}
+                 (inbox, "rules_for"): inbox.rules_for, (inbox, "protected_set"): inbox.protected_set}
         self.addCleanup(lambda: [setattr(m, n, v) for (m, n), v in saved.items()])
         inbox.ACC, inbox.labels = FakeAcc(), lambda acc: {}
-        inbox.rules_for, cleanup.protected_set = lambda items: {}, lambda: set()
+        inbox.rules_for, inbox.protected_set = lambda items: {}, lambda: set()
         inbox._meta.clear()
 
     def run_search(self, fake, **params):
@@ -100,9 +100,6 @@ class Search(unittest.TestCase):
         self.assertEqual(inbox.scope_query("sent"), ("in:sent", ""))
         self.assertEqual(inbox.scope_query("spamtrash"), ("{in:spam in:trash}", "&includeSpamTrash=true"))
         self.assertEqual(inbox.scope_query("label", "Receipts/2026 Tax"), ("", ""))   # resolved per account to an id
-        self.assertEqual(inbox.label_term('x" OR in:anywhere'), "label:x-or-inanywhere")  # no operator smuggled in
-        with self.assertRaises(ValueError):
-            inbox.label_term('"')
         for bad in (("label", "  "), ("everything", "")):
             with self.assertRaises(ValueError):
                 inbox.scope_query(*bad)
@@ -219,7 +216,6 @@ class Search(unittest.TestCase):
         fake = FakeGmail({"A": [("a1", 300, ["Label_1"]), ("a2", 200, ["Label_2"])], "B": [("b1", 100, ["Label_2"])]})
         inbox.labels = lambda acc: {"A": {"Label_1": "Work/2026", "Label_2": "Work-2026"},
                                     "B": {"Label_2": "Work-2026"}}[acc]
-        self.assertEqual(inbox.label_term("Work/2026"), inbox.label_term("Work-2026"))   # the old collision
         d = self.run_search(fake, scope="label", label="Work/2026")
         self.assertEqual([i["id"] for i in d["items"]], ["a1"])
         self.assertEqual([acc for acc, _ in fake.calls], ["A"])    # B has no "Work/2026": not searched at all
@@ -255,9 +251,19 @@ class Search(unittest.TestCase):
         self.assertEqual(inbox.recipients("a@x.com, b@x.com, C <c@x.com>, d@x.com, e@x.com"), "a@x.com, b@x.com, C +2")
         self.assertEqual(inbox.recipients(""), "")
 
+    def test_a_forged_page_token_cannot_add_an_account(self):
+        fake = FakeGmail({"A": [("a1", 300, ["SENT"])], "B": [("b1", 200, ["SENT"])]})
+        d = self.run_search(fake, scope="sent", account="A", page=inbox.encode_page({"A": {"t": "", "b": ["a1"]},
+                                                                                    "Z": {"t": "", "b": ["z1"]}}))
+        self.assertEqual([(i["account"], i["id"]) for i in d["items"]], [("A", "a1")])
+        self.assertEqual(fake.calls, [])                                      # held ids only, no listing, no other account
+
     def test_bad_page_token_is_refused(self):
         for bad in ("!!!", inbox.encode_page({"A": {"t": "1", "b": []}})[:-3] + "xyz", "WzFd",
-                    inbox.encode_page({"A": "1"}), inbox.encode_page({"A": {"t": 1}})):  # old/odd shapes refused
+                    inbox.encode_page({"A": "1"}), inbox.encode_page({"A": {"t": 1}}),  # old/odd shapes refused
+                    inbox.encode_page({"A": {"t": "", "b": ["../settings/filters"]}}),  # ids end up in Gmail paths
+                    inbox.encode_page({"A": {"t": "", "b": ["abc?format=raw"]}}),
+                    inbox.encode_page({"A": {"t": "", "b": ["abc\n"]}})):
             with self.assertRaises(ValueError):
                 inbox.decode_page(bad)
 
