@@ -25,21 +25,25 @@ def frm(addr):
     return f'from:"{sender_addr(addr)}"'
 
 
+class Protected(frozenset):
+    """The protected keys, with the addresses among them also as mailboxes (.boxes), worked out once when the set is
+    read: is_protected runs once per message of a bulk change. Immutable, so the two can never disagree."""
+
+    def __new__(cls, keys=()):
+        self = super().__new__(cls, keys)
+        self.boxes = frozenset(mailbox(k) for k in self if not str(k).startswith("@"))
+        return self
+
+
 def protected_set():
     with db() as c:
-        return {r[0] for r in c.execute("SELECT key FROM unified.protected").fetchall()}
-
-
-_BOXES = [frozenset(), frozenset()]   # (a copy of the protected set last seen, its addresses as mailboxes)
+        return Protected(r[0] for r in c.execute("SELECT key FROM unified.protected").fetchall())
 
 
 def _protected_boxes(prot):
-    """The protected addresses as mailboxes. is_protected runs once per message of a bulk change, so this is kept for
-    the last protected set seen (compared by value: a set changed in place is never served stale)."""
-    if _BOXES[0] != prot:
-        snap = frozenset(prot)
-        _BOXES[:] = [snap, frozenset(mailbox(k) for k in snap if not str(k).startswith("@"))]
-    return _BOXES[1]
+    """The protected addresses as mailboxes: kept with a Protected set; worked out here for any other collection."""
+    boxes = getattr(prot, "boxes", None)
+    return boxes if boxes is not None else {mailbox(k) for k in prot if not str(k).startswith("@")}
 
 
 def is_protected(addr, prot=None):

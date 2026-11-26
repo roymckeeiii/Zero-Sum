@@ -69,8 +69,19 @@ class Parsing(unittest.TestCase):
             self.assertTrue(cleanup.is_protected(addr, prot), addr)
         for addr in ("john.doe@bank.com", "alert@bank.com", "johndoe@gmail.co"):
             self.assertFalse(cleanup.is_protected(addr, prot), addr)
-        prot.add("bob@x.org")                      # the same set changed in place is not served stale
+        prot.add("bob@x.org")                      # a plain set changed in place is not served stale
         self.assertTrue(cleanup.is_protected("bob+1@x.org", prot))
+
+    def test_the_protected_set_carries_its_mailboxes_worked_out_once(self):
+        import guard
+        from fakes import Patched
+        p = guard.Protected(["JohnDoe@gmail.com", "alerts@bank.com", "@shop.com"])
+        self.assertEqual(p.boxes, {"johndoe@gmail.com", "alerts@bank.com"})
+        with Patched(guard, mailbox=lambda a: (_ for _ in ()).throw(AssertionError("worked out again"))):
+            self.assertIs(guard._protected_boxes(p), p.boxes)
+        self.assertTrue(cleanup.is_protected("john.doe+x@googlemail.com", p))
+        with self.assertRaises(AttributeError):
+            p.add("x@y.com")                       # immutable: the mailboxes cannot go stale
 
 
 class KeepWords(unittest.TestCase):
