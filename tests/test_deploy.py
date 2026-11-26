@@ -56,7 +56,7 @@ class Quadlet(unittest.TestCase):
     def test_the_image_runs_unprivileged_and_ships_the_split_modules(self):
         cf = read("Containerfile")
         self.assertIn("USER 65534:65534", cf)
-        self.assertIn("COPY *.py *.html *.js grants.sql /app/", cf)
+        self.assertIn("COPY *.py *.html *.js grants.sql inbox-zero.version /app/", cf)   # izdb.supported_release()
 
 
 if __name__ == "__main__":

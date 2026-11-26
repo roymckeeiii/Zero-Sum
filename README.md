@@ -320,7 +320,7 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
 ## Requirements
 
 - Self-hosted Inbox Zero with Google accounts, run with its `docker-compose.yml` (its `db` service and
-  `inbox-zero-network`). Tested with Inbox Zero **v2.25.8**; Zero Sum writes some Inbox Zero tables directly, so check
+  `inbox-zero-network`). Tested with Inbox Zero **v2.30.0**; Zero Sum writes some Inbox Zero tables directly, so check
   [Upgrading Inbox Zero](#upgrading-inbox-zero) before upgrading.
 - By default Zero Sum works on **every** Google mailbox linked in the Inbox Zero database. If your Inbox Zero has more
   than one user, set `ACCOUNT_OWNERS` so it only touches yours.
