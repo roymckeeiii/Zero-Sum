@@ -632,6 +632,16 @@ class Quarantine(World):
         self.assertEqual(self.g.calls, [])
         self.assertIn("1 not in Quarantine", r["results"][0]["note"])
 
+    def test_a_group_without_a_plain_address_offers_no_sender_buttons(self):
+        import actions
+        metas = {"aaaa01": JUNK, "bbbb02": "", "cccc03": '"odd local"@x.com'}
+        self.g.found = {"labelIds=Label_Q": list(metas)}
+        with Patched(actions, meta=lambda a, i: {"fromAddr": metas[i], "from": "x", "account": a["id"], "email": a["email"],
+                                                 "id": i, "ts": 1}):
+            d = cleanup.quarantine_list()
+        self.assertEqual({g["addr"]: g["actionable"] for g in d["senders"]},
+                         {JUNK: True, "": False, '"odd local"@x.com': False})
+
     def test_archive_and_release_still_work_for_everything(self):
         cleanup.quarantine_action({"action": "release", "all": True})
         self.assertEqual([len(c[3]["ids"]) for c in self.g.changes("batchModify")], [5])

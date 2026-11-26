@@ -719,8 +719,9 @@ function renderQuarantine() {
       <label><input type="checkbox" data-group="${gi}" aria-label="${esc(`Select every listed email from ${g.name || g.addr}`)}"></label>
       <span class="who"><b>${esc(g.name || g.addr)}</b> <span class="note">${esc(g.addr)} · ${g.count}${d.shown < d.total ? "+" : ""} email(s)</span><br>
         ${g.accounts.map((a) => acctChip(a.id, a.email)).join("")}</span>
-      <button data-qa="release" data-g="${gi}" title="Back where it was (the inbox, or the archive), and stop quarantining this sender">Release sender</button>
-      <button data-qa="archive" data-g="${gi}">Archive</button><button data-qa="delete" data-g="${gi}" class="danger">Delete</button></div>` +
+      ${g.actionable === false ? `<span class="note">No plain sender address: tick its emails to act on them.</span>`
+        : `<button data-qa="release" data-g="${gi}" title="Back where it was (the inbox, or the archive), and stop quarantining this sender">Release sender</button>
+      <button data-qa="archive" data-g="${gi}">Archive</button><button data-qa="delete" data-g="${gi}" class="danger">Delete</button>`}</div>` +
       g.items.slice(0, g.open ? 1000 : 5).map((it, ii) => `<div class="qm"><input type="checkbox" data-g="${gi}" data-ii="${ii}" aria-label="${esc(`Select: ${it.subject}`)}">
         ${acctChip(it.account, it.email)}<span class="s">${esc(it.subject)} <span class="note">${esc(it.snippet)}</span></span>
         <span class="note">${when(it.ts)}</span></div>`).join("") +

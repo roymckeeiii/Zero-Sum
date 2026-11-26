@@ -11,7 +11,7 @@ from gmailops import (ARCHIVE_FILTER, AUTOMATION_KINDS, BUSY_NOTE, FOREIGN_NOTE,
                       STAR_FILTER, TRASH_FILTER, _ACTION, SenderBusy, _batch, _filter, _modify_existing, _sender_lock,
                       bulk_query, foreign_filters, held_note, held_start, inbox_parts, lookup_budget, lookups_account, lookups_end,
                       lookups_start, quarantine_archived, remove_app_filters, senders_of, unchecked_note)
-from guard import (SENDER_KEY, frm, guard_sender, is_protected, keep_query, own_address, own_set, parse_protect_keys,
+from guard import (SENDER, SENDER_KEY, frm, guard_sender, is_protected, keep_query, own_address, own_set, parse_protect_keys,
                    protected_set, sender_addr)
 from inbox import meta
 
@@ -508,6 +508,9 @@ def quarantine_list(q=None):
     senders = sorted(groups.values(), key=lambda g: -len(g["items"]))
     for g in senders:
         g["count"] = len(g["items"])
+        # the per-sender buttons need a plain address (sender_addr): a From with none, or one with characters a
+        # Gmail search cannot carry, is acted on by ticking its messages instead
+        g["actionable"] = len(g["addr"]) <= 254 and bool(SENDER.fullmatch(g["addr"]))
         g["accounts"] = [{"id": k, "email": v} for k, v in g["accounts"].items()]
     return {"label": QUARANTINE, "total": sum(totals.values()), "shown": len(items), "senders": senders, "errors": errors}
 
