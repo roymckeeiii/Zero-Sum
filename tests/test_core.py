@@ -310,6 +310,47 @@ class Collector(unittest.TestCase):
         self.assertNotIn(" max(ts), min(ts)", state)
 
 
+class BackfillHorizon(unittest.TestCase):
+    """The back-fill continues from its own progress: mail of any year stored by an undo's read-back, or a message
+    without a date (stored at 1970), must not move the horizon past history that was never collected."""
+
+    def run_collect(self, oldest, batch, batch_min):
+        sql = []
+        T = 1_700_000_000.0
+
+        def execute(q, params=None):
+            sql.append((q, params))
+            one = None
+            if "FROM unified.collect_state WHERE account_id" in q:
+                one = (T + 86400, oldest, False)
+            elif "SELECT extract(epoch from min(ts)) FROM unified.msg" in q:
+                one = (batch_min,)
+            return type("R", (), {"fetchall": staticmethod(lambda: []), "fetchone": staticmethod(lambda: one)})()
+        fake = FakeDb()
+        fake.execute = execute
+        old = (cleanup.gmail_list, cleanup._store, cleanup.db)
+        cleanup.gmail_list = lambda acc, path, key, limit: [{"id": i} for i in batch] if "before%3A" in path else []
+        cleanup._store, cleanup.db = (lambda *a, **k: 0), fake
+        try:
+            cleanup.collect_account({"id": "acc"})
+        finally:
+            cleanup.gmail_list, cleanup._store, cleanup.db = old
+        q, params = next((q, p) for q, p in sql if "INSERT INTO unified.collect_state" in q)
+        self.assertNotIn("), min(ts), ", q)   # never simply the table's oldest row
+        return params[1], [p for q, p in sql if "SELECT extract(epoch from min(ts))" in q]
+
+    def test_the_horizon_moves_to_the_oldest_of_the_batch_only(self):
+        T = 1_700_000_000.0
+        horizon, asked = self.run_collect(T, ["b1", "b2"], T - 5000)   # an undo stored a 2016 message meanwhile
+        self.assertEqual(horizon, T - 5000)
+        self.assertEqual(asked, [("acc", ["b1", "b2"])])
+
+    def test_an_undated_batch_or_no_batch_keeps_the_horizon(self):
+        T = 1_700_000_000.0
+        self.assertEqual(self.run_collect(T, ["b1"], None)[0], T)         # only 1970 rows in the batch
+        self.assertEqual(self.run_collect(T, [], None)[0], T)             # nothing older: back-fill done, horizon stays
+
+
 class Previews(unittest.TestCase):
     def test_preview_matches_whole_words_like_the_gmail_search(self):
         for words, subject, expect in ((["order"], "Your order shipped", True), (["order"], "Reorder now", False),
