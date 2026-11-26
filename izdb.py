@@ -8,6 +8,7 @@ releases. This list is what the rest of the code may assume. It is used by
 When SQL elsewhere starts using another upstream column, add it here first (a test scans the sources for upstream
 table names). Standard library only: tools/check_upstream.py imports this without the app's dependencies.
 """
+import re
 
 # Rule and Action columns copied from the master account to the others (rulesync.py)
 RULE_FIELDS = ["name", "instructions", "automate", "runOnThreads", "body", "from", "subject", "to", "enabled",
@@ -80,6 +81,21 @@ def has_column(c, table, column):
     """Does Inbox Zero's table (schema public, the one problems() checks) have this column, as this role sees it?"""
     return c.execute("SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = %s "
                      "AND column_name = %s", (table, column)).fetchone() is not None
+
+
+RELEASE_FILE = "inbox-zero.version"   # next to this module (the Containerfile copies it to /app)
+
+
+def supported_release():
+    """The Inbox Zero release this Zero Sum is tested with (inbox-zero.version), or "unknown" when the file is
+    missing or malformed. The VM updater installs exactly this release, so a schema mismatch names it."""
+    import os
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), RELEASE_FILE)) as fh:
+            v = fh.read().strip()
+    except OSError:
+        return "unknown"
+    return v if re.fullmatch(r"v\d+\.\d+\.\d+", v) else "unknown"
 
 
 def check():

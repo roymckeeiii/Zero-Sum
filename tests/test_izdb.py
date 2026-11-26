@@ -113,6 +113,40 @@ class Check(unittest.TestCase):
             self.assertIsNone(app.check_upstream_schema())
 
 
+class SupportedRelease(unittest.TestCase):
+    """RFC-001840: the start-up schema check names the Inbox Zero release this Zero Sum supports (the one the VM
+    updater installs), read from inbox-zero.version, which the image ships."""
+
+    def test_reads_the_pinned_release(self):
+        self.assertEqual(izdb.supported_release(), read("inbox-zero.version").strip())
+        self.assertEqual(izdb.supported_release(), "v2.30.0")
+
+    def test_missing_or_malformed_file_reads_unknown(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = os.path.join(tmp, "izdb.py")
+            with Patched(izdb, __file__=fake):
+                self.assertEqual(izdb.supported_release(), "unknown")
+                with open(os.path.join(tmp, "inbox-zero.version"), "w") as f:
+                    f.write("latest\n")
+                self.assertEqual(izdb.supported_release(), "unknown")
+                with open(os.path.join(tmp, "inbox-zero.version"), "w") as f:
+                    f.write(" v9.8.7 \n")
+                self.assertEqual(izdb.supported_release(), "v9.8.7")
+
+    def test_schema_mismatch_log_names_the_supported_release(self):
+        logged = []
+        with Patched(izdb, check=lambda: ['column "Action"."emailAccountId" is missing or not readable'],
+                     supported_release=lambda: "v2.30.0"), \
+                Patched(app, log=lambda kind, msg, account=None: logged.append((kind, msg))):
+            app.check_upstream_schema()
+        self.assertTrue(any("this Zero Sum supports v2.30.0" in m for _, m in logged), logged)
+
+    def test_the_pinned_release_has_the_columns_the_code_writes(self):
+        # v2.30 makes Action.emailAccountId required; rule sync writes it whenever the column exists (VERSIONED)
+        self.assertIn("emailAccountId", izdb.VERSIONED["Action"])
+
+
 class DeepHealth(unittest.TestCase):
     def ask(self, check):
         app._deep.update(at=0.0, result=None)
