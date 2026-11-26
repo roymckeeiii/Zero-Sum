@@ -63,6 +63,15 @@ class Parsing(unittest.TestCase):
         self.assertTrue(cleanup.is_protected("alerts@bank.com", prot))
         self.assertFalse(cleanup.is_protected("b@x.com", prot))
 
+    def test_protection_covers_every_spelling_of_the_same_mailbox(self):
+        prot = {"johndoe@gmail.com", "alerts@bank.com", "@shop.com"}
+        for addr in ("john.doe@gmail.com", "JohnDoe+news@googlemail.com", "alerts+2026@bank.com", "deals@shop.com"):
+            self.assertTrue(cleanup.is_protected(addr, prot), addr)
+        for addr in ("john.doe@bank.com", "alert@bank.com", "johndoe@gmail.co"):
+            self.assertFalse(cleanup.is_protected(addr, prot), addr)
+        prot.add("bob@x.org")                      # the same set changed in place is not served stale
+        self.assertTrue(cleanup.is_protected("bob+1@x.org", prot))
+
 
 class KeepWords(unittest.TestCase):
     def test_keep_query(self):

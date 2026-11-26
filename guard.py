@@ -30,10 +30,23 @@ def protected_set():
         return {r[0] for r in c.execute("SELECT key FROM unified.protected").fetchall()}
 
 
+_BOXES = [frozenset(), frozenset()]   # (a copy of the protected set last seen, its addresses as mailboxes)
+
+
+def _protected_boxes(prot):
+    """The protected addresses as mailboxes. is_protected runs once per message of a bulk change, so this is kept for
+    the last protected set seen (compared by value: a set changed in place is never served stale)."""
+    if _BOXES[0] != prot:
+        snap = frozenset(prot)
+        _BOXES[:] = [snap, frozenset(mailbox(k) for k in snap if not str(k).startswith("@"))]
+    return _BOXES[1]
+
+
 def is_protected(addr, prot=None):
-    """A sender is protected by its exact address or its domain ("@example.com")."""
+    """A sender is protected by its address, in any spelling that reaches the same mailbox (+tag, and for Gmail the
+    dots and googlemail.com, as for the user's own addresses), or by its domain ("@example.com")."""
     prot = protected_set() if prot is None else prot
-    if addr in prot:
+    if addr in prot or mailbox(addr) in _protected_boxes(prot):
         return True
     labels = addr.rsplit("@", 1)[-1].split(".")  # "@chase.com" also covers alerts.chase.com, never a bare TLD
     return any("@" + ".".join(labels[i:]) in prot for i in range(max(1, len(labels) - 1)))

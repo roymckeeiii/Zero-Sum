@@ -236,7 +236,8 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
   is not a rate limit) is remembered as sender unknown for an hour, like a deleted one, and left alone. A run that changed nothing and learned no sender
   does not say "run it again": it says what stopped it (Gmail not answering the look-ups, or no look-ups left). If the page still gets no answer in time, it says the action may
   still be running and to check **Undo a bulk action** before trying again.
-- **Protected** senders (an address, or a whole domain like `@yourbank.com`) can't be unsubscribed, archived, deleted,
+- **Protected** senders (an address in any spelling of the same mailbox, such as `+tag` or Gmail's dots, or a whole
+  domain like `@yourbank.com`) can't be unsubscribed, archived, deleted,
   blocked, quarantined or marked as spam, by hand or by a plan: the buttons are disabled and the server refuses. The
   background analyst skips them. Protecting adds Gmail's "never send to Spam" filter in every account and marks the
   address "kept" in Inbox Zero. Auto-star still works on protected senders. If Gmail refuses or a restart interrupts
