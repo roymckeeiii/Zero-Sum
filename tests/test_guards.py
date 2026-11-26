@@ -323,6 +323,8 @@ class InboxOrigin(World):
                                              {"ids": ["aa22cc"], "addLabelIds": [label], "removeLabelIds": []}], act)
             logged = [(p[2], p[3], p[4]) for _, p in self.db.said("INSERT INTO unified.action_log")]
             self.assertEqual(logged, [([label], ["INBOX"], ["aa11bb"]), ([label], [], ["aa22cc"])], act)
+            notes = [p[1] for _, p in self.db.said("INSERT INTO unified.action_log")]   # the Undo list tells them apart
+            self.assertEqual(notes, [f"{act} {JUNK} (in the inbox)", f"{act} {JUNK} (already archived)"], act)
         self.assertEqual([p[1] for _, p in self.db.said("INSERT INTO unified.quarantine_archived")], [])  # spam: none
 
     def test_quarantine_remembers_which_mail_was_archived(self):
@@ -352,6 +354,8 @@ class InboxOrigin(World):
             self.assertEqual(self.bodies(), [{"ids": ["aa11bb"], "addLabelIds": ["INBOX"], "removeLabelIds": ["Label_Q"]},
                                              {"ids": ["aa22cc"], "addLabelIds": [], "removeLabelIds": ["Label_Q"]}], req)
             self.assertIn("1 back in the inbox, 1 archived", r["results"][0]["note"])
+            notes = [p[1] for _, p in self.db.said("INSERT INTO unified.action_log")][-2:]
+            self.assertTrue(notes[0].endswith("(back to the inbox)") and notes[1].endswith("(kept archived)"), notes)
 
     def test_ai_sort_of_existing_mail_leaves_archived_mail_archived(self):
         import ai
@@ -360,6 +364,8 @@ class InboxOrigin(World):
         self.acc.accs = self.acc.accs[:1]
         with Patched(ai, classify=lambda rule, items: [False] * len(items)):
             cleanup._ai_sort_existing(JUNK, "keep receipts", "quarantine")
+        self.assertEqual([p[1] for _, p in self.db.said("INSERT INTO unified.action_log")],
+                         [f"AI sort {JUNK} (in the inbox)", f"AI sort {JUNK} (already archived)"])
         self.assertEqual(self.bodies(), [{"ids": ["aa11bb"], "addLabelIds": ["Label_Q"], "removeLabelIds": ["INBOX"]},
                                          {"ids": ["aa22cc"], "addLabelIds": ["Label_Q"], "removeLabelIds": []}])
 

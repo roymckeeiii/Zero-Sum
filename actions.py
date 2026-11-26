@@ -10,7 +10,7 @@ from core import ACC, POOL, db, gmail, gmail_list, label_id, log, new_id
 from gmailops import (ARCHIVE_FILTER, AUTOMATION_KINDS, BUSY_NOTE, FOREIGN_NOTE, MAX_BULK, NEVER_SPAM_FILTER, QUARANTINE,
                       STAR_FILTER, TRASH_FILTER, _ACTION, SenderBusy, _batch, _filter, _modify_existing, _sender_lock,
                       bulk_query, foreign_filters, held_note, held_start, inbox_parts, lookup_budget, lookups_account, lookups_end,
-                      lookups_start, quarantine_archived, remove_app_filters, senders_of, unchecked_note)
+                      lookups_start, part_note, quarantine_archived, remove_app_filters, senders_of, unchecked_note)
 from guard import (SENDER, SENDER_KEY, frm, guard_sender, is_protected, keep_query, own_address, own_set, parse_protect_keys,
                    protected_set, sender_addr)
 from inbox import meta
@@ -643,8 +643,10 @@ def quarantine_action(d):
             stay = quarantine_archived(a["id"], ids) if act == "release" else set()
             if stay:   # Release returns to the inbox only what was in it: mail quarantined from the archive stays archived
                 back = [i for i in ids if i not in stay]
-                n = _batch(a["id"], back, add=add, remove=[lid]) if back else 0
-                kept = _batch(a["id"], [i for i in ids if i in stay], add=[], remove=[lid])
+                with part_note(" (back to the inbox)"):
+                    n = _batch(a["id"], back, add=add, remove=[lid]) if back else 0
+                with part_note(" (kept archived)"):
+                    kept = _batch(a["id"], [i for i in ids if i in stay], add=[], remove=[lid])
                 note = f"{n} {QACTIONS[act]}, {kept} archived (they were not in the inbox when they were quarantined)"
                 n += kept
             else:

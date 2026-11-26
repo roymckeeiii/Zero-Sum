@@ -8,7 +8,8 @@ import psycopg
 import ai
 from collector import SKIP, qs
 from core import ACC, db, gmail_list, label_id, log
-from gmailops import MAX_BULK, QUARANTINE, _ACTION, _batch, sender_recent, senders_of
+from gmailops import (ARCHIVED_PART, INBOX_PART, MAX_BULK, QUARANTINE, _ACTION, _batch, part_note, sender_recent,
+                      senders_of)
 from guard import frm, is_protected, own_address, sender_matches
 from inbox import meta
 
@@ -101,11 +102,14 @@ def _ai_sort_ids(addr, rule, action, pairs, token=None, archived=None):
             add, rem = _labels_for(action, lid)
             out = [i for i in ids if (acc_id, i) in (archived or ())]
             ids = [i for i in ids if (acc_id, i) not in (archived or ())]
+            split = archived is not None and "INBOX" in rem
             if ids and (add or rem):
-                _batch(acc_id, ids, add=add, remove=rem, sender=addr)
+                with part_note(INBOX_PART if split else ""):
+                    _batch(acc_id, ids, add=add, remove=rem, sender=addr)
             rest = [x for x in rem if x != "INBOX"]
             if out and (add or rest):
-                _batch(acc_id, out, add=add, remove=rest, sender=addr)
+                with part_note(ARCHIVED_PART if split else ""):
+                    _batch(acc_id, out, add=add, remove=rest, sender=addr)
         if metas:   # after the change went through: a batch that failed is judged again next time
             with db() as c:
                 with c.cursor() as cur:

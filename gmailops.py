@@ -524,9 +524,11 @@ def _modify_existing(acc_id, query, add=(), remove=(), *, sender):
     if "INBOX" in remove and not _IN_INBOX.search(query):
         inbox, archived = inbox_parts(query)
         rest = [x for x in remove if x != "INBOX"]
-        n = _modify_existing(acc_id, inbox, add, remove, sender=sender)
+        with part_note(INBOX_PART):
+            n = _modify_existing(acc_id, inbox, add, remove, sender=sender)
         if add or rest:
-            n += _modify_existing(acc_id, archived, add, rest, sender=sender)
+            with part_note(ARCHIVED_PART):
+                n += _modify_existing(acc_id, archived, add, rest, sender=sender)
         return n
     ids = [m["id"] for m in gmail_list(acc_id, qs(bulk_query(query)), "messages", MAX_BULK)]
     if ids and removes_mail(add, remove):
@@ -641,13 +643,29 @@ UNDO_LEASE_MIN = 15          # an undo claimed this long ago and never finished 
 UNDO_DAYS = 28               # Gmail empties Trash after 30 days: past that an undo could not bring mail back
 
 
+INBOX_PART, ARCHIVED_PART = " (in the inbox)", " (already archived)"
+
+
+@contextlib.contextmanager
+def part_note(text):
+    """Add `text` to the Undo-list note of the changes recorded inside (the inbox and archived parts of one action are
+    separate entries: the list must say which is which)."""
+    old = getattr(_ACTION, "part", "")
+    _ACTION.part = text
+    try:
+        yield
+    finally:
+        _ACTION.part = old
+
+
 def _record(acc_id, ids, add, remove):
     """Write down which messages a bulk change is about to touch, before it happens. A wrong Delete or Block used to
     leave only a count in the log: nothing said which mail had moved, so the only way back was searching Trash by hand."""
     with db() as c:
         c.execute("INSERT INTO unified.action_log (account_id, note, add_labels, remove_labels, ids) "
                   "VALUES (%s, %s, %s, %s, %s)",
-                  (acc_id, str(getattr(_ACTION, "note", "") or "")[:300], list(add), list(remove), list(ids)))
+                  (acc_id, (str(getattr(_ACTION, "note", "") or "")[:270] + (getattr(_ACTION, "part", "") or ""))[:300],
+                   list(add), list(remove), list(ids)))
         c.execute("DELETE FROM unified.action_log WHERE at < now() - make_interval(days => %s)", (UNDO_DAYS,))
 
 
