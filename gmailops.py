@@ -664,6 +664,13 @@ def quarantine_archived(acc_id, ids):
                                         "AND id = ANY(%s)", (acc_id, list(ids))).fetchall()}
 
 
+def _trash_refused(e):
+    """Is this batchModify error Gmail refusing the TRASH label itself (a 400 naming it), the one case the
+    one-by-one trash / untrash fallback is for?"""
+    text = str(e)
+    return ": 400 " in text and ("trash" in text.lower() or "label" in text.lower())
+
+
 def _batch(acc_id, ids, add=(), remove=(), record=True, sender=None):
     """Apply label changes to these message ids (batches of 1000). Returns the count.
 
@@ -698,10 +705,16 @@ def _batch(acc_id, ids, add=(), remove=(), record=True, sender=None):
         try:
             gmail(acc_id, "/messages/batchModify", "POST",
                   {"ids": chunk, "addLabelIds": list(add), "removeLabelIds": list(remove)})
-        except RuntimeError:
+        except RuntimeError as e:
+            if not _trash_refused(e):   # rate limits, quota, other refusals: not a reason for 1,000 single calls
+                raise
             if "TRASH" in add:
-                for mid in chunk:  # some accounts refuse TRASH in batchModify: trash one by one
+                for mid in chunk:  # some accounts refuse TRASH in batchModify: trash one by one, then the other labels
                     gmail(acc_id, f"/messages/{mid}/trash", "POST")
+                rest_add, rest_rem = [x for x in add if x != "TRASH"], list(remove)
+                if rest_add or rest_rem:
+                    gmail(acc_id, "/messages/batchModify", "POST",
+                          {"ids": chunk, "addLabelIds": rest_add, "removeLabelIds": rest_rem})
             elif "TRASH" in remove:  # the same accounts, on an undo: out of Trash one by one, then the other labels
                 for mid in chunk:
                     gmail(acc_id, f"/messages/{mid}/untrash", "POST")

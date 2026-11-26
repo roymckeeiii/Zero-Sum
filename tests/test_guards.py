@@ -637,6 +637,34 @@ class Quarantine(World):
         self.assertEqual([len(c[3]["ids"]) for c in self.g.changes("batchModify")], [5])
 
 
+class TrashFallback(World):
+    """Some accounts refuse TRASH in batchModify: only that refusal switches to trashing one by one, and the other
+    label changes still happen; a rate limit is raised, not turned into a thousand single calls."""
+
+    def refuse(self, error):
+        real = self.g
+
+        def gmail(acc, path, method="GET", body=None, retry=True):
+            if path == "/messages/batchModify" and "TRASH" in body["addLabelIds"]:
+                real.calls.append((acc, path, method, body))
+                raise RuntimeError(error)
+            return real(acc, path, method, body)
+        return Patched(cleanup, gmail=gmail)
+
+    def test_a_rate_limit_is_raised_not_fallen_back_on(self):
+        with self.refuse("Gmail POST /messages/batchModify: 429 Too many requests"):
+            with self.assertRaises(RuntimeError):
+                cleanup._batch("acc1", ["aa11bb", "aa22cc"], add=["TRASH"], remove=["Label_Q"])
+        self.assertEqual(self.g.changes("/trash"), [])
+
+    def test_the_trash_refusal_trashes_one_by_one_and_still_removes_the_quarantine_label(self):
+        with self.refuse("Gmail POST /messages/batchModify: 400 Invalid label: TRASH"):
+            cleanup._batch("acc1", ["aa11bb", "aa22cc"], add=["TRASH"], remove=["Label_Q"])
+        self.assertEqual([c[1] for c in self.g.changes("/trash")], ["/messages/aa11bb/trash", "/messages/aa22cc/trash"])
+        self.assertEqual(self.g.changes("batchModify")[-1][3],
+                         {"ids": ["aa11bb", "aa22cc"], "addLabelIds": [], "removeLabelIds": ["Label_Q"]})
+
+
 class QuarantineBadge(World):
     def test_the_badge_reads_one_label_per_account_and_lists_nothing(self):
         real = self.g
