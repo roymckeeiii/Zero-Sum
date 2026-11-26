@@ -301,6 +301,7 @@ class BoundedWait(World):
 
     def test_bulk_protect_skips_a_sender_another_action_is_working_on(self):
         logged = []
+        self.db.protected = {S, "news@other.com"}
         with Patched(cleanup, log=lambda kind, text, *a: logged.append(text)), self.holding("acc1", S):
             cleanup._protect_in_gmail([S, "news@other.com"])
         self.assertEqual(self.kinds("acc1"), ["never_spam"])          # news@other.com only
@@ -333,12 +334,29 @@ class ProtectFailures(World):
         self.p2 = Patched(cleanup, gmail=gmail)
         self.p2.__enter__()
         self.addCleanup(self.p2.__exit__)
-        self.pending = {}
-        self.db.on("INSERT INTO unified.protect_pending (key, account_id, error) VALUES",
-                   lambda p: self.pending.__setitem__((p[0], p[1]), p[2]) or [])
+        self.pending, self.tries, self.age = {}, {}, 10 ** 6   # (key, account) -> error / attempts; seconds since last try
+
+        def upsert(sql, p):
+            k = (p[0], p[1])
+            self.tries[k] = 0 if k not in self.pending or "attempts = 0" in sql else self.tries[k] + 1
+            self.pending[k] = p[2]
+            return []
+
+        def update(p):
+            if (p[1], p[2]) in self.pending:
+                self.pending[(p[1], p[2])] = p[0]
+            return []
+        real_execute = self.db.execute
+        self.db.on("INSERT INTO unified.protect_pending (key, account_id, error) VALUES", lambda p: [])
+        self.db.execute = lambda sql, params=None: (upsert(sql, params) if "INSERT INTO unified.protect_pending (key, "
+                                                    "account_id, error) VALUES" in sql else None) or real_execute(sql, params)
+        self.db.on("UPDATE unified.protect_pending SET error", update)
         self.db.on("DELETE FROM unified.protect_pending WHERE key = %s AND account_id",
-                   lambda p: self.pending.pop((p[0], p[1]), None) and [])
-        self.db.on("SELECT key, account_id FROM unified.protect_pending", lambda p: sorted(self.pending))
+                   lambda p: (self.pending.pop((p[0], p[1]), None), self.tries.pop((p[0], p[1]), None)) and [])
+        self.db.on("SELECT key, account_id, attempts", lambda p: [(k, a, self.tries.get((k, a), 0), self.age)
+                                                                   for k, a in sorted(self.pending)])
+        self.db.on("SELECT key, account_id, error, attempts", lambda p: [(k, a, e, self.tries.get((k, a), 0))
+                                                                          for (k, a), e in sorted(self.pending.items())])
 
     def test_single_protect_reports_the_account_where_the_trash_filter_stayed(self):
         self.fail_for = {("acc2", "/settings/filters/")}
@@ -356,6 +374,7 @@ class ProtectFailures(World):
     def test_bulk_protect_goes_on_after_a_failing_sender_and_keeps_it_pending(self):
         cleanup._filter("acc1", "news@other.com", cleanup.TRASH_FILTER, "trash")
         self.fail_for = {("acc1", "/settings/filters/F1")}        # S's trash filter in acc1
+        self.db.protected = {S, "news@other.com"}
         cleanup._protect_in_gmail([S, "news@other.com"])
         self.assertEqual(self.kinds("acc1"), ["never_spam", "trash"])   # news@other.com done, S's trash still there
         self.assertEqual(self.kinds("acc2"), ["never_spam", "never_spam"])
@@ -367,6 +386,48 @@ class ProtectFailures(World):
         cleanup.retry_protect()
         self.assertEqual(self.pending, {})
         self.assertEqual(self.kinds("acc1"), ["never_spam"])
+
+    def test_retries_back_off_and_give_up_after_protect_tries(self):
+        self.db.protected = {S}
+        self.fail_for = {("acc1", "/settings/filters/")}
+        self.pending, self.tries = {(S, "acc1"): "500"}, {(S, "acc1"): 3}
+        self.age = 15 * 60 * 2 ** 3 - 1                           # not yet due after a third failed try
+        cleanup.retry_protect()
+        self.assertEqual(self.g.changes("/settings/filters/"), [])
+        self.age += 1
+        cleanup.retry_protect()
+        self.assertEqual(self.tries[(S, "acc1")], 4)              # tried, failed again, counted
+        self.tries[(S, "acc1")] = cleanup.PROTECT_TRIES
+        self.age = 10 ** 9
+        self.g.calls.clear()
+        cleanup.retry_protect()
+        self.assertEqual(self.g.calls, [])                        # given up: no more Gmail calls
+        self.assertEqual([p["gaveUp"] for p in cleanup.protect_pending_list()], [True])
+        self.fail_for = set()
+        cleanup.sender_action({"addr": S, "action": "protect"})   # protecting it again finishes it
+        self.assertEqual(self.pending, {})
+
+    def test_a_sender_unprotected_while_a_retry_waited_is_left_alone(self):
+        self.db.protected = set()                                 # unprotected (and blocked) after the retry was listed
+        self.pending = {(S, "acc1"): "x"}
+        cleanup._protect_account(self.acc.list()[0], [S])
+        self.assertEqual(self.kinds("acc1"), ["trash"])           # the new Trash filter stays, no never-spam added
+        self.assertEqual(self.pending, {})
+
+    def test_a_retry_leaves_pairs_a_running_protect_owns_and_busy_does_not_bring_back_a_finished_one(self):
+        import actions
+        self.db.protected = {S}
+        self.pending = {(S, "acc1"): "not done yet"}
+        self.g.calls.clear()
+        with actions._Owning([(S, "acc1")]):
+            cleanup.retry_protect()
+        self.assertEqual(self.g.changes("/settings/filters"), [])
+        self.pending = {}                                          # the other run finished and removed the entry
+        def busy(acc, key, wait=None):
+            raise cleanup.SenderBusy(key)
+        with Patched(actions, _sender_lock=busy):
+            self.assertEqual(cleanup._protect_account(self.acc.list()[0], [S])[2], [S])
+        self.assertEqual(self.pending, {})                         # a busy sender is not recorded again
 
     def test_bulk_protect_puts_every_sender_on_record_before_the_background_work(self):
         started, db = [], self.db

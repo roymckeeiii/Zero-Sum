@@ -298,8 +298,9 @@ async function loadSenders() {
   const c = d.collect, done = c.filter((x) => x.backfill_done).length, msgs = c.reduce((n, x) => n + x.messages, 0);
   $("#c-status").innerHTML = `History collected: ${fmt(msgs)} emails across ${c.length} accounts; ${done}/${c.length} fully back-filled
     (older mail is back-filled a few hundred messages per account each run).` + c.filter((x) => x.error).map((x) => `<div class="err">${esc(x.email)}: ${esc(x.error)}</div>`).join("")
-    + ((d.protectPending || []).length ? `<div class="err">Protection not finished in Gmail yet (tried again every run; Zero Sum's own filters may still move this mail):
-      ${d.protectPending.map((p) => `${esc(p.key)} in ${esc(p.email)}${p.error ? ` (${esc(p.error)})` : ""}`).join("; ")}</div>` : "");
+    + ((d.protectPending || []).length ? `<div class="err">Protection not finished in Gmail yet (tried again later; Zero Sum's own filters may still move this mail; protect a sender again to retry now):
+      ${d.protectPending.map((p) => `${esc(p.key)} in ${esc(p.email)}${p.gaveUp ? " (gave up" + (p.error ? `: ${esc(p.error)}` : "") + ")"
+        : p.error ? ` (${esc(p.error)})` : ""}`).join("; ")}</div>` : "");
   if (!d.senders.length) { $("#c-table").innerHTML = `<div class="empty">No senders yet${msgs ? " match" : ": history is still being collected"}.</div>`; return; }
   S.senders = d.senders;
   $("#c-table").innerHTML = `<table><thead><tr><th>Sender</th><th class="num">Emails</th><th class="num">Read</th>

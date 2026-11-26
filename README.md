@@ -242,7 +242,7 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
   background analyst skips them. Protecting adds Gmail's "never send to Spam" filter in every account and marks the
   address "kept" in Inbox Zero. Auto-star still works on protected senders. If Gmail refuses or a restart interrupts
   the filter changes in an account (Zero Sum's own Trash or archive filter could then still move the mail), the
-  result says where, the Cleanup tab lists it, and it is retried every collector run until done
+  result says where, the Cleanup tab lists it, and it is retried, backing off, up to `PROTECT_TRIES` times
   (`unified.protect_pending`).
 - Every Gmail filter Zero Sum creates is written down (`unified.filter`: account, filter id, sender, kind). **Protect**,
   **Keep**, **Reset** and applying a new action or plan remove exactly its own filters for that sender (Trash,
@@ -386,6 +386,7 @@ All settings are environment variables; see [`.env.example`](.env.example).
 | `MAX_BULK` | `200000` | most emails one bulk action touches per account |
 | `PREVIEW_MAX`, `PREVIEW_LOOKUPS` | `20000`, `100` | the confirm dialog's count: most emails it counts per account and step (shown as "or more" beyond), and most senders it reads from Gmail for mail not collected yet (the rest shown as "up to") |
 | `BULK_LOOKUPS` | `300` | most message senders one bulk action reads from Gmail per request (mail not collected yet), split evenly over the accounts; the rest is left for "run it again" |
+| `PROTECT_TRIES` | `8` | tries to finish the Gmail side of a protection that failed or was interrupted (15 minutes apart, then doubling up to 16 hours); after that the Cleanup tab shows it as "gave up" until the sender is protected again |
 | `UNDO_REFRESH` | `500` | most restored messages one undo reads back from Gmail (in the background, about 50 seconds of quota at the default `GMAIL_UNITS_PER_SEC`, used only while nothing else needs it); the rest stay marked as in the inbox |
 | `SENDER_WAIT` | `30` | seconds an action waits for another action on the same sender (two tabs, Block then Auto-archive) before it skips that sender and says it is busy |
 | `OPENROUTER_API_KEY`, `AI_MODEL`, `AI_BASE_URL` | empty, `anthropic/claude-haiku-5.5`, OpenRouter | all AI features: AI Cleanup, AI sort, AI suggest, background analyst (off without a key; the background analyst is also off until turned on in AI Cleanup) |

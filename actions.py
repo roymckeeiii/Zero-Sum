@@ -71,17 +71,49 @@ def _newsletter(c, acc_id, addr, status):
               'DO UPDATE SET status = EXCLUDED.status, "updatedAt" = now()', (new_id(), addr, status, acc_id))
 
 
-def _pending(key, acc_id, error=None):
+# DEFAULT - Roy may change: tries before a pending protection is given up on (shown as "gave up" on the Cleanup tab;
+# protecting the sender again starts over). Retries back off: 15 min, then 30, 60, ... up to 16 h apart.
+PROTECT_TRIES = int(os.environ.get("PROTECT_TRIES", "8"))
+_BULK, _BULK_LOCK = {}, threading.Lock()   # (key, account id) -> how many running protects in this process own it
+
+
+def _pending(key, acc_id, error=None, fresh=False, only_if_there=False):
     """unified.protect_pending: the Gmail side of a protection still to do in an account (error: why not yet), or done
-    (error None). Retried every collector run (retry_protect) until it succeeds, so a failed or interrupted filter
-    removal cannot leave Zero Sum's own Trash or archive filter running in Gmail."""
+    (error None). Retried by retry_protect, backing off, up to PROTECT_TRIES times, so a failed or interrupted filter
+    removal cannot leave Zero Sum's own Trash or archive filter running in Gmail. `fresh`: a new request by the person
+    (the count starts over). `only_if_there`: update an entry, never create one (another run may have finished it)."""
     with db() as c:
         if error is None:
             c.execute("DELETE FROM unified.protect_pending WHERE key = %s AND account_id = %s", (key, acc_id))
+        elif only_if_there:
+            c.execute("UPDATE unified.protect_pending SET error = %s, updated_at = now() WHERE key = %s AND account_id = %s",
+                      (str(error)[:300], key, acc_id))
         else:
             c.execute("INSERT INTO unified.protect_pending (key, account_id, error) VALUES (%s, %s, %s) "
-                      "ON CONFLICT (key, account_id) DO UPDATE SET error = EXCLUDED.error, "
-                      "attempts = unified.protect_pending.attempts + 1, updated_at = now()", (key, acc_id, str(error)[:300]))
+                      "ON CONFLICT (key, account_id) DO UPDATE SET error = EXCLUDED.error, attempts = "
+                      + ("0" if fresh else "unified.protect_pending.attempts + 1") + ", updated_at = now()",
+                      (key, acc_id, str(error)[:300]))
+
+
+class _Owning:
+    """Marks (key, account) pairs as being worked on by a protect in this process, so retry_protect leaves them."""
+
+    def __init__(self, pairs):
+        self.pairs = list(pairs)
+
+    def __enter__(self):
+        with _BULK_LOCK:
+            for p in self.pairs:
+                _BULK[p] = _BULK.get(p, 0) + 1
+        return self
+
+    def __exit__(self, *a):
+        with _BULK_LOCK:
+            for p in self.pairs:
+                _BULK[p] -= 1
+                if not _BULK[p]:
+                    del _BULK[p]
+        return False
 
 
 def _protect_account(acc, keys):
@@ -93,13 +125,16 @@ def _protect_account(acc, keys):
     for k in keys:   # per sender, under its lock: an action running on it finishes first, or k is left for later
         try:
             with _sender_lock(acc["id"], k):
+                if k not in protected_set():   # unprotected (and perhaps blocked) since this run began: hands off
+                    _pending(k, acc["id"])
+                    continue
                 cleared += remove_app_filters(acc["id"], k)
                 _filter(acc["id"], k, NEVER_SPAM_FILTER, "never_spam", source="protect")
             done += 1
             _pending(k, acc["id"])
-        except SenderBusy:
+        except SenderBusy:   # whoever holds the lock may be finishing this very protection: do not bring it back
             busy.append(k)
-            _pending(k, acc["id"], BUSY_NOTE)
+            _pending(k, acc["id"], BUSY_NOTE, only_if_there=True)
         except Exception as e:  # noqa: BLE001 - protection in Zero Sum still applies; the filters are retried
             failed.append((k, str(e)[:200]))
             _pending(k, acc["id"], e)
@@ -109,47 +144,58 @@ def _protect_account(acc, keys):
 def _protect_in_gmail(keys, accounts=None):
     """For a bulk protect, in the background: _protect_account in every account. The protection itself is already in
     the database, and every (sender, account) is on record as pending first, so a restart midway loses nothing."""
-    for acc in accounts or ACC.list():
-        done, cleared, busy, failed = _protect_account(acc, keys)
-        try:
-            left = foreign_filters(acc["id"], keys)
-        except Exception as e:  # noqa: BLE001
-            left = 0
-            failed.append(("(filter check)", str(e)[:200]))
-        log("cleanup", f"bulk protect: {done} never-spam filter(s), {cleared} of Zero Sum's own filter(s) removed"
-            + (f"; {left} filter(s) Zero Sum did not create still move mail from these senders (left in place)"
-               if left else "")
-            + (f"; skipped {len(busy)} sender(s) another action was still working on (tried again next run): "
-               f"{', '.join(busy[:10])}" if busy else ""), acc["email"])
-        if failed:
-            log("cleanup-error", f"bulk protect: Gmail filters not changed for {len(failed)} sender(s), tried again next "
-                f"run: " + "; ".join(f"{k}: {e}" for k, e in failed[:5]), acc["email"])
+    accounts = accounts or ACC.list()
+    with _Owning((k, a["id"]) for a in accounts for k in keys):
+        for acc in accounts:
+            done, cleared, busy, failed = _protect_account(acc, keys)
+            try:
+                left = foreign_filters(acc["id"], keys)
+            except Exception as e:  # noqa: BLE001
+                left = 0
+                failed.append(("(filter check)", str(e)[:200]))
+            log("cleanup", f"bulk protect: {done} never-spam filter(s), {cleared} of Zero Sum's own filter(s) removed"
+                + (f"; {left} filter(s) Zero Sum did not create still move mail from these senders (left in place)"
+                   if left else "")
+                + (f"; skipped {len(busy)} sender(s) another action was still working on (tried again later): "
+                   f"{', '.join(busy[:10])}" if busy else ""), acc["email"])
+            if failed:
+                log("cleanup-error", f"bulk protect: Gmail filters not changed for {len(failed)} sender(s), tried again "
+                    f"later: " + "; ".join(f"{k}: {e}" for k, e in failed[:5]), acc["email"])
+
+
+def _due(attempts, age_s):
+    """Is a pending protection due for another try? Never after PROTECT_TRIES; otherwise 15 minutes after the last
+    change, doubling with each failed try (at most 16 hours)."""
+    return attempts < PROTECT_TRIES and age_s >= 15 * 60 * 2 ** min(attempts, 6)
 
 
 def retry_protect():
-    """Every collector run (and at start): finish the Gmail side of protections that failed or were interrupted. A
-    sender unprotected since, or an account no longer linked, is dropped from the list."""
+    """Every collector run (and at start): finish the Gmail side of protections that failed or were interrupted, as they
+    come due (_due). A sender unprotected since, or an account no longer linked, is dropped from the list, and pairs a
+    protect in this process is still working on are left to it."""
     with db() as c:
-        rows = c.execute("SELECT key, account_id FROM unified.protect_pending ORDER BY updated_at LIMIT 2000").fetchall()
+        rows = c.execute("SELECT key, account_id, attempts, extract(epoch from now() - updated_at) "
+                         "FROM unified.protect_pending ORDER BY updated_at LIMIT 2000").fetchall()
     if not rows:
         return
     prot, accs = protected_set(), {a["id"]: a for a in ACC.list()}
     by_acc = {}
-    for key, acc_id in rows:
+    for key, acc_id, attempts, age in rows:
         if key not in prot or acc_id not in accs:
             _pending(key, acc_id)
-        else:
+        elif (key, acc_id) not in _BULK and _due(attempts or 0, float(age or 0)):
             by_acc.setdefault(acc_id, []).append(key)
     for acc_id, keys in by_acc.items():
         _protect_in_gmail(keys, [accs[acc_id]])
 
 
 def protect_pending_list():
-    """What retry_protect still has to do, for the Cleanup tab."""
+    """What retry_protect still has to do, and what it gave up on, for the Cleanup tab."""
     names = {a["id"]: a["email"] for a in ACC.list()}
     with db() as c:
-        return [{"key": k, "email": names.get(a, a), "error": e} for k, a, e in c.execute(
-            "SELECT key, account_id, error FROM unified.protect_pending ORDER BY key LIMIT 50").fetchall()]
+        return [{"key": k, "email": names.get(a, a), "error": e, "gaveUp": (n or 0) >= PROTECT_TRIES}
+                for k, a, e, n in c.execute(
+                    "SELECT key, account_id, error, attempts FROM unified.protect_pending ORDER BY key LIMIT 50").fetchall()]
 
 
 def protect_many(d):
@@ -165,7 +211,8 @@ def protect_many(d):
             cur.executemany("INSERT INTO unified.protected (key) VALUES (%s) ON CONFLICT DO NOTHING", [(k,) for k in keys])
         for a in ACC.list():   # on record before the background work starts: a restart midway is picked up again
             c.execute("INSERT INTO unified.protect_pending (key, account_id, error) SELECT k, %s, 'not done yet' "
-                      "FROM unnest(%s::text[]) k ON CONFLICT DO NOTHING", (a["id"], keys))
+                      "FROM unnest(%s::text[]) k ON CONFLICT (key, account_id) DO UPDATE SET attempts = 0, "
+                      "error = EXCLUDED.error, updated_at = now()", (a["id"], keys))
     for k in keys:
         stop_automation(k)
     threading.Thread(target=_protect_in_gmail, args=(keys,), daemon=True).start()
@@ -335,12 +382,12 @@ def sender_action(d):
             except SenderBusy:
                 busy.append(acc["email"])
                 if act == "protect":
-                    _pending(addr, acc["id"], BUSY_NOTE)
+                    _pending(addr, acc["id"], BUSY_NOTE, fresh=True)
                 log("cleanup-error", f"{act} {addr}: filters not changed: {BUSY_NOTE}", acc["email"])
             except Exception as e:  # noqa: BLE001 - protection in Zero Sum still applies; Gmail is retried
                 failed.append(f"{acc['email']}: {str(e)[:120]}")
                 if act == "protect":
-                    _pending(addr, acc["id"], e)
+                    _pending(addr, acc["id"], e, fresh=True)
                 log("cleanup-error", f"{act} {addr}: filters: {e}"[:300], acc["email"])
         if cleared:
             log("cleanup", f"protect {addr}: removed {cleared} of Zero Sum's own filter(s)")
