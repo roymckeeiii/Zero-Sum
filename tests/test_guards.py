@@ -363,6 +363,34 @@ class InboxOrigin(World):
                                          {"ids": ["aa22cc"], "addLabelIds": ["Label_Q"], "removeLabelIds": []}])
 
 
+class UnlinkedAccounts(World):
+    """unified.msg keeps rows of accounts that were unlinked or that ACCOUNT_OWNERS leaves out: a sender action,
+    preview, plan or protect acts on the linked ones and never fails because of the others."""
+
+    def setUp(self):
+        super().setUp()
+        self.db.on("SELECT DISTINCT account_id FROM unified.msg", [("acc-gone",), ("acc1",)])
+        self.g.meta = {"aa11bb": JUNK, "aa22cc": JUNK}
+
+    def test_delete_preview_and_plan_skip_an_unlinked_account(self):
+        r = cleanup.sender_action({"addr": JUNK, "action": "delete"})
+        self.assertEqual([(x["email"], x["ok"]) for x in r["results"]], [(ME, True)])
+        p = cleanup.preview({"addr": JUNK, "action": "delete"})
+        self.assertEqual([a["id"] for a in p["steps"][0]["accounts"]], ["acc1"])
+        r = cleanup.apply_plan({"addr": JUNK, "groups": [], "default": "archive"})
+        self.assertEqual([x["email"] for x in r["results"]], [ME])
+
+    def test_protect_marks_no_newsletter_row_for_an_unlinked_account(self):
+        cleanup.sender_action({"addr": JUNK, "action": "protect"})
+        self.assertEqual([p[3] for _, p in self.db.said('INSERT INTO "Newsletter"')], ["acc1"])
+
+    def test_the_cleanup_list_reads_only_linked_accounts(self):
+        cleanup.senders({})
+        sql, params = self.db.said("FROM unified.msg WHERE ts >")[0]
+        self.assertIn("account_id = ANY(%s)", sql)
+        self.assertIn(["acc1", "acc2"], list(params))
+
+
 class LookupBudget(World):
     """A bulk action reads at most BULK_LOOKUPS senders from Gmail per request, so it answers inside the proxy's timeout;
     the messages it could not check are left alone and the answer says to run it again."""

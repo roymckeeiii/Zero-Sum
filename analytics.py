@@ -20,30 +20,35 @@ def _zone(c, name):
 def overview(q):
     days = max(1, min(int(q.get("days", ["30"])[0]), 180))
     accs = {a["id"]: a["email"] for a in ACC.list()}
+    ids = list(accs)   # every query is held to the linked accounts (ACCOUNT_OWNERS): never another user's data
     with db() as c:
         tz = _zone(c, q.get("tz", [""])[0].strip())
         daily = c.execute(
             "SELECT to_char(date_trunc('day', ts AT TIME ZONE %s), 'YYYY-MM-DD'), account_id, count(*) FROM unified.msg "
-            "WHERE ts > now() - make_interval(days => %s) GROUP BY 1, 2 ORDER BY 1", (tz, days)).fetchall()
+            "WHERE ts > now() - make_interval(days => %s) AND account_id = ANY(%s) GROUP BY 1, 2 ORDER BY 1",
+            (tz, days, ids)).fetchall()
         per = c.execute(
             "SELECT account_id, count(*), sum(unread::int), sum(inbox::int), count(DISTINCT from_addr) "
-            "FROM unified.msg WHERE ts > now() - make_interval(days => %s) GROUP BY 1", (days,)).fetchall()
+            "FROM unified.msg WHERE ts > now() - make_interval(days => %s) AND account_id = ANY(%s) GROUP BY 1",
+            (days, ids)).fetchall()
         top_senders = c.execute(
             "SELECT from_addr, max(from_name), count(*), sum(unread::int), count(DISTINCT account_id) FROM unified.msg "
-            "WHERE ts > now() - make_interval(days => %s) GROUP BY 1 ORDER BY 3 DESC LIMIT 15", (days,)).fetchall()
+            "WHERE ts > now() - make_interval(days => %s) AND account_id = ANY(%s) GROUP BY 1 ORDER BY 3 DESC LIMIT 15",
+            (days, ids)).fetchall()
         top_domains = c.execute(
             "SELECT domain, count(*), sum(unread::int), count(DISTINCT from_addr) FROM unified.msg "
-            "WHERE ts > now() - make_interval(days => %s) GROUP BY 1 ORDER BY 2 DESC LIMIT 15", (days,)).fetchall()
+            "WHERE ts > now() - make_interval(days => %s) AND account_id = ANY(%s) GROUP BY 1 ORDER BY 2 DESC LIMIT 15",
+            (days, ids)).fetchall()
         rules = c.execute(
             'SELECT coalesce(r.name, \'(deleted rule)\'), er."emailAccountId", count(*) FROM "ExecutedRule" er '
             'LEFT JOIN "Rule" r ON r.id = er."ruleId" WHERE er."createdAt" > now() - make_interval(days => %s) '
-            "AND er.status::text = 'APPLIED' GROUP BY 1, 2", (days,)).fetchall()
+            "AND er.status::text = 'APPLIED' AND er.\"emailAccountId\" = ANY(%s) GROUP BY 1, 2", (days, ids)).fetchall()
         cleanup = c.execute('SELECT status::text, "emailAccountId", count(*) FROM "Newsletter" '
-                            "WHERE status IS NOT NULL GROUP BY 1, 2").fetchall()
+                            "WHERE status IS NOT NULL AND \"emailAccountId\" = ANY(%s) GROUP BY 1, 2", (ids,)).fetchall()
         n_senders = c.execute("SELECT count(DISTINCT from_addr) FROM unified.msg "
-                              "WHERE ts > now() - make_interval(days => %s)", (days,)).fetchone()[0]
+                              "WHERE ts > now() - make_interval(days => %s) AND account_id = ANY(%s)", (days, ids)).fetchone()[0]
         collect = c.execute("SELECT count(*) FILTER (WHERE backfill_done), count(*), min(oldest) "
-                            "FROM unified.collect_state").fetchone()
+                            "FROM unified.collect_state WHERE account_id = ANY(%s)", (ids,)).fetchone()
 
     def inbox_now(a):
         try:
@@ -57,12 +62,12 @@ def overview(q):
     for name, acc, n in rules:
         by_rule.setdefault(name, {"name": name, "total": 0, "accounts": {}})
         by_rule[name]["total"] += n
-        by_rule[name]["accounts"][accs.get(acc, acc)] = n
+        by_rule[name]["accounts"][accs.get(acc, "?")] = n
     clean = {}
     for st, acc, n in cleanup:
         clean.setdefault(st, {"total": 0, "accounts": {}})
         clean[st]["total"] += n
-        clean[st]["accounts"][accs.get(acc, acc)] = n
+        clean[st]["accounts"][accs.get(acc, "?")] = n
     accounts = []
     for acc_id, em in accs.items():
         p = next((r for r in per if r[0] == acc_id), (acc_id, 0, 0, 0, 0))
@@ -80,7 +85,7 @@ def overview(q):
                    "ruleActions": sum(r["total"] for r in by_rule.values()),
                    "unsubscribed": clean.get("UNSUBSCRIBED", {}).get("total", 0),
                    "autoArchived": clean.get("AUTO_ARCHIVED", {}).get("total", 0)},
-        "daily": [{"day": d, "email": accs.get(a, a), "count": n} for d, a, n in daily],
+        "daily": [{"day": d, "email": accs[a], "count": n} for d, a, n in daily if a in accs],
         "accounts": sorted(accounts, key=lambda a: -a["received"]),
         "topSenders": [{"addr": a, "name": nm, "count": n, "unread": u, "accounts": k} for a, nm, n, u, k in top_senders],
         "topDomains": [{"domain": d, "count": n, "unread": u, "senders": s} for d, n, u, s in top_domains],

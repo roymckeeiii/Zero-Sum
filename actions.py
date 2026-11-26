@@ -22,21 +22,23 @@ def senders(q):
     hide = q.get("hide", ["1"])[0] == "1"
     accs = {a["id"]: a["email"] for a in ACC.list()}
     protset = protected_set()
-    with db() as c:
+    with db() as c:   # linked accounts only (ACCOUNT_OWNERS; rows of unlinked accounts stay in unified.msg)
         rows = c.execute(
             "SELECT from_addr, max(from_name), min(domain), count(*), sum(unread::int), sum(inbox::int), "
             "extract(epoch from max(ts)), array_agg(DISTINCT account_id), bool_or(unsub IS NOT NULL) "
-            "FROM unified.msg WHERE ts > now() - make_interval(days => %s) "
+            "FROM unified.msg WHERE ts > now() - make_interval(days => %s) AND account_id = ANY(%s) "
             "AND (%s = '' OR from_addr LIKE %s OR lower(coalesce(from_name, '')) LIKE %s) "
             "GROUP BY from_addr ORDER BY count(*) DESC LIMIT 400",
-            (days, search, f"%{search}%", f"%{search}%")).fetchall()
+            (days, list(accs), search, f"%{search}%", f"%{search}%")).fetchall()
         addrs = [r[0] for r in rows]
         status = {}
         for acc, em, st in c.execute('SELECT "emailAccountId", lower(email), status::text FROM "Newsletter" '
-                                     'WHERE lower(email) = ANY(%s) AND status IS NOT NULL', (addrs,)).fetchall():
+                                     'WHERE lower(email) = ANY(%s) AND status IS NOT NULL AND "emailAccountId" = ANY(%s)',
+                                     (addrs, list(accs))).fetchall():
             status.setdefault(em, {})[acc] = st
     out = []
     for addr, name, dom, n, unread, inbox, last, acc_ids, has_unsub in rows:
+        acc_ids = [a for a in acc_ids if a in accs]
         st = status.get(addr, {})
         prot = is_protected(addr, protset)
         handled = bool(st) and all(acc in st for acc in acc_ids)
@@ -47,6 +49,20 @@ def senders(q):
                     "accounts": [{"id": a, "email": accs.get(a, "?"), "status": st.get(a)} for a in acc_ids],
                     "unsub": has_unsub, "protected": prot})
     return {"senders": out, "collect": collect_status(), "protected": sorted(protset), "protectPending": protect_pending_list()}
+
+
+def sender_accounts(addr, filters=False):
+    """The linked accounts (ACC) that have mail from addr in the local history, and with filters=True also those with
+    a filter on record for it. unified.msg and unified.filter keep rows of accounts that were unlinked in Inbox Zero
+    or that ACCOUNT_OWNERS leaves out: those are never acted on (one used to fail a whole action halfway)."""
+    live = [a["id"] for a in ACC.list()]
+    with db() as c:
+        ids = [r[0] for r in c.execute("SELECT DISTINCT account_id FROM unified.msg WHERE from_addr = %s "
+                                       "AND account_id = ANY(%s)", (addr, live)).fetchall()]
+        if filters:
+            ids += [r[0] for r in c.execute("SELECT DISTINCT account_id FROM unified.filter WHERE addr = %s",
+                                            (addr,)).fetchall() if r[0] not in ids]
+    return [a for a in dict.fromkeys(ids) if a in live]
 
 
 def _newsletter(c, acc_id, addr, status):
@@ -327,8 +343,9 @@ def sender_action(d):
         if left:
             log("cleanup", f"protect {addr}: " + FOREIGN_NOTE.format(n=left))
         if act == "protect" and not addr.startswith("@"):  # also "kept" in Inbox Zero for every account that gets it
+            accounts = sender_accounts(addr)
             with db() as c:
-                for (a,) in c.execute("SELECT DISTINCT account_id FROM unified.msg WHERE from_addr = %s", (addr,)).fetchall():
+                for a in accounts:
                     _newsletter(c, a, addr, "APPROVED")
         log("cleanup", f"{act} {addr}")
         return {"results": [{"email": "all accounts", "ok": not failed, "note": f"{addr} {act}ed"
@@ -349,24 +366,22 @@ def sender_action(d):
     _ACTION.note = f"{act} {addr}"
     if act in ("keep", "reset"):
         stop_automation(addr)
+    # Delete and Block drop the sender's local history: for Keep and Reset its filters still say where
+    acc_ids = sender_accounts(addr, filters=act in ("keep", "reset"))
     with db() as c:
-        acc_ids = [r[0] for r in c.execute("SELECT DISTINCT account_id FROM unified.msg WHERE from_addr = %s",
-                                           (addr,)).fetchall()]
         unsub = {a: (u, p) for a, u, p in c.execute(
             "SELECT DISTINCT ON (account_id) account_id, unsub, unsub_post FROM unified.msg "
             "WHERE from_addr = %s AND unsub IS NOT NULL ORDER BY account_id, ts DESC", (addr,)).fetchall()}
-        if act in ("keep", "reset"):  # Delete and Block drop the sender's local history: its filters still say where
-            acc_ids += [r[0] for r in c.execute("SELECT DISTINCT account_id FROM unified.filter WHERE addr = %s",
-                                                (addr,)).fetchall() if r[0] not in acc_ids]
     if d.get("accounts"):
         acc_ids = [a for a in acc_ids if a in set(d["accounts"])]
     results, manual = [], []
     lookups_start()
     for k, a in enumerate(acc_ids):
-        em = ACC.email(a)
+        em = a
         held_start()
         lookups_account(len(acc_ids) - k)
         try:
+            em = ACC.email(a)   # inside the try: an account unlinked meanwhile fails only its own row
             # the old filters go and the new ones come as one step: another action on this sender waits
             with _sender_lock(a, addr):
                 note = []
@@ -588,8 +603,9 @@ def quarantine_action(d):
         except Exception as e:  # noqa: BLE001
             results.append({"email": a["email"], "ok": False, "note": str(e)[:200]})
     if act == "release" and sender:
+        accounts = sender_accounts(sender)
         with db() as c:
-            for (acc,) in c.execute("SELECT DISTINCT account_id FROM unified.msg WHERE from_addr = %s", (sender,)).fetchall():
+            for acc in accounts:
                 c.execute('UPDATE "Newsletter" SET status = NULL, "updatedAt" = now() '
                           'WHERE lower(email) = %s AND "emailAccountId" = %s AND status::text = \'AUTO_ARCHIVED\'',
                           (sender, acc))
@@ -683,9 +699,7 @@ def preview(d):
             steps.append(("kept and starred", "keep", kept_query(addr, kq)))
     if destructive:
         guard_sender(addr)
-    with db() as c:
-        acc_ids = [r[0] for r in c.execute("SELECT DISTINCT account_id FROM unified.msg WHERE from_addr = %s",
-                                           (addr,)).fetchall()]
+    acc_ids = sender_accounts(addr)
     if d.get("accounts"):
         acc_ids = [a for a in acc_ids if a in set(d["accounts"])]
 
@@ -723,7 +737,8 @@ def preview(d):
     counts = dict(zip(jobs, POOL.map(count, jobs)))
     out = []
     for label, action, query in steps:
-        per = [{"id": a, "email": ACC.email(a), **counts[(a, query)]} for a in acc_ids]
+        names = {x["id"]: x["email"] for x in ACC.list()}
+        per = [{"id": a, "email": names.get(a, a), **counts[(a, query)]} for a in acc_ids]
         out.append({"what": label, "action": action, "query": bulk_query(query), "accounts": per,
                     "total": sum(x.get("count", 0) for x in per),
                     "unchecked": sum(x.get("unchecked", 0) for x in per),
@@ -771,15 +786,14 @@ def apply_plan(d):
                                         "(another action on this sender was still running, or Gmail failed): apply "
                                         "again to remove them" if stale else "")}]}
     stop_automation(addr)  # a word plan replaces an earlier AI sort
-    with db() as c:
-        acc_ids = [r[0] for r in c.execute("SELECT DISTINCT account_id FROM unified.msg WHERE from_addr = %s",
-                                           (addr,)).fetchall()]
+    acc_ids = sender_accounts(addr)
     results = []
     lookups_start()
     for k, a in enumerate(acc_ids):
-        em = ACC.email(a)
+        em = a
         lookups_account(len(acc_ids) - k)
         try:
+            em = ACC.email(a)
             lid = label_id(a, QUARANTINE) if "quarantine" in destructive else None
             notes = []
             held_start()
