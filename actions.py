@@ -9,8 +9,9 @@ from collector import BACKFILL_DAYS, collect_status, qs
 from core import ACC, POOL, db, gmail, gmail_list, label_id, log, new_id
 from gmailops import (ARCHIVE_FILTER, AUTOMATION_KINDS, BUSY_NOTE, FOREIGN_NOTE, MAX_BULK, NEVER_SPAM_FILTER, QUARANTINE,
                       STAR_FILTER, TRASH_FILTER, _ACTION, SenderBusy, _batch, _filter, _modify_existing, _sender_lock,
-                      bulk_query, foreign_filters, held_note, held_start, inbox_parts, lookup_budget, lookups_account, lookups_end,
-                      lookups_start, part_note, quarantine_archived, remove_app_filters, senders_of, unchecked_note)
+                      bulk_query, foreign_filters, held_note, held_start, inbox_parts, lookup_budget, lookups_account,
+                      lookups_end, lookups_start, part_note, quarantine_archived, quarantine_left, remove_app_filters,
+                      senders_of, unchecked_note)
 from guard import (SENDER, SENDER_KEY, frm, guard_sender, is_protected, keep_query, own_address, own_set, parse_protect_keys,
                    protected_set, sender_addr)
 from inbox import meta
@@ -652,6 +653,8 @@ def quarantine_action(d):
             else:
                 n = _batch(a["id"], ids, add=add, remove=[lid], sender=senders) if ids else 0
                 note = f"{n} {QACTIONS[act]}"
+            if ids:   # out of Quarantine now: their origin entries are pruned once the change can no longer be undone
+                quarantine_left(a["id"], ids)
             if refused:
                 note += f"; {refused} not in {QUARANTINE}, left alone"
             if left:

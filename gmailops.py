@@ -669,10 +669,11 @@ def _record(acc_id, ids, add, remove):
         c.execute("DELETE FROM unified.action_log WHERE at < now() - make_interval(days => %s)", (UNDO_DAYS,))
 
 
-def _quarantine_origin(acc_id, ids, add, remove):
+def _quarantine_origin(acc_id, ids, add, remove, undo=False):
     """Remember which messages were already archived when an action put them in Quarantine (and forget it for the
     ones taken out of the inbox), so that Release puts only formerly-inbox mail back in the inbox. Mail the Quarantine
-    filter catches on arrival has no entry: it was on its way to the inbox, and Release puts it there."""
+    filter catches on arrival has no entry: it was on its way to the inbox, and Release puts it there. An undo that
+    puts mail back in Quarantine (undo=True) keeps the entries it finds (clears left_at, see quarantine_left)."""
     if not ids or not any(str(x).startswith("Label_") for x in add):   # user labels only: no lookup otherwise
         return
     qlid = label_id(acc_id, QUARANTINE, create=False)
@@ -681,11 +682,25 @@ def _quarantine_origin(acc_id, ids, add, remove):
     with db() as c:
         for i in range(0, len(ids), 5000):
             part = ids[i:i + 5000]
-            if "INBOX" in remove:
+            if undo:
+                c.execute("UPDATE unified.quarantine_archived SET left_at = NULL WHERE account_id = %s AND id = ANY(%s)",
+                          (acc_id, part))
+            elif "INBOX" in remove:
                 c.execute("DELETE FROM unified.quarantine_archived WHERE account_id = %s AND id = ANY(%s)", (acc_id, part))
             else:
                 c.execute("INSERT INTO unified.quarantine_archived (account_id, id) SELECT %s, unnest(%s::text[]) "
-                          "ON CONFLICT DO NOTHING", (acc_id, part))
+                          "ON CONFLICT (account_id, id) DO UPDATE SET left_at = NULL", (acc_id, part))
+
+
+def quarantine_left(acc_id, ids):
+    """These messages left Quarantine (released, archived or deleted from the tab): their entries are kept while that
+    change can still be undone (UNDO_DAYS; an undo puts them back in Quarantine, where the entry is still right), then
+    pruned with every other entry whose mail left that long ago."""
+    with db() as c:
+        for i in range(0, len(ids), 5000):
+            c.execute("UPDATE unified.quarantine_archived SET left_at = now() WHERE account_id = %s AND id = ANY(%s)",
+                      (acc_id, list(ids[i:i + 5000])))
+        c.execute("DELETE FROM unified.quarantine_archived WHERE left_at < now() - make_interval(days => %s)", (UNDO_DAYS,))
 
 
 def quarantine_archived(acc_id, ids):
@@ -733,6 +748,8 @@ def _batch(acc_id, ids, add=(), remove=(), record=True, sender=None, after_chunk
     if ids and record and (add or remove):
         _record(acc_id, ids, add, remove)
         _quarantine_origin(acc_id, ids, add, remove)
+    elif ids and not record:
+        _quarantine_origin(acc_id, ids, add, remove, undo=True)
     for i in range(0, len(ids), 1000):
         chunk = ids[i:i + 1000]
         try:

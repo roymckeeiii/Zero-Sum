@@ -357,6 +357,35 @@ class InboxOrigin(World):
             notes = [p[1] for _, p in self.db.said("INSERT INTO unified.action_log")][-2:]
             self.assertTrue(notes[0].endswith("(back to the inbox)") and notes[1].endswith("(kept archived)"), notes)
 
+    def test_entries_are_pruned_after_the_mail_left_quarantine_and_kept_through_an_undo(self):
+        self.acc.accs = self.acc.accs[:1]
+        self.g.found = {"labelIds=Label_Q": ["aa11bb", "aa22cc"]}
+        self.db.on("SELECT id, from_addr FROM unified.msg", [("aa11bb", JUNK), ("aa22cc", JUNK)])
+        for act in ("release", "archive", "delete"):
+            self.db.sql.clear()
+            cleanup.quarantine_action({"action": act, "sender": JUNK})
+            left = self.db.said("SET left_at = now()")
+            self.assertEqual([p for _, p in left], [("acc1", ["aa11bb", "aa22cc"])], act)
+            prune = self.db.said("DELETE FROM unified.quarantine_archived WHERE left_at <")
+            self.assertEqual([p for _, p in prune], [(cleanup.UNDO_DAYS,)], act)
+        # undoing the release puts them back in Quarantine: the entries count again
+        self.db.sql.clear()
+        self.db.on("UPDATE unified.action_log SET undo_started_at = now()", [("acc1", [], ["Label_Q"], ["aa22cc"], "T0")])
+        cleanup.undo_action({"id": 9})
+        self.assertEqual([p for _, p in self.db.said("SET left_at = NULL")], [("acc1", ["aa22cc"])])
+
+    def test_the_archived_part_holds_back_token_matched_mail_of_protected_and_other_senders(self):
+        # from:"deals@shop.com" also finds a protected bank and another sender that use the address in their name
+        self.g.found["from:"] = ["aa11bb", "aa22cc", "aa33dd", "aa44ee"]
+        self.g.inbox = {"aa11bb"}                                   # everything else is archived
+        self.g.meta = {"aa11bb": JUNK, "aa22cc": JUNK, "aa33dd": f'"{JUNK}" <{BANK}>', "aa44ee": f'"{JUNK}" <x@y.org>'}
+        r = cleanup.sender_action({"addr": JUNK, "action": "quarantine"})
+        self.assertEqual(self.bodies(), [{"ids": ["aa11bb"], "addLabelIds": ["Label_Q"], "removeLabelIds": ["INBOX"]},
+                                         {"ids": ["aa22cc"], "addLabelIds": ["Label_Q"], "removeLabelIds": []}])
+        note = r["results"][0]["note"]
+        self.assertIn("1 from a protected sender or your own address left alone", note)
+        self.assertIn("1 sent by someone else (or sender unknown) left alone", note)
+
     def test_ai_sort_of_existing_mail_leaves_archived_mail_archived(self):
         import ai
         self.db.on("FROM unified.ai_sort WHERE addr", [("keep receipts", "quarantine")])
