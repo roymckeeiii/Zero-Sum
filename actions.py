@@ -187,6 +187,10 @@ def _archive_existing(acc_id, addr, keep=None):
 
 
 def _drop_rows(acc_id, addr):
+    """Forget the sender's local history in this account after its mail was cleared, unless the run left some of it
+    for "run it again" (senders not looked up yet): the rows are what lets the next run find this account."""
+    if (getattr(_ACTION, "held", None) or {}).get("unchecked"):
+        return
     with db() as c:
         c.execute("DELETE FROM unified.msg WHERE account_id = %s AND from_addr = %s", (acc_id, addr))
 

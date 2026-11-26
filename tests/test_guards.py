@@ -422,6 +422,19 @@ class LookupBudget(World):
         r = cleanup.sender_action({"addr": JUNK, "action": "star"})   # no look-ups needed: not partial
         self.assertFalse(r["partial"])
 
+    def test_a_partly_done_delete_keeps_the_local_history_so_run_it_again_finds_the_account(self):
+        for act in ("delete", "block", "spam", "unsub_delete"):
+            self.db.sql.clear()
+            self.db.seen.clear()   # each starts with no sender read yet
+            r = cleanup.sender_action({"addr": JUNK, "action": act})
+            self.assertTrue(r["partial"], act)
+            self.assertEqual(self.db.said("DELETE FROM unified.msg"), [], act)
+        with Patched(__import__("gmailops"), BULK_LOOKUPS=100):   # everything looked up: the history goes
+            self.db.sql.clear()
+            r = cleanup.sender_action({"addr": JUNK, "action": "delete"})
+            self.assertFalse(r["partial"])
+            self.assertEqual(len(self.db.said("DELETE FROM unified.msg")), 1)
+
     def test_quarantine_delete_keeps_to_the_budget_too(self):
         self.g.found = {"labelIds=Label_Q": ["aa0001", "aa0002", "aa0003"]}
         self.acc.accs = self.acc.accs[:1]
