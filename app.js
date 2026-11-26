@@ -330,6 +330,7 @@ async function loadSenders() {
 const PROT_INLINE = 6;
 /* confirmation dialog, with "keep emails whose subject contains" for actions that clear mail */
 const KEEPABLE = ["unsub_archive", "unsub_quarantine", "unsub_delete", "autoarchive", "quarantine", "archive", "delete", "block", "spam"];
+const NO_COUNT = ["protect", "unprotect", "keep", "reset"];   // e.g. "AI suggest" answering protect: nothing to count
 function askDialog(a, s, ai) {
   const d = $("#dlg"), text = confirmText(a, s);
   if (!text && !ai) return Promise.resolve({ keep: [] });
@@ -352,7 +353,7 @@ function askDialog(a, s, ai) {
   let countT = 0, countSeq = 0;
   const count = async () => {
     const seq = ++countSeq, el = $("#dlg-count");
-    if (!text) { el.textContent = ""; return; }
+    if (!text || NO_COUNT.includes(a)) { el.textContent = ""; return; }   // these move no existing mail
     el.textContent = "Counting what this will touch in Gmail…";
     try {
       const r = await api("/api/sender/preview", { addr: s.addr, action: a,

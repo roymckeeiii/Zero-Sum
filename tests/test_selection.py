@@ -1,4 +1,5 @@
-"""Acting on a row other than the open one keeps the open message (runs app.js's act under node)."""
+"""Inbox and Cleanup dialog behaviour, run under node: acting on a row other than the open one keeps the open
+message, and actions that move no existing mail do not ask the server for a count."""
 import os, shutil, subprocess, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -10,6 +11,11 @@ class SelectionFollowsTheMessage(unittest.TestCase):
         r = subprocess.run(["node", os.path.join(HERE, "selection_follows.js")], capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("SELECTION OK", r.stdout)
+
+    def test_protect_and_keep_do_not_ask_for_a_count(self):
+        r = subprocess.run(["node", os.path.join(HERE, "no_count.js")], capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("NO-COUNT OK", r.stdout)
 
 
 if __name__ == "__main__":
