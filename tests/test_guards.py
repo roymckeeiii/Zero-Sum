@@ -205,7 +205,7 @@ class EntryPoints(World):
 
     def test_undoing_a_quarantine_delete_brings_a_since_protected_senders_mail_out_of_trash_too(self):
         # Quarantine "Delete all" took the bank's mail too; the bank was protected afterwards, then Undo pressed
-        self.db.on("UPDATE unified.action_log SET undone_at = now()",
+        self.db.on("UPDATE unified.action_log SET undo_started_at = now()",
                    [("acc1", ["TRASH"], ["Label_Q"], ["aa11bb", "aa22cc"])])
         self.db.on("SELECT id, from_addr FROM unified.msg", [("aa11bb", JUNK), ("aa22cc", BANK)])
         self.db.on("SELECT id FROM unified.msg", [("aa22cc",)])   # the held one is still in the local history
@@ -222,7 +222,7 @@ class EntryPoints(World):
         self.assertIn("protected", r["note"])
 
     def test_undoing_an_archive_does_not_call_mail_trashed_since_in_the_inbox(self):
-        self.db.on("UPDATE unified.action_log SET undone_at = now()", [("acc1", [], ["INBOX"], ["aa11bb", "aa22cc"])])
+        self.db.on("UPDATE unified.action_log SET undo_started_at = now()", [("acc1", [], ["INBOX"], ["aa11bb", "aa22cc"])])
         self.g.meta = {"aa11bb": JUNK, "aa22cc": JUNK}
         # aa22cc was deleted by hand after it was archived: Gmail now has INBOX on it, but in Trash
         self.g.msg_labels = {"aa11bb": ["INBOX"], "aa22cc": ["INBOX", "TRASH"]}
@@ -234,7 +234,7 @@ class EntryPoints(World):
 
     def test_undo_reads_back_only_the_restored_mail_not_the_whole_trash(self):
         # after a big clean-up, undoing a 2-message archive must not page through every message in Trash and Spam
-        self.db.on("UPDATE unified.action_log SET undone_at = now()", [("acc1", [], ["INBOX"], ["aa11bb", "aa22cc"])])
+        self.db.on("UPDATE unified.action_log SET undo_started_at = now()", [("acc1", [], ["INBOX"], ["aa11bb", "aa22cc"])])
         self.g.meta = {"aa11bb": JUNK, "aa22cc": JUNK}
         self.g.found = {"in:trash": [f"t{i}" for i in range(500)]}
         cleanup.undo_action({"id": 7})
@@ -243,7 +243,7 @@ class EntryPoints(World):
 
     def test_undo_reads_back_at_most_undo_refresh_messages(self):
         many = [f"m{i}" for i in range(12)]
-        self.db.on("UPDATE unified.action_log SET undone_at = now()", [("acc1", [], ["INBOX"], many)])
+        self.db.on("UPDATE unified.action_log SET undo_started_at = now()", [("acc1", [], ["INBOX"], many)])
         self.g.meta = {i: JUNK for i in many}
         with Patched(cleanup, UNDO_REFRESH=5):
             cleanup.undo_action({"id": 7})
@@ -253,7 +253,7 @@ class EntryPoints(World):
 
     def test_undo_answers_before_it_reads_anything_back(self):
         many = [f"m{i}" for i in range(50)]
-        self.db.on("UPDATE unified.action_log SET undone_at = now()", [("acc1", [], ["INBOX"], many)])
+        self.db.on("UPDATE unified.action_log SET undo_started_at = now()", [("acc1", [], ["INBOX"], many)])
         self.g.meta = {i: JUNK for i in many}
         jobs, spare = [], []
         with Patched(cleanup, _background=lambda fn, *a: jobs.append((fn, a)),
@@ -269,7 +269,7 @@ class EntryPoints(World):
 
     def test_undo_read_back_stops_while_the_accounts_quota_is_busy(self):
         many = [f"m{i}" for i in range(50)]
-        self.db.on("UPDATE unified.action_log SET undone_at = now()", [("acc1", [], ["INBOX"], many)])
+        self.db.on("UPDATE unified.action_log SET undo_started_at = now()", [("acc1", [], ["INBOX"], many)])
         self.g.meta = {i: JUNK for i in many}
         answers = iter([True, False])
         with Patched(cleanup, gmail_spare=lambda acc, **k: next(answers)):
@@ -335,7 +335,7 @@ class InboxOrigin(World):
                                          {"ids": ["aa22cc"], "addLabelIds": ["Label_Q"], "removeLabelIds": []}])
 
     def test_undoing_the_archived_part_does_not_put_it_in_the_inbox(self):
-        self.db.on("UPDATE unified.action_log SET undone_at = now()", [("acc1", ["Label_Q"], [], ["aa22cc"])])
+        self.db.on("UPDATE unified.action_log SET undo_started_at = now()", [("acc1", ["Label_Q"], [], ["aa22cc"])])
         cleanup.undo_action({"id": 8})
         self.assertEqual(self.bodies(), [{"ids": ["aa22cc"], "addLabelIds": [], "removeLabelIds": ["Label_Q"]}])
 

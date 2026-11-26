@@ -374,19 +374,24 @@ def undo_action(d):
     """Put the messages of one recorded bulk change back as they were: its added labels come off (out of Trash,
     Spam or Quarantine), its removed labels go back on (INBOX). Filters are not touched: Keep or Reset removes those.
 
-    The change is claimed (undone_at set) in the same statement that reads it, so a double click or a second tab
-    cannot run one undo twice; if Gmail then fails, the claim is released and Undo can be tried again. A change older
-    than UNDO_DAYS is refused even before the journal is pruned: Gmail may already have emptied that Trash."""
+    The change is claimed (undo_started_at set) in the same statement that reads it, so a double click or a second tab
+    cannot run one undo twice; undone_at is set only once every message is back. If Gmail fails, the claim is released
+    and Undo can be tried again; if the process dies midway (a restart during a long undo), the claim lapses after
+    UNDO_LEASE_MIN minutes and Undo can be run again (putting labels back is safe to repeat). A change older than
+    UNDO_DAYS is refused even before the journal is pruned: Gmail may already have emptied that Trash."""
     aid = int(d.get("id") or 0)
     with db() as c:
-        row = c.execute("UPDATE unified.action_log SET undone_at = now() WHERE id = %s AND undone_at IS NULL "
+        row = c.execute("UPDATE unified.action_log SET undo_started_at = now() WHERE id = %s AND undone_at IS NULL "
+                        "AND (undo_started_at IS NULL OR undo_started_at < now() - make_interval(mins => %s)) "
                         "AND at > now() - make_interval(days => %s) "
-                        "RETURNING account_id, add_labels, remove_labels, ids", (aid, UNDO_DAYS)).fetchone()
+                        "RETURNING account_id, add_labels, remove_labels, ids", (aid, UNDO_LEASE_MIN, UNDO_DAYS)).fetchone()
         if not row:
-            seen = c.execute("SELECT undone_at FROM unified.action_log WHERE id = %s "
+            seen = c.execute("SELECT undone_at, undo_started_at FROM unified.action_log WHERE id = %s "
                              "AND at > now() - make_interval(days => %s)", (aid, UNDO_DAYS)).fetchone()
     if not row:
-        raise ValueError("already undone" if seen and seen[0] else "no such action (older than %d days?)" % UNDO_DAYS)
+        raise ValueError("already undone" if seen and seen[0] else
+                         "being undone right now (try again in a few minutes if it does not finish)" if seen and seen[1]
+                         else "no such action (older than %d days?)" % UNDO_DAYS)
     acc, add, rem, ids = row
     back_add, back_rem, ids, held = list(rem), list(add), list(ids), []
     if ids and removes_mail(back_add, back_rem):
@@ -404,8 +409,10 @@ def undo_action(d):
             n += _batch(acc, held, add=["INBOX"], remove=[x for x in back_rem if x != "INBOX"], record=False)
     except Exception:
         with db() as c:   # nothing (or not everything) was put back: let the person try again
-            c.execute("UPDATE unified.action_log SET undone_at = NULL WHERE id = %s", (aid,))
+            c.execute("UPDATE unified.action_log SET undo_started_at = NULL WHERE id = %s", (aid,))
         raise
+    with db() as c:
+        c.execute("UPDATE unified.action_log SET undone_at = now() WHERE id = %s", (aid,))
     try:
         # Where the restored mail is now. Mail the undo took out of the inbox is out of it; mail it put INBOX back on is
         # marked as in the inbox right away. INBOX also goes back on mail that has been put in Trash or Spam since (an
@@ -615,6 +622,7 @@ def lookup_budget():
 
 
 _ACTION = threading.local()   # .note: what the person asked for ("block deals@shop.com"), for the undo list
+UNDO_LEASE_MIN = 15          # an undo claimed this long ago and never finished (the process died) may run again
 UNDO_DAYS = 28               # Gmail empties Trash after 30 days: past that an undo could not bring mail back
 
 

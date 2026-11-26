@@ -339,6 +339,7 @@ CREATE TABLE IF NOT EXISTS unified.protected (
 CREATE TABLE IF NOT EXISTS unified.action_log (
   id bigserial PRIMARY KEY, at timestamptz NOT NULL DEFAULT now(), account_id text NOT NULL, note text NOT NULL DEFAULT '',
   add_labels text[] NOT NULL, remove_labels text[] NOT NULL, ids text[] NOT NULL, undone_at timestamptz);
+ALTER TABLE unified.action_log ADD COLUMN IF NOT EXISTS undo_started_at timestamptz;
 CREATE TABLE IF NOT EXISTS unified.rule_backup (
   id bigserial PRIMARY KEY, at timestamptz NOT NULL DEFAULT now(), account_id text NOT NULL, rule_id text NOT NULL,
   reason text NOT NULL DEFAULT '', rule jsonb NOT NULL, actions jsonb NOT NULL);

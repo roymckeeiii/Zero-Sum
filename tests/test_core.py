@@ -352,19 +352,23 @@ class Undo(unittest.TestCase):
     def setUp(self):
         self.calls, self.sql = [], []
         fake = FakeDb()
-        self.log_row = {"undone": None}   # the journal row #7: a Delete of m1, m2; undone_at as set by the SQL below
+        # the journal row #7: a Delete of m1, m2; undone_at and undo_started_at as set by the SQL below ("old": a claim
+        # older than the lease)
+        self.log_row = {"undone": None, "started": None}
 
         def execute(sql, params=None):
             self.sql.append((sql, params))
             one = None
-            if "SET undone_at = now()" in sql:   # the claim: only a row nobody has undone yet
-                if self.log_row["undone"] is None:
-                    self.log_row["undone"] = "now"
+            if "SET undo_started_at = now()" in sql:   # the claim: only a row nobody has undone or is undoing now
+                if self.log_row["undone"] is None and self.log_row["started"] in (None, "old"):
+                    self.log_row["started"] = "now"
                     one = ("acc", ["TRASH"], ["INBOX"], ["m1", "m2"])
-            elif "SET undone_at = NULL" in sql:
-                self.log_row["undone"] = None
-            elif "SELECT undone_at FROM unified.action_log" in sql:
-                one = (self.log_row["undone"],)
+            elif "SET undo_started_at = NULL" in sql:
+                self.log_row["started"] = None
+            elif "SET undone_at = now()" in sql:
+                self.log_row["undone"] = "now"
+            elif "SELECT undone_at, undo_started_at FROM unified.action_log" in sql:
+                one = (self.log_row["undone"], self.log_row["started"])
             return type("R", (), {"fetchall": staticmethod(lambda: []), "fetchone": staticmethod(lambda: one)})()
         fake.execute = execute
         self.old = (cleanup.db, cleanup.gmail, cleanup._store, cleanup.log)
@@ -407,8 +411,9 @@ class Undo(unittest.TestCase):
             cleanup.undo_action({"id": 7})
         self.assertIn("already undone", str(e.exception))
         self.assertEqual(len(self.calls), 1)   # Gmail was asked once
-        claim = [s for s, _ in self.sql if "SET undone_at = now()" in s][0]
+        claim = [s for s, _ in self.sql if "SET undo_started_at = now()" in s][0]
         self.assertIn("undone_at IS NULL", claim)   # the check and the claim are one statement: no race between them
+        self.assertIn("undo_started_at < now() - make_interval(mins", claim)   # a claim that lapsed may be taken again
         self.assertIn("make_interval", claim)       # nor is a change past UNDO_DAYS (its Trash may be gone) undone
 
     def test_a_failed_undo_can_be_tried_again(self):
@@ -418,8 +423,24 @@ class Undo(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             cleanup.undo_action({"id": 7})
         self.assertIsNone(self.log_row["undone"])   # released: not shown as undone when nothing came back
+        self.assertIsNone(self.log_row["started"])
         cleanup.gmail = lambda acc, path, method="GET", body=None: self.calls.append((path, body)) or {}
         self.assertEqual(cleanup.undo_action({"id": 7}), {"ok": True, "restored": 2})
+
+    def test_an_undo_cut_off_by_a_restart_can_be_run_again_after_the_lease(self):
+        def killed(*a, **k):
+            raise SystemExit("container stopped")   # skips every except Exception: the claim is never released
+        cleanup.gmail = killed
+        with self.assertRaises(SystemExit):
+            cleanup.undo_action({"id": 7})
+        self.assertEqual(self.log_row, {"undone": None, "started": "now"})   # not shown as undone
+        cleanup.gmail = lambda acc, path, method="GET", body=None: self.calls.append((path, body)) or {}
+        with self.assertRaises(ValueError) as e:   # while the lease runs, a second click does not start another
+            cleanup.undo_action({"id": 7})
+        self.assertIn("being undone", str(e.exception))
+        self.log_row["started"] = "old"            # the lease has run out
+        self.assertEqual(cleanup.undo_action({"id": 7})["restored"], 2)
+        self.assertEqual(self.log_row["undone"], "now")
 
     def test_an_unknown_or_expired_change_is_refused(self):
         self.log_row["undone"] = "earlier"
