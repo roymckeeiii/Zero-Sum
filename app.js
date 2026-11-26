@@ -155,8 +155,12 @@ async function act(i, action) {
   try { await api("/api/action", { account: it.account, threadId: it.threadId, id: it.id, action }); }
   catch (e) { alert(`${action} failed: ${e.message}`); return; }
   if (action === "archive" || action === "delete") {
-    S.items = S.items.filter((x) => !(x.threadId === it.threadId && x.account === it.account));
-    if (S.sel >= S.items.length) S.sel = S.items.length - 1;
+    // the selection follows the message, not its row number: the rows above it may be the ones going away
+    const gone = (x) => x.threadId === it.threadId && x.account === it.account;
+    const cur = S.items[S.sel], openGone = !!cur && gone(cur);
+    const next = S.items.slice(0, Math.max(S.sel, 0)).filter((x) => !gone(x)).length;   // where the following one lands
+    S.items = S.items.filter((x) => !gone(x));
+    S.sel = openGone ? Math.min(next, S.items.length - 1) : cur ? S.items.indexOf(cur) : -1;
     redraw();
     // undo: out of Trash, or back in the inbox; but archiving a search result that was not in the inbox changed
     // nothing, and an "undo" would put it in the inbox for the first time
@@ -164,7 +168,9 @@ async function act(i, action) {
     toast(`${action === "delete" ? "Moved to Trash" : "Archived"}: ${esc(it.subject)}`, undo && "Undo",
       () => api("/api/action", { account: it.account, threadId: it.threadId, action: undo }).then(() => { loadList(true); loadAccounts(); })
         .catch((e) => alert(`Undo failed: ${e.message}`)));
-    if (S.sel >= 0) open(S.sel); else $("#reader").innerHTML = `<div class="empty">${action === "delete" ? "Deleted" : "Archived"}.</div>`;
+    // another row was acted on: the open message stays open as it is, and no other message is opened (or marked read)
+    if (openGone && S.sel >= 0) open(S.sel);
+    else if (!cur || openGone) $("#reader").innerHTML = `<div class="empty">${action === "delete" ? "Deleted" : "Archived"}.</div>`;
   } else if (action === "star" || action === "unstar") { it.starred = action === "star"; redraw(); if (S.sel === i) open(i); }
   else { it.unread = action === "unread"; redraw(); }
   loadAccounts();

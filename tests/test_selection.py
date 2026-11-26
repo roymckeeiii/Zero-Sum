@@ -1,0 +1,16 @@
+"""Acting on a row other than the open one keeps the open message (runs app.js's act under node)."""
+import os, shutil, subprocess, unittest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+@unittest.skipUnless(shutil.which("node"), "node not installed")
+class SelectionFollowsTheMessage(unittest.TestCase):
+    def test_removing_another_row_does_not_open_or_mark_read_a_different_message(self):
+        r = subprocess.run(["node", os.path.join(HERE, "selection_follows.js")], capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("SELECTION OK", r.stdout)
+
+
+if __name__ == "__main__":
+    unittest.main()
