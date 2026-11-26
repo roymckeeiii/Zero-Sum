@@ -405,14 +405,21 @@ class Undo(unittest.TestCase):
         def execute(sql, params=None):
             self.sql.append((sql, params))
             one = None
+            row = self.log_row
             if "SET undo_started_at = now()" in sql:   # the claim: only a row nobody has undone or is undoing now
-                if self.log_row["undone"] is None and self.log_row["started"] in (None, "old"):
-                    self.log_row["started"] = "now"
-                    one = ("acc", ["TRASH"], ["INBOX"], ["m1", "m2"])
-            elif "SET undo_started_at = NULL" in sql:
-                self.log_row["started"] = None
+                if row["undone"] is None and row["started"] in (None, "old"):
+                    row["started"] = "now"
+                    one = ("acc", ["TRASH"], ["INBOX"], ["m1", "m2"], "now")
+            elif "SET undo_started_at = clock_timestamp()" in sql:   # renewed, by the run holding the claim only
+                if row["started"] == params[1] and row["undone"] is None:
+                    row["renewals"] = row.get("renewals", 0) + 1
+                    one = ("now",)
+            elif "SET undo_started_at = NULL" in sql:   # released, by the run holding the claim only
+                if row["started"] == params[1]:
+                    row["started"] = None
             elif "SET undone_at = now()" in sql:
-                self.log_row["undone"] = "now"
+                if row["started"] == params[1]:
+                    row["undone"] = "now"
             elif "SELECT undone_at, undo_started_at FROM unified.action_log" in sql:
                 one = (self.log_row["undone"], self.log_row["started"])
             return type("R", (), {"fetchall": staticmethod(lambda: []), "fetchone": staticmethod(lambda: one)})()
@@ -479,7 +486,7 @@ class Undo(unittest.TestCase):
         cleanup.gmail = killed
         with self.assertRaises(SystemExit):
             cleanup.undo_action({"id": 7})
-        self.assertEqual(self.log_row, {"undone": None, "started": "now"})   # not shown as undone
+        self.assertEqual((self.log_row["undone"], self.log_row["started"]), (None, "now"))   # not shown as undone
         cleanup.gmail = lambda acc, path, method="GET", body=None: self.calls.append((path, body)) or {}
         with self.assertRaises(ValueError) as e:   # while the lease runs, a second click does not start another
             cleanup.undo_action({"id": 7})
@@ -487,6 +494,21 @@ class Undo(unittest.TestCase):
         self.log_row["started"] = "old"            # the lease has run out
         self.assertEqual(cleanup.undo_action({"id": 7})["restored"], 2)
         self.assertEqual(self.log_row["undone"], "now")
+
+    def test_a_long_undo_renews_its_claim_and_never_releases_one_it_lost(self):
+        cleanup.undo_action({"id": 7})
+        self.assertEqual(self.log_row["renewals"], 1)                  # after its one chunk
+        renew = [s for s, _ in self.sql if "clock_timestamp()" in s][0]
+        self.assertIn("undo_started_at = %s", renew)                   # only the claim this run holds
+        self.log_row.update(undone=None, started=None)
+
+        def taken_over(*a, **k):                                       # another run re-claimed the row meanwhile
+            self.log_row["started"] = "theirs"
+            raise RuntimeError("Gmail POST /messages/batchModify: 500 backend error")
+        cleanup.gmail = taken_over
+        with self.assertRaises(RuntimeError):
+            cleanup.undo_action({"id": 7})
+        self.assertEqual(self.log_row["started"], "theirs")            # their claim is not released by this run
 
     def test_an_unknown_or_expired_change_is_refused(self):
         self.log_row["undone"] = "earlier"

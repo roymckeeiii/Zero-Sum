@@ -375,16 +375,19 @@ def undo_action(d):
     Spam or Quarantine), its removed labels go back on (INBOX). Filters are not touched: Keep or Reset removes those.
 
     The change is claimed (undo_started_at set) in the same statement that reads it, so a double click or a second tab
-    cannot run one undo twice; undone_at is set only once every message is back. If Gmail fails, the claim is released
-    and Undo can be tried again; if the process dies midway (a restart during a long undo), the claim lapses after
-    UNDO_LEASE_MIN minutes and Undo can be run again (putting labels back is safe to repeat). A change older than
-    UNDO_DAYS is refused even before the journal is pruned: Gmail may already have emptied that Trash."""
+    cannot run one undo twice; undone_at is set only once every message is back. The claim is a lease, renewed after
+    every 1,000 messages, so a long undo never lapses while it runs. If Gmail fails, the claim is released and Undo can
+    be tried again; if the process dies midway (a restart during a long undo), the claim lapses after UNDO_LEASE_MIN
+    minutes and Undo can be run again (putting labels back is safe to repeat). Renewing and releasing only touch the
+    claim this run holds (its undo_started_at), never one another run has taken since. A change older than UNDO_DAYS is
+    refused even before the journal is pruned: Gmail may already have emptied that Trash."""
     aid = int(d.get("id") or 0)
     with db() as c:
         row = c.execute("UPDATE unified.action_log SET undo_started_at = now() WHERE id = %s AND undone_at IS NULL "
                         "AND (undo_started_at IS NULL OR undo_started_at < now() - make_interval(mins => %s)) "
                         "AND at > now() - make_interval(days => %s) "
-                        "RETURNING account_id, add_labels, remove_labels, ids", (aid, UNDO_LEASE_MIN, UNDO_DAYS)).fetchone()
+                        "RETURNING account_id, add_labels, remove_labels, ids, undo_started_at",
+                        (aid, UNDO_LEASE_MIN, UNDO_DAYS)).fetchone()
         if not row:
             seen = c.execute("SELECT undone_at, undo_started_at FROM unified.action_log WHERE id = %s "
                              "AND at > now() - make_interval(days => %s)", (aid, UNDO_DAYS)).fetchone()
@@ -392,7 +395,17 @@ def undo_action(d):
         raise ValueError("already undone" if seen and seen[0] else
                          "being undone right now (try again in a few minutes if it does not finish)" if seen and seen[1]
                          else "no such action (older than %d days?)" % UNDO_DAYS)
-    acc, add, rem, ids = row
+    acc, add, rem, ids, claim = row
+    lease = [claim]
+
+    def renew():   # after each chunk: this run is alive, its claim must not lapse
+        with db() as c:
+            r = c.execute("UPDATE unified.action_log SET undo_started_at = clock_timestamp() WHERE id = %s "
+                          "AND undo_started_at = %s AND undone_at IS NULL RETURNING undo_started_at",
+                          (aid, lease[0])).fetchone()
+        if not r:
+            raise RuntimeError("another undo of this change took over")
+        lease[0] = r[0]
     back_add, back_rem, ids, held = list(rem), list(add), list(ids), []
     if ids and removes_mail(back_add, back_rem):
         # putting mail back somewhere out of view (Quarantine, after a delete from Quarantine) would be refused by
@@ -404,15 +417,17 @@ def undo_action(d):
         mine = {i for i, frm in known if own_address(frm, own) or is_protected(frm, prot)}
         held, ids = [i for i in ids if i in mine], [i for i in ids if i not in mine]
     try:
-        n = _batch(acc, ids, add=back_add, remove=back_rem, record=False)
+        n = _batch(acc, ids, add=back_add, remove=back_rem, record=False, after_chunk=renew)
         if held:
-            n += _batch(acc, held, add=["INBOX"], remove=[x for x in back_rem if x != "INBOX"], record=False)
+            n += _batch(acc, held, add=["INBOX"], remove=[x for x in back_rem if x != "INBOX"], record=False,
+                        after_chunk=renew)
     except Exception:
-        with db() as c:   # nothing (or not everything) was put back: let the person try again
-            c.execute("UPDATE unified.action_log SET undo_started_at = NULL WHERE id = %s", (aid,))
+        with db() as c:   # nothing (or not everything) was put back: let the person try again (if the claim is ours)
+            c.execute("UPDATE unified.action_log SET undo_started_at = NULL WHERE id = %s AND undo_started_at = %s",
+                      (aid, lease[0]))
         raise
     with db() as c:
-        c.execute("UPDATE unified.action_log SET undone_at = now() WHERE id = %s", (aid,))
+        c.execute("UPDATE unified.action_log SET undone_at = now() WHERE id = %s AND undo_started_at = %s", (aid, lease[0]))
     try:
         # Where the restored mail is now. Mail the undo took out of the inbox is out of it; mail it put INBOX back on is
         # marked as in the inbox right away. INBOX also goes back on mail that has been put in Trash or Spam since (an
@@ -671,7 +686,7 @@ def _trash_refused(e):
     return ": 400 " in text and ("trash" in text.lower() or "label" in text.lower())
 
 
-def _batch(acc_id, ids, add=(), remove=(), record=True, sender=None):
+def _batch(acc_id, ids, add=(), remove=(), record=True, sender=None, after_chunk=None):
     """Apply label changes to these message ids (batches of 1000). Returns the count.
 
     Every bulk change ends here, so this is where a protected sender and the user's own address are refused, whatever
@@ -724,6 +739,8 @@ def _batch(acc_id, ids, add=(), remove=(), record=True, sender=None):
                           {"ids": chunk, "addLabelIds": rest_add, "removeLabelIds": rest_rem})
             else:
                 raise
+        if after_chunk:
+            after_chunk()
     return len(ids)
 
 
