@@ -554,7 +554,8 @@ class Outbound(World):
     def test_allowing_is_its_own_step_and_unticking_clears_it(self):
         rulesync.set_include({"rule": "m1", "account": "acc2", "include": True})
         self.assertNotIn("outbound", self.db.sql[-1][0])
-        rulesync.set_include({"rule": "m1", "account": "acc2", "include": True, "outbound": True})
+        rulesync.set_include({"rule": "m1", "account": "acc2", "include": True, "outbound": True,
+                              "destinations": self.dest_key("m1")})
         self.assertIn("DO UPDATE SET outbound", self.db.sql[-1][0])
         self.assertEqual(self.db.sql[-1][1], ("m1", "acc2", True, self.dest_key("m1")))   # the OK is for these
 
@@ -625,6 +626,18 @@ class Outbound(World):
         self.assertEqual(self.db.said("INSERT INTO unified.rule_include")[0][1][2:], (True, self.dest_key("m1")))
         rulesync.set_include({"rule": "m1", "account": "acc2", "include": True, "outbound": False})
         self.assertEqual(self.db.said("INSERT INTO unified.rule_include")[1][1][2:], (False, None))
+
+    def test_an_ok_without_the_destinations_shown_or_for_an_unknown_rule_or_account_is_refused(self):
+        for d in ({"rule": "m1", "account": "acc2", "include": True, "outbound": True},       # no destinations
+                  {"rule": "m1", "account": "acc9", "include": True},                          # not a linked account
+                  {"rule": "m1", "account": "acc1", "include": True},                          # the master itself
+                  {"account": "acc2", "include": True},                                        # no rule
+                  {"rule": ["m1"], "account": "acc2", "include": False}):
+            with self.assertRaises(ValueError, msg=d):
+                rulesync.set_include(d)
+        with self.assertRaises(KeyError):
+            rulesync.set_include({"rule": "nope", "account": "acc2", "include": True})        # not a master rule
+        self.assertFalse(self.db.said("unified.rule_include"))
 
     def test_the_rules_tab_shows_where_each_rule_sends(self):
         self.outbound = {("m1", "acc3")}

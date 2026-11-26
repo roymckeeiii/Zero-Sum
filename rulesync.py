@@ -195,24 +195,35 @@ def _current_dest_key(rule_id):
 def set_include(d):
     """Tick or untick a rule for an account. With "outbound", also allow (or stop allowing) its forward / send /
     reply / webhook actions to be copied there. An OK is stored for the destinations the rule has now; when the page
-    sends the key of the destinations it showed ("destinations") and they have changed since, it is refused."""
+    sends the key of the destinations it showed ("destinations") and they have changed since, it is refused. An OK
+    without "destinations" is refused too: it must always be for what the person was shown. The account must be a
+    linked account other than the master, and a rule being ticked must be one of the master's rules."""
+    rule, account = d.get("rule"), d.get("account")
+    if not isinstance(rule, str) or not isinstance(account, str):
+        raise ValueError("choose a rule and an account")
+    if account not in {a["id"] for a in ACC.list() if not a.get("master")}:
+        raise ValueError("not a linked account other than the master")
     if d.get("include") and d.get("outbound"):
-        key = _current_dest_key(d["rule"])
-        if "destinations" in d and d["destinations"] != key:
+        if not isinstance(d.get("destinations"), str):
+            raise ValueError("allowing a rule to send needs the destinations it was shown for: reload and check again")
+        key = _current_dest_key(rule)
+        if d["destinations"] != key:
             raise ValueError("where this rule sends has changed since the page was loaded: reload and check again")
+    elif d.get("include"):
+        _current_dest_key(rule)   # a master rule (raises when it is not)
     with db() as c:
         if d.get("include") and "outbound" in d:
             ok = bool(d["outbound"])
             c.execute("INSERT INTO unified.rule_include (master_rule_id, account_id, outbound, outbound_key) "
                       "VALUES (%s, %s, %s, %s) ON CONFLICT (master_rule_id, account_id) DO UPDATE SET outbound = "
                       "EXCLUDED.outbound, outbound_key = EXCLUDED.outbound_key",
-                      (d["rule"], d["account"], ok, key if ok else None))
+                      (rule, account, ok, key if ok else None))
         elif d.get("include"):
             c.execute("INSERT INTO unified.rule_include (master_rule_id, account_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                      (d["rule"], d["account"]))
+                      (rule, account))
         else:
             c.execute("DELETE FROM unified.rule_include WHERE master_rule_id = %s AND account_id = %s",
-                      (d["rule"], d["account"]))
+                      (rule, account))
     return {"ok": True}
 
 
