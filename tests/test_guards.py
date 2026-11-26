@@ -665,6 +665,33 @@ class TrashFallback(World):
                          {"ids": ["aa11bb", "aa22cc"], "addLabelIds": [], "removeLabelIds": ["Label_Q"]})
 
 
+class JudgedOnce(World):
+    """New mail is looked at again in the next run's one-hour overlap: a message judged under a rule is not judged
+    again, so a second, different verdict cannot trash mail the first one kept."""
+
+    def test_a_kept_message_is_not_judged_again_by_the_next_run(self):
+        import ai
+        judged = set()
+        self.db.on("SELECT account_id, id FROM unified.ai_sorted",
+                   lambda p: [(a, i) for (a, i, rk) in judged if rk == p[1] and i in p[2]])
+        self.db.on("INSERT INTO unified.ai_sorted", lambda p: judged.add((p[2], p[3], p[1])) or [])
+        self.db.on("FROM unified.ai_sort WHERE addr", [("keep receipts", "delete")])
+        self.db.on("SELECT account_id, id, subject", [("acc1", "aa11bb", "Receipt", "")])
+        self.g.meta = {"aa11bb": JUNK}
+        a1 = self.acc.list()[0]
+        verdicts = iter([[True], [False]])                 # kept at 10:00, "drop" if asked again at 10:15
+        asked = []
+        with Patched(ai, classify=lambda rule, items: asked.append(items) or next(verdicts)[:len(items)]):
+            cleanup._ai_sort_ids(JUNK, "keep receipts", "delete", [(a1, "aa11bb")])
+            cleanup._ai_sort_ids(JUNK, "keep receipts", "delete", [(a1, "aa11bb")])
+        self.assertEqual(self.g.changes("batchModify"), [])
+        self.assertEqual([len(x) for x in asked if x], [1])   # asked once
+        with Patched(ai, classify=lambda rule, items: [False] * len(items)):   # a new rule judges afresh
+            self.db.on("FROM unified.ai_sort WHERE addr", [("keep invoices", "delete")])
+            cleanup._ai_sort_ids(JUNK, "keep invoices", "delete", [(a1, "aa11bb")])
+        self.assertEqual([c[3]["ids"] for c in self.g.changes("batchModify")], [["aa11bb"]])
+
+
 class QuarantineBadge(World):
     def test_the_badge_reads_one_label_per_account_and_lists_nothing(self):
         real = self.g

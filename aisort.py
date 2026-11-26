@@ -1,7 +1,7 @@
 """AI sort: a sender's mail judged email by email against a plain-English rule (ai.classify), for the existing mail in
 a background pass and for new mail every collector run. One pass per sender; a pass stopped by a restart, the daily
 AI limit or a busy provider is picked up again (resume_ai_sorts). State lives in unified.ai_sort."""
-import os, re, threading, urllib.error
+import hashlib, os, re, threading, urllib.error
 
 import psycopg
 
@@ -39,6 +39,11 @@ def start_ai_sort(addr, rule, action):
     threading.Thread(target=_ai_sort_existing, args=(addr, rule, action, token), daemon=True).start()
 
 
+def rule_key(rule, action):
+    """Which rule a verdict was given under (unified.ai_sorted): a new rule or action judges the mail afresh."""
+    return hashlib.sha256(f"{action}\n{rule}".encode()).hexdigest()[:16]
+
+
 def _ai_sort_ids(addr, rule, action, pairs, token=None, archived=None):
     """Classify (account, message id) pairs by the rule in batches and apply `action` to the ones not kept.
 
@@ -48,6 +53,7 @@ def _ai_sort_ids(addr, rule, action, pairs, token=None, archived=None):
     alone and not sent to the AI. `archived` holds the (account id, message id) pairs that are not in the inbox: they
     get the action without INBOX coming off, so its Undo does not put them in the inbox. Returns how many were kept."""
     kept = 0
+    rk = rule_key(rule, action)
     for i in range(0, len(pairs), 40):
         chunk = pairs[i:i + 40]
         with db() as c:  # "Stop AI sort", a new rule or Protect takes effect before the next batch, not after the pass
@@ -59,6 +65,11 @@ def _ai_sort_ids(addr, rule, action, pairs, token=None, archived=None):
         if action != "keep" and is_protected(addr):
             raise PermissionError(f"{addr} is protected: AI sort paused")
         n_chunk = len(chunk)
+        with db() as c:   # judged before under this rule (an overlapping new-mail run, a resumed pass): not again,
+            judged = {(a, m) for a, m in c.execute(   # a second verdict could undo the first ("keep", then "drop")
+                "SELECT account_id, id FROM unified.ai_sorted WHERE addr = %s AND rule_key = %s AND id = ANY(%s)",
+                (addr, rk, [mid for _, mid in chunk])).fetchall()}
+        chunk = [(a, mid) for a, mid in chunk if (a["id"], mid) not in judged]
         if action != "keep":
             accs = {a["id"]: a for a, _ in chunk}
             real = {acc_id: senders_of(acc_id, [mid for a, mid in chunk if a["id"] == acc_id]) for acc_id in accs}
@@ -95,6 +106,12 @@ def _ai_sort_ids(addr, rule, action, pairs, token=None, archived=None):
             rest = [x for x in rem if x != "INBOX"]
             if out and (add or rest):
                 _batch(acc_id, out, add=add, remove=rest, sender=addr)
+        if metas:   # after the change went through: a batch that failed is judged again next time
+            with db() as c:
+                with c.cursor() as cur:
+                    cur.executemany("INSERT INTO unified.ai_sorted (addr, rule_key, account_id, id) VALUES (%s, %s, %s, %s) "
+                                    "ON CONFLICT (account_id, id, rule_key) DO NOTHING",
+                                    [(addr, rk, a["id"], m["id"]) for a, m in metas])
         with db() as c:
             c.execute("UPDATE unified.ai_sort SET done = done + %s, kept = kept + %s, updated_at = now() WHERE addr = %s",
                       (n_chunk, sum(1 for (_, _m), k in zip(metas, verdicts) if k), addr))
@@ -175,6 +192,7 @@ def ai_sort_new():
     with db() as c:
         rows = c.execute("SELECT addr, rule, action, extract(epoch from last_ts) FROM unified.ai_sort "
                          "WHERE status = 'active'").fetchall()
+        c.execute("DELETE FROM unified.ai_sorted WHERE at < now() - interval '30 days'")   # new mail only looks back hours
     for addr, rule, action, last in rows:
         try:
             if action != "keep" and (is_protected(addr) or own_address(addr)):
