@@ -53,6 +53,7 @@ GET = {
     "/api/rules": lambda q: rulesync.state(),
     "/api/protected": actions.protected_list,
     "/api/quarantine": actions.quarantine_list,
+    "/api/quarantine/count": actions.quarantine_count,
     "/api/undo": gmailops.undo_list,
     "/api/sender/recent": gmailops.sender_recent,
     "/api/ai/plans": ai.plans,

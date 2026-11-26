@@ -637,6 +637,27 @@ class Quarantine(World):
         self.assertEqual([len(c[3]["ids"]) for c in self.g.changes("batchModify")], [5])
 
 
+class QuarantineBadge(World):
+    def test_the_badge_reads_one_label_per_account_and_lists_nothing(self):
+        real = self.g
+
+        def gmail(acc, path, method="GET", body=None, retry=True):
+            if path == "/labels/Label_Q":
+                real.reads.append(path)
+                return {"messagesTotal": {"acc1": 3, "acc2": 4}[acc]}
+            return real(acc, path, method, body)
+        with Patched(cleanup, gmail=gmail):
+            self.assertEqual(cleanup.quarantine_count(), {"total": 7})
+        self.assertEqual(self.g.reads, ["/labels/Label_Q", "/labels/Label_Q"])
+
+    def test_page_start_asks_only_for_the_count(self):
+        js = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app.js"), encoding="utf-8").read()
+        self.assertIn('api("/api/quarantine/count")', js)
+        self.assertEqual(js.count('api("/api/quarantine")'), 1)   # the full listing: only in the tab's own load
+        tab = js[js.index("async function loadQuarantine("):]
+        self.assertLess(tab.index('api("/api/quarantine")'), tab.index("\n}\n"))
+
+
 class Background(unittest.TestCase):
     def test_background_work_does_not_use_the_request_pool(self):
         import threading, gmailops

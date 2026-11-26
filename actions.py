@@ -6,7 +6,7 @@ import http.client, ipaddress, os, re, socket, ssl, threading, urllib.parse
 
 from aisort import start_ai_sort, stop_automation
 from collector import BACKFILL_DAYS, collect_status, qs
-from core import ACC, POOL, db, gmail_list, label_id, log, new_id
+from core import ACC, POOL, db, gmail, gmail_list, label_id, log, new_id
 from gmailops import (ARCHIVE_FILTER, AUTOMATION_KINDS, BUSY_NOTE, FOREIGN_NOTE, MAX_BULK, NEVER_SPAM_FILTER, QUARANTINE,
                       STAR_FILTER, TRASH_FILTER, _ACTION, SenderBusy, _batch, _filter, _modify_existing, _sender_lock,
                       bulk_query, foreign_filters, held_note, held_start, inbox_parts, lookup_budget, lookups_account, lookups_end,
@@ -510,6 +510,18 @@ def quarantine_list(q=None):
         g["count"] = len(g["items"])
         g["accounts"] = [{"id": k, "email": v} for k, v in g["accounts"].items()]
     return {"label": QUARANTINE, "total": sum(totals.values()), "shown": len(items), "senders": senders, "errors": errors}
+
+
+def quarantine_count(q=None):
+    """How much is in Quarantine over every account, for the tab's badge: one label read per account (messagesTotal),
+    never the listing the tab itself makes (every id, then details for SHOW messages per account)."""
+    def one(a):
+        try:
+            lid = _qlabel(a["id"])
+            return int(gmail(a["id"], f"/labels/{lid}").get("messagesTotal") or 0) if lid else 0
+        except Exception:  # noqa: BLE001 - a badge: an account that cannot answer counts as nothing
+            return 0
+    return {"total": sum(POOL.map(one, ACC.list()))}
 
 
 QACTIONS = {"delete": "moved to Trash", "archive": "archived (label removed)", "release": "back in the inbox"}
