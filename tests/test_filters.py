@@ -315,6 +315,74 @@ class BoundedWait(World):
         self.assertEqual(self.kinds("acc2"), [])
 
 
+class ProtectFailures(World):
+    """Protect must not say "protected" while Zero Sum's own Trash filter still runs in Gmail: a failed or
+    interrupted filter removal is reported and kept pending until a later run finishes it."""
+
+    def setUp(self):
+        super().setUp()
+        for acc in ("acc1", "acc2"):
+            cleanup._filter(acc, S, cleanup.TRASH_FILTER, "trash")
+        self.fail_for = set()   # (account, substring of the path) that answer 500
+        real = self.g
+
+        def gmail(acc, path, method="GET", body=None, retry=True):
+            if any(acc == a and part in path and method == "DELETE" for a, part in self.fail_for):
+                raise RuntimeError(f"Gmail DELETE {path}: 500 Internal error")
+            return real(acc, path, method, body, retry)
+        self.p2 = Patched(cleanup, gmail=gmail)
+        self.p2.__enter__()
+        self.addCleanup(self.p2.__exit__)
+        self.pending = {}
+        self.db.on("INSERT INTO unified.protect_pending (key, account_id, error) VALUES",
+                   lambda p: self.pending.__setitem__((p[0], p[1]), p[2]) or [])
+        self.db.on("DELETE FROM unified.protect_pending WHERE key = %s AND account_id",
+                   lambda p: self.pending.pop((p[0], p[1]), None) and [])
+        self.db.on("SELECT key, account_id FROM unified.protect_pending", lambda p: sorted(self.pending))
+
+    def test_single_protect_reports_the_account_where_the_trash_filter_stayed(self):
+        self.fail_for = {("acc2", "/settings/filters/")}
+        r = cleanup.sender_action({"addr": S, "action": "protect"})
+        self.assertFalse(r["results"][0]["ok"])
+        self.assertIn("Gmail filters not changed in two@x.com", r["results"][0]["note"])
+        self.assertIn("trash", self.kinds("acc2"))                # still on record, so a retry can remove it
+        self.assertEqual(list(self.pending), [(S, "acc2")])
+        self.fail_for = set()                                     # Gmail answers again: the next run finishes it
+        self.db.protected.add(S)
+        cleanup.retry_protect()
+        self.assertEqual(self.kinds("acc2"), ["never_spam"])
+        self.assertEqual(self.pending, {})
+
+    def test_bulk_protect_goes_on_after_a_failing_sender_and_keeps_it_pending(self):
+        cleanup._filter("acc1", "news@other.com", cleanup.TRASH_FILTER, "trash")
+        self.fail_for = {("acc1", "/settings/filters/F1")}        # S's trash filter in acc1
+        cleanup._protect_in_gmail([S, "news@other.com"])
+        self.assertEqual(self.kinds("acc1"), ["never_spam", "trash"])   # news@other.com done, S's trash still there
+        self.assertEqual(self.kinds("acc2"), ["never_spam", "never_spam"])
+        self.assertEqual(list(self.pending), [(S, "acc1")])
+
+    def test_a_retry_drops_senders_unprotected_since_and_unlinked_accounts(self):
+        self.pending = {(S, "acc1"): "x", ("gone@else.com", "acc1"): "x", (S, "acc9"): "x"}
+        self.db.protected = {S}
+        cleanup.retry_protect()
+        self.assertEqual(self.pending, {})
+        self.assertEqual(self.kinds("acc1"), ["never_spam"])
+
+    def test_bulk_protect_puts_every_sender_on_record_before_the_background_work(self):
+        started, db = [], self.db
+
+        class Thread:
+            def __init__(self, target, args, daemon):
+                pass
+
+            def start(self):
+                started.append(len(db.said("INSERT INTO unified.protect_pending (key, account_id, error) SELECT")))
+        import actions
+        with Patched(actions.threading, Thread=Thread):
+            cleanup.protect_many({"text": f"{S}\nnews@other.com"})
+        self.assertEqual(started, [2])                            # one statement per account, both before the start
+
+
 class Removed(World):
     def setUp(self):
         super().setUp()

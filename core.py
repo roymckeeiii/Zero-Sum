@@ -351,6 +351,9 @@ CREATE TABLE IF NOT EXISTS unified.sender_seen (
   PRIMARY KEY (account_id, id));
 CREATE TABLE IF NOT EXISTS unified.quarantine_archived (
   account_id text NOT NULL, id text NOT NULL, at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (account_id, id));
+CREATE TABLE IF NOT EXISTS unified.protect_pending (
+  key text NOT NULL, account_id text NOT NULL, error text, attempts int NOT NULL DEFAULT 0,
+  updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (key, account_id));
 CREATE TABLE IF NOT EXISTS unified.collect_state (
   account_id text PRIMARY KEY, newest timestamptz, oldest timestamptz, backfill_done boolean NOT NULL DEFAULT false,
   updated_at timestamptz NOT NULL DEFAULT now(), error text);

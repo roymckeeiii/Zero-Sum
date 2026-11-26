@@ -239,7 +239,10 @@ Zero Sum is an independent project, not affiliated with or endorsed by Inbox Zer
 - **Protected** senders (an address, or a whole domain like `@yourbank.com`) can't be unsubscribed, archived, deleted,
   blocked, quarantined or marked as spam, by hand or by a plan: the buttons are disabled and the server refuses. The
   background analyst skips them. Protecting adds Gmail's "never send to Spam" filter in every account and marks the
-  address "kept" in Inbox Zero. Auto-star still works on protected senders.
+  address "kept" in Inbox Zero. Auto-star still works on protected senders. If Gmail refuses or a restart interrupts
+  the filter changes in an account (Zero Sum's own Trash or archive filter could then still move the mail), the
+  result says where, the Cleanup tab lists it, and it is retried every collector run until done
+  (`unified.protect_pending`).
 - Every Gmail filter Zero Sum creates is written down (`unified.filter`: account, filter id, sender, kind). **Protect**,
   **Keep**, **Reset** and applying a new action or plan remove exactly its own filters for that sender (Trash,
   archive, quarantine and keep-star alike) and never a filter you made yourself in Gmail; if one of yours still moves

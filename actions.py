@@ -46,7 +46,7 @@ def senders(q):
                     "readPct": round(100 * (n - unread) / n) if n else 0, "last": int(last),
                     "accounts": [{"id": a, "email": accs.get(a, "?"), "status": st.get(a)} for a in acc_ids],
                     "unsub": has_unsub, "protected": prot})
-    return {"senders": out, "collect": collect_status(), "protected": sorted(protset)}
+    return {"senders": out, "collect": collect_status(), "protected": sorted(protset), "protectPending": protect_pending_list()}
 
 
 def _newsletter(c, acc_id, addr, status):
@@ -55,29 +55,85 @@ def _newsletter(c, acc_id, addr, status):
               'DO UPDATE SET status = EXCLUDED.status, "updatedAt" = now()', (new_id(), addr, status, acc_id))
 
 
-def _protect_in_gmail(keys):
-    """For a bulk protect: per account, drop the filters Zero Sum itself made for these senders (Trash, archive,
-    quarantine) and add "never send to Spam" for each. Runs in the background; the protection itself is already in the database."""
-    for acc in ACC.list():
-        done = cleared = 0
-        busy = []
+def _pending(key, acc_id, error=None):
+    """unified.protect_pending: the Gmail side of a protection still to do in an account (error: why not yet), or done
+    (error None). Retried every collector run (retry_protect) until it succeeds, so a failed or interrupted filter
+    removal cannot leave Zero Sum's own Trash or archive filter running in Gmail."""
+    with db() as c:
+        if error is None:
+            c.execute("DELETE FROM unified.protect_pending WHERE key = %s AND account_id = %s", (key, acc_id))
+        else:
+            c.execute("INSERT INTO unified.protect_pending (key, account_id, error) VALUES (%s, %s, %s) "
+                      "ON CONFLICT (key, account_id) DO UPDATE SET error = EXCLUDED.error, "
+                      "attempts = unified.protect_pending.attempts + 1, updated_at = now()", (key, acc_id, str(error)[:300]))
+
+
+def _protect_account(acc, keys):
+    """The Gmail side of protecting `keys` in one account: drop the filters Zero Sum itself made for them (Trash,
+    archive, quarantine) and add "never send to Spam". Each sender on its own: one failing does not stop the others,
+    and what fails stays pending. Returns (done, cleared, busy, failed)."""
+    done = cleared = 0
+    busy, failed = [], []
+    for k in keys:   # per sender, under its lock: an action running on it finishes first, or k is left for later
         try:
-            for k in keys:   # per sender, under its lock: an action running on it finishes first, or k is skipped
-                try:
-                    with _sender_lock(acc["id"], k):
-                        cleared += remove_app_filters(acc["id"], k)
-                        _filter(acc["id"], k, NEVER_SPAM_FILTER, "never_spam", source="protect")
-                    done += 1
-                except SenderBusy:
-                    busy.append(k)
+            with _sender_lock(acc["id"], k):
+                cleared += remove_app_filters(acc["id"], k)
+                _filter(acc["id"], k, NEVER_SPAM_FILTER, "never_spam", source="protect")
+            done += 1
+            _pending(k, acc["id"])
+        except SenderBusy:
+            busy.append(k)
+            _pending(k, acc["id"], BUSY_NOTE)
+        except Exception as e:  # noqa: BLE001 - protection in Zero Sum still applies; the filters are retried
+            failed.append((k, str(e)[:200]))
+            _pending(k, acc["id"], e)
+    return done, cleared, busy, failed
+
+
+def _protect_in_gmail(keys, accounts=None):
+    """For a bulk protect, in the background: _protect_account in every account. The protection itself is already in
+    the database, and every (sender, account) is on record as pending first, so a restart midway loses nothing."""
+    for acc in accounts or ACC.list():
+        done, cleared, busy, failed = _protect_account(acc, keys)
+        try:
             left = foreign_filters(acc["id"], keys)
-            log("cleanup", f"bulk protect: {done} never-spam filter(s), {cleared} of Zero Sum's own filter(s) removed"
-                + (f"; {left} filter(s) Zero Sum did not create still move mail from these senders (left in place)"
-                   if left else "")
-                + (f"; skipped {len(busy)} sender(s) another action was still working on (protect them again to add "
-                   f"their filters): {', '.join(busy[:10])}" if busy else ""), acc["email"])
-        except Exception as e:  # noqa: BLE001 - protection in Zero Sum still applies
-            log("cleanup-error", f"bulk protect stopped after {done} of {len(keys)}: {e}"[:300], acc["email"])
+        except Exception as e:  # noqa: BLE001
+            left = 0
+            failed.append(("(filter check)", str(e)[:200]))
+        log("cleanup", f"bulk protect: {done} never-spam filter(s), {cleared} of Zero Sum's own filter(s) removed"
+            + (f"; {left} filter(s) Zero Sum did not create still move mail from these senders (left in place)"
+               if left else "")
+            + (f"; skipped {len(busy)} sender(s) another action was still working on (tried again next run): "
+               f"{', '.join(busy[:10])}" if busy else ""), acc["email"])
+        if failed:
+            log("cleanup-error", f"bulk protect: Gmail filters not changed for {len(failed)} sender(s), tried again next "
+                f"run: " + "; ".join(f"{k}: {e}" for k, e in failed[:5]), acc["email"])
+
+
+def retry_protect():
+    """Every collector run (and at start): finish the Gmail side of protections that failed or were interrupted. A
+    sender unprotected since, or an account no longer linked, is dropped from the list."""
+    with db() as c:
+        rows = c.execute("SELECT key, account_id FROM unified.protect_pending ORDER BY updated_at LIMIT 2000").fetchall()
+    if not rows:
+        return
+    prot, accs = protected_set(), {a["id"]: a for a in ACC.list()}
+    by_acc = {}
+    for key, acc_id in rows:
+        if key not in prot or acc_id not in accs:
+            _pending(key, acc_id)
+        else:
+            by_acc.setdefault(acc_id, []).append(key)
+    for acc_id, keys in by_acc.items():
+        _protect_in_gmail(keys, [accs[acc_id]])
+
+
+def protect_pending_list():
+    """What retry_protect still has to do, for the Cleanup tab."""
+    names = {a["id"]: a["email"] for a in ACC.list()}
+    with db() as c:
+        return [{"key": k, "email": names.get(a, a), "error": e} for k, a, e in c.execute(
+            "SELECT key, account_id, error FROM unified.protect_pending ORDER BY key LIMIT 50").fetchall()]
 
 
 def protect_many(d):
@@ -91,6 +147,9 @@ def protect_many(d):
     with db() as c:
         with c.cursor() as cur:
             cur.executemany("INSERT INTO unified.protected (key) VALUES (%s) ON CONFLICT DO NOTHING", [(k,) for k in keys])
+        for a in ACC.list():   # on record before the background work starts: a restart midway is picked up again
+            c.execute("INSERT INTO unified.protect_pending (key, account_id, error) SELECT k, %s, 'not done yet' "
+                      "FROM unnest(%s::text[]) k ON CONFLICT DO NOTHING", (a["id"], keys))
     for k in keys:
         stop_automation(k)
     threading.Thread(target=_protect_in_gmail, args=(keys,), daemon=True).start()
@@ -237,8 +296,9 @@ def sender_action(d):
                 c.execute("INSERT INTO unified.protected (key) VALUES (%s) ON CONFLICT DO NOTHING", (addr,))
             else:
                 c.execute("DELETE FROM unified.protected WHERE key = %s", (addr,))
+                c.execute("DELETE FROM unified.protect_pending WHERE key = %s", (addr,))
         cleared = left = 0
-        busy = []
+        busy, failed = [], []
         if act == "protect":
             stop_automation(addr)
         for acc in ACC.list():
@@ -250,11 +310,17 @@ def sender_action(d):
                     else:
                         remove_app_filters(acc["id"], addr, kinds=("never_spam",), exact=True)
                 if act == "protect":
+                    _pending(addr, acc["id"])
                     left += foreign_filters(acc["id"], addr)
             except SenderBusy:
                 busy.append(acc["email"])
+                if act == "protect":
+                    _pending(addr, acc["id"], BUSY_NOTE)
                 log("cleanup-error", f"{act} {addr}: filters not changed: {BUSY_NOTE}", acc["email"])
-            except Exception as e:  # noqa: BLE001 - protection in Zero Sum still applies
+            except Exception as e:  # noqa: BLE001 - protection in Zero Sum still applies; Gmail is retried
+                failed.append(f"{acc['email']}: {str(e)[:120]}")
+                if act == "protect":
+                    _pending(addr, acc["id"], e)
                 log("cleanup-error", f"{act} {addr}: filters: {e}"[:300], acc["email"])
         if cleared:
             log("cleanup", f"protect {addr}: removed {cleared} of Zero Sum's own filter(s)")
@@ -265,11 +331,15 @@ def sender_action(d):
                 for (a,) in c.execute("SELECT DISTINCT account_id FROM unified.msg WHERE from_addr = %s", (addr,)).fetchall():
                     _newsletter(c, a, addr, "APPROVED")
         log("cleanup", f"{act} {addr}")
-        return {"results": [{"email": "all accounts", "ok": True, "note": f"{addr} {act}ed"
+        return {"results": [{"email": "all accounts", "ok": not failed, "note": f"{addr} {act}ed"
                              + (f"; {cleared} filter(s) removed" if cleared else "")
                              + ("; " + FOREIGN_NOTE.format(n=left) if left else "")
                              + (f"; Gmail filters not changed in {', '.join(busy)}: {BUSY_NOTE}, then "
-                                f"{act} it again" if busy else "")}], "manual": []}
+                                f"{act} it again" if busy else "")
+                             + (f"; Gmail filters not changed in {'; '.join(failed)}: "
+                                + ("Zero Sum's own filters may still move its mail there; this is tried again every "
+                                   "collector run, or protect it again" if act == "protect" else f"{act} it again")
+                                if failed else "")}], "manual": []}
     addr = sender_addr(addr)
     if act in DESTRUCTIVE and is_protected(addr):
         raise PermissionError(f"{addr} is protected: unprotect it first")
