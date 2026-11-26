@@ -130,7 +130,8 @@ def check_upstream_schema():
         log("schema-error", f"Inbox Zero schema mismatch: {p}")
     if found:
         log("schema-error", f"{len(found)} thing(s) Zero Sum depends on are missing in the Inbox Zero database: is this "
-                            "Inbox Zero version supported (inbox-zero.version), and was init-db run again after upgrading?")
+                            f"Inbox Zero version supported (this Zero Sum supports {izdb.supported_release()}, inbox-zero.version), and "
+                            "was init-db run again after upgrading?")
     return found
 
 
