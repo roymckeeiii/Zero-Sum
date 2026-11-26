@@ -23,7 +23,10 @@ class World(unittest.TestCase):
         self.db.on("SELECT id, from_addr FROM unified.msg", lambda p: [(i, self.senders.get(i, S)) for i in p[1]])
 
         def gmail_list(acc, path, key, limit):
-            self.searches.append((acc, urllib.parse.unquote(path.split("q=", 1)[1]), limit))
+            q = urllib.parse.unquote(path.split("q=", 1)[1])
+            self.searches.append((acc, q, limit))
+            if "-in:inbox" in q:   # all of the sender's mail is in the inbox here
+                return []
             return [{"id": f"{acc}m{i}"} for i in range(min(self.sizes[acc], limit))]
         self.p = Patched(cleanup, db=self.db, gmail=self.g, ACC=Accounts("me@x.com", "two@x.com"), log=lambda *a, **k: None,
                          gmail_list=gmail_list, label_id=lambda a, name, create=True: "Label_Q", _one_click=lambda u: True)
@@ -71,7 +74,7 @@ class SenderQueries(World):
         self.assertEqual(previewed, self.queries())
         self.assertEqual([(s["what"], s["action"], s["total"]) for s in r["steps"]],
                          [("Orders", "keep", 5), ("Sales", "delete", 5), ("everything else", "quarantine", 5)])
-        self.assertIn("subject:(sale OR \"% off\") -subject:(order)", previewed[1] + previewed[2] + previewed[0])
+        self.assertIn("subject:(sale OR \"% off\") -subject:(order)", "".join(previewed))
 
 
 class Preview(World):

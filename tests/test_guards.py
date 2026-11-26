@@ -300,6 +300,69 @@ class EntryPoints(World):
         self.assertEqual(started, [JUNK])
 
 
+class InboxOrigin(World):
+    """Quarantine, Spam and AI sort act on a sender's mail in every folder: the inbox part and the already-archived
+    part are separate changes, so Undo and Release put back in the inbox only what was in it."""
+
+    def setUp(self):
+        super().setUp()
+        self.g.found["from:"] = ["aa11bb", "aa22cc"]
+        self.g.meta = {"aa11bb": JUNK, "aa22cc": JUNK}
+        self.g.inbox = {"aa11bb"}            # aa22cc was archived years ago
+
+    def bodies(self):
+        return [c[3] for c in self.g.changes("batchModify")]
+
+    def test_quarantine_and_spam_take_out_of_the_inbox_only_what_was_in_it(self):
+        for act, label in (("quarantine", "Label_Q"), ("unsub_quarantine", "Label_Q"), ("spam", "SPAM")):
+            self.g.calls.clear()
+            self.db.sql.clear()
+            cleanup.sender_action({"addr": JUNK, "action": act})
+            self.assertEqual(self.bodies(), [{"ids": ["aa11bb"], "addLabelIds": [label], "removeLabelIds": ["INBOX"]},
+                                             {"ids": ["aa22cc"], "addLabelIds": [label], "removeLabelIds": []}], act)
+            logged = [(p[2], p[3], p[4]) for _, p in self.db.said("INSERT INTO unified.action_log")]
+            self.assertEqual(logged, [([label], ["INBOX"], ["aa11bb"]), ([label], [], ["aa22cc"])], act)
+        self.assertEqual([p[1] for _, p in self.db.said("INSERT INTO unified.quarantine_archived")], [])  # spam: none
+
+    def test_quarantine_remembers_which_mail_was_archived(self):
+        cleanup.sender_action({"addr": JUNK, "action": "quarantine"})
+        self.assertEqual([p for _, p in self.db.said("INSERT INTO unified.quarantine_archived")], [("acc1", ["aa22cc"])])
+        self.assertEqual([p for _, p in self.db.said("DELETE FROM unified.quarantine_archived")], [("acc1", ["aa11bb"])])
+
+    def test_a_plan_quarantine_is_split_too(self):
+        cleanup._plan_action("acc1", JUNK, "quarantine", {}, "", "Label_Q")
+        self.assertEqual(self.bodies(), [{"ids": ["aa11bb"], "addLabelIds": ["Label_Q"], "removeLabelIds": ["INBOX"]},
+                                         {"ids": ["aa22cc"], "addLabelIds": ["Label_Q"], "removeLabelIds": []}])
+
+    def test_undoing_the_archived_part_does_not_put_it_in_the_inbox(self):
+        self.db.on("UPDATE unified.action_log SET undone_at = now()", [("acc1", ["Label_Q"], [], ["aa22cc"])])
+        cleanup.undo_action({"id": 8})
+        self.assertEqual(self.bodies(), [{"ids": ["aa22cc"], "addLabelIds": [], "removeLabelIds": ["Label_Q"]}])
+
+    def test_release_puts_only_formerly_inbox_mail_back_in_the_inbox(self):
+        # DEFAULT - Roy may change: mail quarantined from the archive is released to the archive
+        self.acc.accs = self.acc.accs[:1]
+        self.g.found = {"labelIds=Label_Q": ["aa11bb", "aa22cc"]}
+        self.db.on("SELECT id, from_addr FROM unified.msg", [("aa11bb", JUNK), ("aa22cc", JUNK)])
+        self.db.on("SELECT id FROM unified.quarantine_archived", [("aa22cc",)])
+        for req in ({"action": "release", "sender": JUNK}, {"action": "release", "all": True}):
+            self.g.calls.clear()
+            r = cleanup.quarantine_action(req)
+            self.assertEqual(self.bodies(), [{"ids": ["aa11bb"], "addLabelIds": ["INBOX"], "removeLabelIds": ["Label_Q"]},
+                                             {"ids": ["aa22cc"], "addLabelIds": [], "removeLabelIds": ["Label_Q"]}], req)
+            self.assertIn("1 back in the inbox, 1 archived", r["results"][0]["note"])
+
+    def test_ai_sort_of_existing_mail_leaves_archived_mail_archived(self):
+        import ai
+        self.db.on("FROM unified.ai_sort WHERE addr", [("keep receipts", "quarantine")])
+        self.db.on("SELECT account_id, id, subject", [("acc1", "aa11bb", "Sale", ""), ("acc1", "aa22cc", "Sale", "")])
+        self.acc.accs = self.acc.accs[:1]
+        with Patched(ai, classify=lambda rule, items: [False] * len(items)):
+            cleanup._ai_sort_existing(JUNK, "keep receipts", "quarantine")
+        self.assertEqual(self.bodies(), [{"ids": ["aa11bb"], "addLabelIds": ["Label_Q"], "removeLabelIds": ["INBOX"]},
+                                         {"ids": ["aa22cc"], "addLabelIds": ["Label_Q"], "removeLabelIds": []}])
+
+
 class LookupBudget(World):
     """A bulk action reads at most BULK_LOOKUPS senders from Gmail per request, so it answers inside the proxy's timeout;
     the messages it could not check are left alone and the answer says to run it again."""

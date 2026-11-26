@@ -39,13 +39,14 @@ def start_ai_sort(addr, rule, action):
     threading.Thread(target=_ai_sort_existing, args=(addr, rule, action, token), daemon=True).start()
 
 
-def _ai_sort_ids(addr, rule, action, pairs, token=None):
+def _ai_sort_ids(addr, rule, action, pairs, token=None, archived=None):
     """Classify (account, message id) pairs by the rule in batches and apply `action` to the ones not kept.
 
     The pairs come from Gmail's `from:"addr"` search, a token match that also finds mail whose display name or a
     longer address contains addr ("deals@shop.com" <alerts@bank.com>). So, as for sender actions, each message's real
     sender is looked up first (senders_of) and only mail really from `addr` is judged and acted on; the rest is left
-    alone and not sent to the AI. Returns how many were kept."""
+    alone and not sent to the AI. `archived` holds the (account id, message id) pairs that are not in the inbox: they
+    get the action without INBOX coming off, so its Undo does not put them in the inbox. Returns how many were kept."""
     kept = 0
     for i in range(0, len(pairs), 40):
         chunk = pairs[i:i + 40]
@@ -87,8 +88,13 @@ def _ai_sort_ids(addr, rule, action, pairs, token=None):
         for acc_id, ids in by_acc.items():
             lid = label_id(acc_id, QUARANTINE) if action == "quarantine" else None
             add, rem = _labels_for(action, lid)
-            if add or rem:
+            out = [i for i in ids if (acc_id, i) in (archived or ())]
+            ids = [i for i in ids if (acc_id, i) not in (archived or ())]
+            if ids and (add or rem):
                 _batch(acc_id, ids, add=add, remove=rem, sender=addr)
+            rest = [x for x in rem if x != "INBOX"]
+            if out and (add or rest):
+                _batch(acc_id, out, add=add, remove=rest, sender=addr)
         with db() as c:
             c.execute("UPDATE unified.ai_sort SET done = done + %s, kept = kept + %s, updated_at = now() WHERE addr = %s",
                       (n_chunk, sum(1 for (_, _m), k in zip(metas, verdicts) if k), addr))
@@ -98,14 +104,17 @@ def _ai_sort_ids(addr, rule, action, pairs, token=None):
 def _ai_sort_existing(addr, rule, action, token=None):
     _ACTION.note = f"AI sort {addr}"
     try:
-        pairs = []
-        for a in ACC.list():
+        pairs, archived = [], set()
+        for a in ACC.list():   # the inbox and the rest apart: Undo puts back in the inbox only what was in it
             q = f"{frm(addr)} -in:trash -in:spam {SKIP}" + (f" -label:{QUARANTINE}" if action == "quarantine" else "")
-            pairs += [(a, m["id"]) for m in gmail_list(a["id"], qs(q), "messages", MAX_BULK)]
+            pairs += [(a, m["id"]) for m in gmail_list(a["id"], qs(f"{q} in:inbox"), "messages", MAX_BULK)]
+            out = [m["id"] for m in gmail_list(a["id"], qs(f"{q} -in:inbox"), "messages", MAX_BULK)]
+            pairs += [(a, i) for i in out]
+            archived |= {(a["id"], i) for i in out}
         with db() as c:
             c.execute("UPDATE unified.ai_sort SET total = %s, done = 0, kept = 0, status = 'sorting' WHERE addr = %s",
                       (len(pairs), addr))
-        kept = _ai_sort_ids(addr, rule, action, pairs, token)
+        kept = _ai_sort_ids(addr, rule, action, pairs, token, archived)
         with db() as c:
             c.execute("UPDATE unified.ai_sort SET status = 'active', retries = 0, last_ts = now(), updated_at = now() "
                       "WHERE addr = %s", (addr,))

@@ -9,8 +9,8 @@ from collector import BACKFILL_DAYS, collect_status, qs
 from core import ACC, POOL, db, gmail_list, label_id, log, new_id
 from gmailops import (ARCHIVE_FILTER, AUTOMATION_KINDS, BUSY_NOTE, FOREIGN_NOTE, MAX_BULK, NEVER_SPAM_FILTER, QUARANTINE,
                       STAR_FILTER, TRASH_FILTER, _ACTION, SenderBusy, _batch, _filter, _modify_existing, _sender_lock,
-                      bulk_query, foreign_filters, held_note, held_start, lookup_budget, lookups_account, lookups_end,
-                      lookups_start, remove_app_filters, senders_of, unchecked_note)
+                      bulk_query, foreign_filters, held_note, held_start, inbox_parts, lookup_budget, lookups_account, lookups_end,
+                      lookups_start, quarantine_archived, remove_app_filters, senders_of, unchecked_note)
 from guard import (SENDER_KEY, frm, guard_sender, is_protected, keep_query, own_address, own_set, parse_protect_keys,
                    protected_set, sender_addr)
 from inbox import meta
@@ -206,6 +206,10 @@ EXISTING = {"unsub_delete": "-in:trash", "delete": "-in:trash", "block": "-in:tr
             "quarantine": f"-in:trash -in:spam -label:{QUARANTINE}", "unsub_quarantine": f"-in:trash -in:spam -label:{QUARANTINE}",
             "autoarchive": "in:inbox", "unsub_archive": "in:inbox", "archive": "in:inbox",
             "spam": "-in:spam -in:trash", "star": "in:inbox -is:starred", "unstar": "is:starred"}
+
+
+# actions that take mail out of the inbox in every folder: run (and previewed) as an inbox part and an archived part
+INBOX_SPLIT = {"quarantine", "unsub_quarantine", "spam"}
 
 
 def sender_query(act, addr, kq=None):
@@ -485,8 +489,16 @@ def quarantine_action(d):
                 prot, own = protected_set(), own_set()
                 ok = [i for i in ids if who.get(i) and not own_address(who[i], own) and not is_protected(who[i], prot)]
                 left, ids, senders = len(ids) - len(ok), ok, {who[i] for i in ok}
-            n = _batch(a["id"], ids, add=add, remove=[lid], sender=senders) if ids else 0
-            note = f"{n} {QACTIONS[act]}"
+            stay = quarantine_archived(a["id"], ids) if act == "release" else set()
+            if stay:   # Release returns to the inbox only what was in it: mail quarantined from the archive stays archived
+                back = [i for i in ids if i not in stay]
+                n = _batch(a["id"], back, add=add, remove=[lid]) if back else 0
+                kept = _batch(a["id"], [i for i in ids if i in stay], add=[], remove=[lid])
+                note = f"{n} {QACTIONS[act]}, {kept} archived (they were not in the inbox when they were quarantined)"
+                n += kept
+            else:
+                n = _batch(a["id"], ids, add=add, remove=[lid], sender=senders) if ids else 0
+                note = f"{n} {QACTIONS[act]}"
             if refused:
                 note += f"; {refused} not in {QUARANTINE}, left alone"
             if left:
@@ -609,6 +621,8 @@ def preview(d):
 
     # a step that takes mail out of view changes only mail really from addr (_modify_existing): counted the same way
     exact = {query for _, action, query in steps if action not in ("keep", "star", "unstar")}
+    # and one that takes mail out of the inbox in every folder runs as an inbox part and an archived part: counted so too
+    split = {query for _, action, query in steps if action in INBOX_SPLIT}
 
     left, left_lock = [PREVIEW_LOOKUPS], threading.Lock()
 
@@ -621,13 +635,18 @@ def preview(d):
     def count(job):
         a, query = job
         try:
-            ids = [m["id"] for m in gmail_list(a, qs(bulk_query(query)), "messages", PREVIEW_MAX)]
-            n, unchecked = len(ids), 0
-            if query in exact and ids:
-                who = senders_of(a, ids, budget)
-                n = sum(who.get(i) == addr for i in ids)
-                unchecked = sum(i not in who for i in ids)
-            return {"count": n, "unchecked": unchecked, "capped": len(ids) >= PREVIEW_MAX}
+            n = unchecked = 0
+            capped = False
+            for part in (inbox_parts(query) if query in split else [query]):
+                ids = [m["id"] for m in gmail_list(a, qs(bulk_query(part)), "messages", PREVIEW_MAX)]
+                capped = capped or len(ids) >= PREVIEW_MAX
+                if query in exact and ids:
+                    who = senders_of(a, ids, budget)
+                    n += sum(who.get(i) == addr for i in ids)
+                    unchecked += sum(i not in who for i in ids)
+                else:
+                    n += len(ids)
+            return {"count": n, "unchecked": unchecked, "capped": capped}
         except Exception as e:  # noqa: BLE001 - shown per account; the other counts still help
             return {"error": str(e)[:200]}
     jobs = [(a, query) for _, _, query in steps for a in acc_ids]

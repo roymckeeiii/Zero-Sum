@@ -472,6 +472,14 @@ def _undo_read_back(aid, acc, check, rest):
         log("cleanup-error", f"undo #{aid}: history not fully refreshed: {failed[0]}"[:300], ACC.email(acc))
 
 
+_IN_INBOX = re.compile(r"(?:^|\s)in:inbox(?:\s|$)")   # a search already limited to the inbox (not "-in:inbox")
+
+
+def inbox_parts(query):
+    """[query] when it is limited to the inbox already, else [the inbox part, the archived part] (_modify_existing)."""
+    return [query] if _IN_INBOX.search(query) else [f"{query} in:inbox", f"{query} -in:inbox"]
+
+
 def bulk_query(query):
     """The search a bulk change really runs: a sender action never reaches what the account itself sent, its drafts
     or chats. Used by the action and by its preview, so the two cannot drift apart."""
@@ -486,7 +494,18 @@ def _modify_existing(acc_id, query, add=(), remove=(), *, sender):
     contains addr ("deals@shop.com" <alerts@bank.com>, deals@shop.com.au). So when the change takes mail out of view,
     every message's real sender is looked up (senders_of, as Quarantine delete does) and only mail really from
     `sender` is changed. The rest is left alone and counted in _ACTION.held: "protected" (a protected sender or one of
-    the user's own addresses) and "other" (someone else, or a sender that could not be told)."""
+    the user's own addresses) and "other" (someone else, or a sender that could not be told).
+
+    A change that takes mail out of the inbox over every folder (Quarantine, Spam) is run as two: the mail in the
+    inbox, and the mail already archived, which keeps everything but INBOX. Each part is its own Undo entry, so undoing
+    it (or releasing it from Quarantine) puts only the mail that was in the inbox back there, not years of archive."""
+    if "INBOX" in remove and not _IN_INBOX.search(query):
+        inbox, archived = inbox_parts(query)
+        rest = [x for x in remove if x != "INBOX"]
+        n = _modify_existing(acc_id, inbox, add, remove, sender=sender)
+        if add or rest:
+            n += _modify_existing(acc_id, archived, add, rest, sender=sender)
+        return n
     ids = [m["id"] for m in gmail_list(acc_id, qs(bulk_query(query)), "messages", MAX_BULK)]
     if ids and removes_mail(add, remove):
         prot = protected_set()
@@ -609,6 +628,34 @@ def _record(acc_id, ids, add, remove):
         c.execute("DELETE FROM unified.action_log WHERE at < now() - make_interval(days => %s)", (UNDO_DAYS,))
 
 
+def _quarantine_origin(acc_id, ids, add, remove):
+    """Remember which messages were already archived when an action put them in Quarantine (and forget it for the
+    ones taken out of the inbox), so that Release puts only formerly-inbox mail back in the inbox. Mail the Quarantine
+    filter catches on arrival has no entry: it was on its way to the inbox, and Release puts it there."""
+    if not ids or not any(str(x).startswith("Label_") for x in add):   # user labels only: no lookup otherwise
+        return
+    qlid = label_id(acc_id, QUARANTINE, create=False)
+    if not qlid or qlid not in add:
+        return
+    with db() as c:
+        for i in range(0, len(ids), 5000):
+            part = ids[i:i + 5000]
+            if "INBOX" in remove:
+                c.execute("DELETE FROM unified.quarantine_archived WHERE account_id = %s AND id = ANY(%s)", (acc_id, part))
+            else:
+                c.execute("INSERT INTO unified.quarantine_archived (account_id, id) SELECT %s, unnest(%s::text[]) "
+                          "ON CONFLICT DO NOTHING", (acc_id, part))
+
+
+def quarantine_archived(acc_id, ids):
+    """The ids among these that were already archived when they were quarantined (see _quarantine_origin)."""
+    if not ids:
+        return set()
+    with db() as c:
+        return {r[0] for r in c.execute("SELECT id FROM unified.quarantine_archived WHERE account_id = %s "
+                                        "AND id = ANY(%s)", (acc_id, list(ids))).fetchall()}
+
+
 def _batch(acc_id, ids, add=(), remove=(), record=True, sender=None):
     """Apply label changes to these message ids (batches of 1000). Returns the count.
 
@@ -637,6 +684,7 @@ def _batch(acc_id, ids, add=(), remove=(), record=True, sender=None):
                 ids = [i for i in ids if i not in held]
     if ids and record and (add or remove):
         _record(acc_id, ids, add, remove)
+        _quarantine_origin(acc_id, ids, add, remove)
     for i in range(0, len(ids), 1000):
         chunk = ids[i:i + 1000]
         try:
