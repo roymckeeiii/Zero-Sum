@@ -11,13 +11,13 @@ const fail = (why) => { console.log(`ERROR-STATES FAIL ${why}`); process.exit(1)
   const req = pending.splice(0).find((x) => x.url === "/api/accounts");
   req.resolve({ ok: false, status: 502, json: async () => ({ error: "OperationalError: database <down>" }) });
   await p;
-  let html = String(els["#accounts"].innerHTML);
+  let html = String(els["#acc-err"].innerHTML);
   if (html.includes("No linked accounts")) fail(`a failed load reads as no accounts: ${html.slice(-200)}`);
   if (!html.includes("Could not load your accounts") || !html.includes("database &lt;down&gt;")) fail(`error not shown (escaped): ${html.slice(-300)}`);
   const p2 = loadAccounts();                                   // a real empty answer still says so
   pending.splice(0).find((x) => x.url === "/api/accounts").resolve({ ok: true, status: 200, json: async () => [] });
   await p2;
-  html = String(els["#accounts"].innerHTML);
+  html = String(els["#acc-err"].innerHTML);
   if (!html.includes("No linked accounts")) fail("an empty account list no longer says how to add one");
   const p3 = api("/api/messages");
   pending.splice(0)[0].resolve(Promise.reject(new TypeError("Failed to fetch")));

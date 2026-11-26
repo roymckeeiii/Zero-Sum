@@ -61,21 +61,17 @@ $("#tabs").onclick = (e) => {
 };
 
 /* ------------------------------------------------------------------ inbox */
-async function loadAccounts() {
-  let failed = null;  // a failed load is not "no accounts": say what went wrong instead
-  try { S.accounts = await api("/api/accounts"); } catch (e) { S.accounts = []; failed = e.message; }
-  setSlots(S.accounts);
-  const total = S.accounts.reduce((n, a) => n + (a.unread || 0), 0);
-  $("#accounts").innerHTML = `<a href="#" data-id="" class="${S.account ? "" : "on"}" aria-current="${S.account ? "false" : "true"}"><span>All accounts</span><span class="n">${total || ""}</span></a>` +
-    S.accounts.map((a) => `<a href="#" data-id="${esc(a.id)}" class="${a.id === S.account ? "on" : ""} ${a.ok ? "" : "bad"}" aria-current="${a.id === S.account ? "true" : "false"}" title="${esc(a.ok ? a.email : a.error)}">
-      <span><span class="dot" style="background:${slotOf(a.id)}"></span>${esc(a.email)}</span><span class="n">${a.ok ? a.unread || "" : "!"}</span></a>`).join("") +
-    `<div class="tools"><input type="search" id="q" placeholder="Search (Gmail syntax)" aria-label="Search all accounts (Gmail syntax)">
+// The search tools are drawn once and never redrawn: the account list refreshes after every action, after a message
+// is opened (mark read) and every two minutes, and redrawing the search box under the cursor used to drop its focus,
+// so the rest of a word typed into it ran as shortcuts ("e" archives, "#" deletes).
+let toolsDrawn = false;
+function drawTools() {
+  toolsDrawn = true;
+  $("#accounts").innerHTML = `<div id="acc-links" style="display:contents"></div><div class="tools"><input type="search" id="q" placeholder="Search (Gmail syntax)" aria-label="Search all accounts (Gmail syntax)">
       <select id="scope" title="Where to search"><option value="inbox">Inbox</option><option value="all">All mail</option>
         <option value="sent">Sent</option><option value="label">A label…</option><option value="spamtrash">Spam &amp; Trash</option></select>
       <input type="search" id="label" placeholder="Label name" aria-label="Label name" hidden><label><input type="checkbox" id="unread"> Unread only</label>
-      <button id="refresh">Refresh (r)</button></div>`;
-  if (failed) $("#accounts").innerHTML += `<div class="err">Could not load your accounts: ${esc(failed)}</div>`;
-  else if (!S.accounts.length) $("#accounts").innerHTML += `<div class="err">No linked accounts yet: add them in Inbox Zero.</div>`;
+      <button id="refresh">Refresh (r)</button></div><div id="acc-err" style="display:contents"></div>`;
   $("#q").value = S.q || ""; $("#unread").checked = !!S.unreadOnly;
   $("#scope").value = scopeOf(); $("#label").value = S.label || ""; $("#label").hidden = S.scope !== "label";
   $("#scope").onchange = (e) => { S.scope = e.target.value; S.limit = 30; $("#label").hidden = S.scope !== "label"; if (S.scope !== "label" || S.label) loadList(); };
@@ -84,6 +80,18 @@ async function loadAccounts() {
   $("#q").oninput = (e) => { S.q = e.target.value; clearTimeout(t); t = setTimeout(() => loadList(), 400); };
   $("#unread").onchange = (e) => { S.unreadOnly = e.target.checked; loadList(); };
   $("#refresh").onclick = () => { loadAccounts(); loadList(true); };
+}
+async function loadAccounts() {
+  let failed = null;  // a failed load is not "no accounts": say what went wrong instead
+  try { S.accounts = await api("/api/accounts"); } catch (e) { S.accounts = []; failed = e.message; }
+  setSlots(S.accounts);
+  if (!toolsDrawn) drawTools();
+  const total = S.accounts.reduce((n, a) => n + (a.unread || 0), 0);
+  $("#acc-links").innerHTML = `<a href="#" data-id="" class="${S.account ? "" : "on"}" aria-current="${S.account ? "false" : "true"}"><span>All accounts</span><span class="n">${total || ""}</span></a>` +
+    S.accounts.map((a) => `<a href="#" data-id="${esc(a.id)}" class="${a.id === S.account ? "on" : ""} ${a.ok ? "" : "bad"}" aria-current="${a.id === S.account ? "true" : "false"}" title="${esc(a.ok ? a.email : a.error)}">
+      <span><span class="dot" style="background:${slotOf(a.id)}"></span>${esc(a.email)}</span><span class="n">${a.ok ? a.unread || "" : "!"}</span></a>`).join("");
+  $("#acc-err").innerHTML = failed ? `<div class="err">Could not load your accounts: ${esc(failed)}</div>`
+    : !S.accounts.length ? `<div class="err">No linked accounts yet: add them in Inbox Zero.</div>` : "";
 }
 
 // The list view is the inbox; typing a search searches All mail unless a scope was picked.
@@ -229,9 +237,12 @@ $("#list").onclick = (e) => {
   const i = +el.dataset.i, b = e.target.closest("button[data-act]");
   if (b) { e.stopPropagation(); act(i, b.dataset.act); } else open(i);
 };
+document.addEventListener("focusout", (e) => { if (e.target?.matches?.("input, select, textarea")) S.blurAt = Date.now(); });
 document.onkeydown = (e) => {
   if ((e.key === "Enter" || e.key === " ") && e.target?.matches?.(".row[data-i], td.who[data-peek]")) { e.preventDefault(); e.target.click(); return; }
-  if (S.tab !== "inbox" || ["INPUT", "SELECT"].includes(e.target.tagName) || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (S.tab !== "inbox" || ["INPUT", "SELECT", "TEXTAREA"].includes(e.target.tagName) || e.target.isContentEditable || e.metaKey || e.ctrlKey || e.altKey) return;
+  // a text field that lost its focus a moment ago (not by the person's choice): what they type is still meant for it
+  if (e.target === document.body && Date.now() - (S.blurAt || 0) < 300) return;
   const n = S.items.length;
   if (e.key === "j" && n) open(Math.min(S.sel + 1, n - 1));
   else if (e.key === "k" && n) open(Math.max(S.sel - 1, 0));
