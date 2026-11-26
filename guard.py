@@ -117,6 +117,9 @@ def parse_protect_keys(text):
     return keys, rejected
 
 
+GMAIL_OPERATORS = {"OR", "AND", "AROUND", "NOT"}
+
+
 def keep_query(words):
     """Gmail search for 'subject contains any of these words/phrases', or None. Input is cleaned, not trusted."""
     out = []
@@ -126,7 +129,8 @@ def keep_query(words):
     for w in words:
         w = re.sub(r"[^\w\s'&$%!-]", " ", str(w), flags=re.U).strip().lstrip("-").strip()[:40]  # "-word" would negate
         if w:
-            out.append(f'"{w}"' if " " in w else w)
+            # a phrase, or a word Gmail reads as an operator (subject:(a OR OR) excludes nothing): quoted, so literal
+            out.append(f'"{w}"' if " " in w or w.upper() in GMAIL_OPERATORS else w)
     return f"subject:({' OR '.join(out)})" if out else None
 
 

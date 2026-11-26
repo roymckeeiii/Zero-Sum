@@ -131,6 +131,11 @@ class Guards(unittest.TestCase):
             cleanup.keep_query([f"w{i}" for i in range(11)])
         self.assertEqual(cleanup.keep_query(["-order", " receipt "]), "subject:(order OR receipt)")
 
+    def test_keep_words_that_are_gmail_operators_are_literal(self):
+        self.assertEqual(cleanup.keep_query(["OR", "order"]), 'subject:("OR" OR order)')
+        self.assertEqual(cleanup.keep_query(["and", "Around"]), 'subject:("and" OR "Around")')
+        self.assertTrue(cleanup.KEEPQ.fullmatch(cleanup.keep_query(["OR", "order"])))   # still adopted as Zero Sum's shape
+
 
 class Rules(unittest.TestCase):
     def test_digest_is_stable_and_sensitive(self):
