@@ -719,13 +719,14 @@ def _trash_refused(e):
     return ": 400 " in text and ("trash" in text.lower() or "label" in text.lower())
 
 
-def _batch(acc_id, ids, add=(), remove=(), record=True, sender=None, after_chunk=None):
+def _batch(acc_id, ids, add=(), remove=(), record=True, sender=None, after_chunk=None, acted=None):
     """Apply label changes to these message ids (batches of 1000). Returns the count.
 
     Every bulk change ends here, so this is where a protected sender and the user's own address are refused, whatever
     the entry point checked. `sender` is the address (or addresses) the ids belong to. Without it, a change that takes
     mail out of view leaves out the messages the local history attributes to a protected or own address; with it, the
-    messages the local history attributes to anyone else are left out (callers look the real sender up first)."""
+    messages the local history attributes to anyone else are left out (callers look the real sender up first).
+    `acted`, a list, receives the ids that are changed (the rest were held back)."""
     ids = list(ids)
     if ids and removes_mail(add, remove):
         prot = protected_set()
@@ -745,6 +746,8 @@ def _batch(acc_id, ids, add=(), remove=(), record=True, sender=None, after_chunk
                 own = own_set()
                 held = {i for i, frm in known if own_address(frm, own) or is_protected(frm, prot)}
                 ids = [i for i in ids if i not in held]
+    if acted is not None:   # the ids this call really changes, after the guards above held some back
+        acted.extend(ids)
     if ids and record and (add or remove):
         _record(acc_id, ids, add, remove)
         _quarantine_origin(acc_id, ids, add, remove)

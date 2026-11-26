@@ -374,6 +374,18 @@ class InboxOrigin(World):
         cleanup.undo_action({"id": 9})
         self.assertEqual([p for _, p in self.db.said("SET left_at = NULL")], [("acc1", ["aa22cc"])])
 
+    def test_only_mail_that_really_left_quarantine_is_stamped(self):
+        # Gmail says aa22cc is from deals@, but the local history says the protected bank sent it: _batch holds it
+        # back, so it stays in Quarantine and keeps its origin entry
+        self.acc.accs = self.acc.accs[:1]
+        self.g.found = {"labelIds=Label_Q": ["aa11bb", "aa22cc"]}
+        self.g.meta = {"aa11bb": JUNK, "aa22cc": JUNK}
+        self.db.on("SELECT id, from_addr FROM unified.msg", lambda p: [("aa22cc", BANK)] if "aa22cc" in p[1] else [])
+        with Patched(cleanup, senders_of=lambda acc, ids, budget=None: {i: JUNK for i in ids}):
+            cleanup.quarantine_action({"action": "delete", "sender": JUNK})
+        self.assertEqual([c[3]["ids"] for c in self.g.changes("batchModify")], [["aa11bb"]])
+        self.assertEqual([p for _, p in self.db.said("SET left_at = now()")], [("acc1", ["aa11bb"])])
+
     def test_the_archived_part_holds_back_token_matched_mail_of_protected_and_other_senders(self):
         # from:"deals@shop.com" also finds a protected bank and another sender that use the address in their name
         self.g.found["from:"] = ["aa11bb", "aa22cc", "aa33dd", "aa44ee"]
@@ -752,7 +764,8 @@ class QuarantineBadge(World):
         self.assertEqual(self.g.reads, ["/labels/Label_Q", "/labels/Label_Q"])
 
     def test_page_start_asks_only_for_the_count(self):
-        js = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app.js"), encoding="utf-8").read()
+        with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app.js"), encoding="utf-8") as f:
+            js = f.read()
         self.assertIn('api("/api/quarantine/count")', js)
         self.assertEqual(js.count('api("/api/quarantine")'), 1)   # the full listing: only in the tab's own load
         tab = js[js.index("async function loadQuarantine("):]

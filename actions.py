@@ -641,20 +641,21 @@ def quarantine_action(d):
                 prot, own = protected_set(), own_set()
                 ok = [i for i in ids if who.get(i) and not own_address(who[i], own) and not is_protected(who[i], prot)]
                 left, ids, senders = len(ids) - len(ok), ok, {who[i] for i in ok}
+            acted = []
             stay = quarantine_archived(a["id"], ids) if act == "release" else set()
             if stay:   # Release returns to the inbox only what was in it: mail quarantined from the archive stays archived
                 back = [i for i in ids if i not in stay]
                 with part_note(" (back to the inbox)"):
-                    n = _batch(a["id"], back, add=add, remove=[lid]) if back else 0
+                    n = _batch(a["id"], back, add=add, remove=[lid], acted=acted) if back else 0
                 with part_note(" (kept archived)"):
-                    kept = _batch(a["id"], [i for i in ids if i in stay], add=[], remove=[lid])
+                    kept = _batch(a["id"], [i for i in ids if i in stay], add=[], remove=[lid], acted=acted)
                 note = f"{n} {QACTIONS[act]}, {kept} archived (they were not in the inbox when they were quarantined)"
                 n += kept
             else:
-                n = _batch(a["id"], ids, add=add, remove=[lid], sender=senders) if ids else 0
+                n = _batch(a["id"], ids, add=add, remove=[lid], sender=senders, acted=acted) if ids else 0
                 note = f"{n} {QACTIONS[act]}"
-            if ids:   # out of Quarantine now: their origin entries are pruned once the change can no longer be undone
-                quarantine_left(a["id"], ids)
+            if acted:   # out of Quarantine now (not what _batch held back): their origin entries are pruned once the
+                quarantine_left(a["id"], acted)   # change can no longer be undone
             if refused:
                 note += f"; {refused} not in {QUARANTINE}, left alone"
             if left:
