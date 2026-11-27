@@ -61,21 +61,17 @@ $("#tabs").onclick = (e) => {
 };
 
 /* ------------------------------------------------------------------ inbox */
-async function loadAccounts() {
-  let failed = null;  // a failed load is not "no accounts": say what went wrong instead
-  try { S.accounts = await api("/api/accounts"); } catch (e) { S.accounts = []; failed = e.message; }
-  setSlots(S.accounts);
-  const total = S.accounts.reduce((n, a) => n + (a.unread || 0), 0);
-  $("#accounts").innerHTML = `<a href="#" data-id="" class="${S.account ? "" : "on"}" aria-current="${S.account ? "false" : "true"}"><span>All accounts</span><span class="n">${total || ""}</span></a>` +
-    S.accounts.map((a) => `<a href="#" data-id="${esc(a.id)}" class="${a.id === S.account ? "on" : ""} ${a.ok ? "" : "bad"}" aria-current="${a.id === S.account ? "true" : "false"}" title="${esc(a.ok ? a.email : a.error)}">
-      <span><span class="dot" style="background:${slotOf(a.id)}"></span>${esc(a.email)}</span><span class="n">${a.ok ? a.unread || "" : "!"}</span></a>`).join("") +
-    `<div class="tools"><input type="search" id="q" placeholder="Search (Gmail syntax)" aria-label="Search all accounts (Gmail syntax)">
+// The search tools are drawn once and never redrawn: the account list refreshes after every action, after a message
+// is opened (mark read) and every two minutes, and redrawing the search box under the cursor used to drop its focus,
+// so the rest of a word typed into it ran as shortcuts ("e" archives, "#" deletes).
+let toolsDrawn = false;
+function drawTools() {
+  toolsDrawn = true;
+  $("#accounts").innerHTML = `<div id="acc-links" style="display:contents"></div><div class="tools"><input type="search" id="q" placeholder="Search (Gmail syntax)" aria-label="Search all accounts (Gmail syntax)">
       <select id="scope" title="Where to search"><option value="inbox">Inbox</option><option value="all">All mail</option>
         <option value="sent">Sent</option><option value="label">A label…</option><option value="spamtrash">Spam &amp; Trash</option></select>
       <input type="search" id="label" placeholder="Label name" aria-label="Label name" hidden><label><input type="checkbox" id="unread"> Unread only</label>
-      <button id="refresh">Refresh (r)</button></div>`;
-  if (failed) $("#accounts").innerHTML += `<div class="err">Could not load your accounts: ${esc(failed)}</div>`;
-  else if (!S.accounts.length) $("#accounts").innerHTML += `<div class="err">No linked accounts yet: add them in Inbox Zero.</div>`;
+      <button id="refresh">Refresh (r)</button></div><div id="acc-err" style="display:contents"></div>`;
   $("#q").value = S.q || ""; $("#unread").checked = !!S.unreadOnly;
   $("#scope").value = scopeOf(); $("#label").value = S.label || ""; $("#label").hidden = S.scope !== "label";
   $("#scope").onchange = (e) => { S.scope = e.target.value; S.limit = 30; $("#label").hidden = S.scope !== "label"; if (S.scope !== "label" || S.label) loadList(); };
@@ -84,6 +80,18 @@ async function loadAccounts() {
   $("#q").oninput = (e) => { S.q = e.target.value; clearTimeout(t); t = setTimeout(() => loadList(), 400); };
   $("#unread").onchange = (e) => { S.unreadOnly = e.target.checked; loadList(); };
   $("#refresh").onclick = () => { loadAccounts(); loadList(true); };
+}
+async function loadAccounts() {
+  let failed = null;  // a failed load is not "no accounts": say what went wrong instead
+  try { S.accounts = await api("/api/accounts"); } catch (e) { S.accounts = []; failed = e.message; }
+  setSlots(S.accounts);
+  if (!toolsDrawn) drawTools();
+  const total = S.accounts.reduce((n, a) => n + (a.unread || 0), 0);
+  $("#acc-links").innerHTML = `<a href="#" data-id="" class="${S.account ? "" : "on"}" aria-current="${S.account ? "false" : "true"}"><span>All accounts</span><span class="n">${total || ""}</span></a>` +
+    S.accounts.map((a) => `<a href="#" data-id="${esc(a.id)}" class="${a.id === S.account ? "on" : ""} ${a.ok ? "" : "bad"}" aria-current="${a.id === S.account ? "true" : "false"}" title="${esc(a.ok ? a.email : a.error)}">
+      <span><span class="dot" style="background:${slotOf(a.id)}"></span>${esc(a.email)}</span><span class="n">${a.ok ? a.unread || "" : "!"}</span></a>`).join("");
+  $("#acc-err").innerHTML = failed ? `<div class="err">Could not load your accounts: ${esc(failed)}</div>`
+    : !S.accounts.length ? `<div class="err">No linked accounts yet: add them in Inbox Zero.</div>` : "";
 }
 
 // The list view is the inbox; typing a search searches All mail unless a scope was picked.
@@ -147,8 +155,12 @@ async function act(i, action) {
   try { await api("/api/action", { account: it.account, threadId: it.threadId, id: it.id, action }); }
   catch (e) { alert(`${action} failed: ${e.message}`); return; }
   if (action === "archive" || action === "delete") {
-    S.items = S.items.filter((x) => !(x.threadId === it.threadId && x.account === it.account));
-    if (S.sel >= S.items.length) S.sel = S.items.length - 1;
+    // the selection follows the message, not its row number: the rows above it may be the ones going away
+    const gone = (x) => x.threadId === it.threadId && x.account === it.account;
+    const cur = S.items[S.sel], openGone = !!cur && gone(cur);
+    const next = S.items.slice(0, Math.max(S.sel, 0)).filter((x) => !gone(x)).length;   // where the following one lands
+    S.items = S.items.filter((x) => !gone(x));
+    S.sel = openGone ? Math.min(next, S.items.length - 1) : cur ? S.items.indexOf(cur) : -1;
     redraw();
     // undo: out of Trash, or back in the inbox; but archiving a search result that was not in the inbox changed
     // nothing, and an "undo" would put it in the inbox for the first time
@@ -156,7 +168,9 @@ async function act(i, action) {
     toast(`${action === "delete" ? "Moved to Trash" : "Archived"}: ${esc(it.subject)}`, undo && "Undo",
       () => api("/api/action", { account: it.account, threadId: it.threadId, action: undo }).then(() => { loadList(true); loadAccounts(); })
         .catch((e) => alert(`Undo failed: ${e.message}`)));
-    if (S.sel >= 0) open(S.sel); else $("#reader").innerHTML = `<div class="empty">${action === "delete" ? "Deleted" : "Archived"}.</div>`;
+    // another row was acted on: the open message stays open as it is, and no other message is opened (or marked read)
+    if (openGone && S.sel >= 0) open(S.sel);
+    else if (!cur || openGone) $("#reader").innerHTML = `<div class="empty">${action === "delete" ? "Deleted" : "Archived"}.</div>`;
   } else if (action === "star" || action === "unstar") { it.starred = action === "star"; redraw(); if (S.sel === i) open(i); }
   else { it.unread = action === "unread"; redraw(); }
   loadAccounts();
@@ -229,9 +243,12 @@ $("#list").onclick = (e) => {
   const i = +el.dataset.i, b = e.target.closest("button[data-act]");
   if (b) { e.stopPropagation(); act(i, b.dataset.act); } else open(i);
 };
+document.addEventListener("focusout", (e) => { if (e.target?.matches?.("input, select, textarea")) S.blurAt = Date.now(); });
 document.onkeydown = (e) => {
   if ((e.key === "Enter" || e.key === " ") && e.target?.matches?.(".row[data-i], td.who[data-peek]")) { e.preventDefault(); e.target.click(); return; }
-  if (S.tab !== "inbox" || ["INPUT", "SELECT"].includes(e.target.tagName) || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (S.tab !== "inbox" || ["INPUT", "SELECT", "TEXTAREA"].includes(e.target.tagName) || e.target.isContentEditable || e.metaKey || e.ctrlKey || e.altKey) return;
+  // a text field that lost its focus a moment ago (not by the person's choice): what they type is still meant for it
+  if (e.target === document.body && Date.now() - (S.blurAt || 0) < 300) return;
   const n = S.items.length;
   if (e.key === "j" && n) open(Math.min(S.sel + 1, n - 1));
   else if (e.key === "k" && n) open(Math.max(S.sel - 1, 0));
@@ -280,7 +297,10 @@ async function loadSenders() {
   try { d = await api(`/api/senders?${p}`); } catch (e) { $("#c-table").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
   const c = d.collect, done = c.filter((x) => x.backfill_done).length, msgs = c.reduce((n, x) => n + x.messages, 0);
   $("#c-status").innerHTML = `History collected: ${fmt(msgs)} emails across ${c.length} accounts; ${done}/${c.length} fully back-filled
-    (older mail is back-filled a few hundred messages per account each run).` + c.filter((x) => x.error).map((x) => `<div class="err">${esc(x.email)}: ${esc(x.error)}</div>`).join("");
+    (older mail is back-filled a few hundred messages per account each run).` + c.filter((x) => x.error).map((x) => `<div class="err">${esc(x.email)}: ${esc(x.error)}</div>`).join("")
+    + ((d.protectPending || []).length ? `<div class="err">Protection not finished in Gmail yet (tried again later; Zero Sum's own filters may still move this mail; protect a sender again to retry now):
+      ${d.protectPending.map((p) => `${esc(p.key)} in ${esc(p.email)}${p.gaveUp ? " (gave up" + (p.error ? `: ${esc(p.error)}` : "") + ")"
+        : p.error ? ` (${esc(p.error)})` : ""}`).join("; ")}</div>` : "");
   if (!d.senders.length) { $("#c-table").innerHTML = `<div class="empty">No senders yet${msgs ? " match" : ": history is still being collected"}.</div>`; return; }
   S.senders = d.senders;
   $("#c-table").innerHTML = `<table><thead><tr><th>Sender</th><th class="num">Emails</th><th class="num">Read</th>
@@ -311,6 +331,7 @@ async function loadSenders() {
 const PROT_INLINE = 6;
 /* confirmation dialog, with "keep emails whose subject contains" for actions that clear mail */
 const KEEPABLE = ["unsub_archive", "unsub_quarantine", "unsub_delete", "autoarchive", "quarantine", "archive", "delete", "block", "spam"];
+const NO_COUNT = ["protect", "unprotect", "keep", "reset"];   // e.g. "AI suggest" answering protect: nothing to count
 function askDialog(a, s, ai) {
   const d = $("#dlg"), text = confirmText(a, s);
   if (!text && !ai) return Promise.resolve({ keep: [] });
@@ -333,7 +354,7 @@ function askDialog(a, s, ai) {
   let countT = 0, countSeq = 0;
   const count = async () => {
     const seq = ++countSeq, el = $("#dlg-count");
-    if (!text) { el.textContent = ""; return; }
+    if (!text || NO_COUNT.includes(a)) { el.textContent = ""; return; }   // these move no existing mail
     el.textContent = "Counting what this will touch in Gmail…";
     try {
       const r = await api("/api/sender/preview", { addr: s.addr, action: a,
@@ -699,8 +720,9 @@ function renderQuarantine() {
       <label><input type="checkbox" data-group="${gi}" aria-label="${esc(`Select every listed email from ${g.name || g.addr}`)}"></label>
       <span class="who"><b>${esc(g.name || g.addr)}</b> <span class="note">${esc(g.addr)} · ${g.count}${d.shown < d.total ? "+" : ""} email(s)</span><br>
         ${g.accounts.map((a) => acctChip(a.id, a.email)).join("")}</span>
-      <button data-qa="release" data-g="${gi}" title="Back to the inbox, and stop quarantining this sender">Release sender</button>
-      <button data-qa="archive" data-g="${gi}">Archive</button><button data-qa="delete" data-g="${gi}" class="danger">Delete</button></div>` +
+      ${g.actionable === false ? `<span class="note">No plain sender address: tick its emails to act on them.</span>`
+        : `<button data-qa="release" data-g="${gi}" title="Back where it was (the inbox, or the archive), and stop quarantining this sender">Release sender</button>
+      <button data-qa="archive" data-g="${gi}">Archive</button><button data-qa="delete" data-g="${gi}" class="danger">Delete</button>`}</div>` +
       g.items.slice(0, g.open ? 1000 : 5).map((it, ii) => `<div class="qm"><input type="checkbox" data-g="${gi}" data-ii="${ii}" aria-label="${esc(`Select: ${it.subject}`)}">
         ${acctChip(it.account, it.email)}<span class="s">${esc(it.subject)} <span class="note">${esc(it.snippet)}</span></span>
         <span class="note">${when(it.ts)}</span></div>`).join("") +
@@ -728,7 +750,7 @@ async function qact(body, ask) {
   } catch (e) { $("#q-result").innerHTML = `<div class="err">${esc(e.message)}</div>`; }
   loadQuarantine();
 }
-const QVERB = { delete: "Move to Trash", archive: "Archive (remove the label)", release: "Release back to the inbox" };
+const QVERB = { delete: "Move to Trash", archive: "Archive (remove the label)", release: "Release (back to the inbox, or the archive if it was archived)" };
 $("#q-body").onchange = (e) => {
   const g = e.target.dataset.group;
   if (g != null) document.querySelectorAll(`#q-body input[data-g="${g}"][data-ii]`).forEach((c) => { c.checked = e.target.checked; });
@@ -913,7 +935,7 @@ $("#r-matrix").onchange = async (e) => {
 
 api("/api/config").then((c) => { S.izUrl = c.inboxZeroUrl; S.ai = !!c.ai; if (c.inboxZeroUrl) { const a = $("#iz-link"); a.href = c.inboxZeroUrl; a.hidden = false; } }).catch(() => {});
 loadAccounts().then(() => loadList());
-api("/api/quarantine").then((d) => { $("#q-count").textContent = d.total || ""; }).catch(() => {});
+api("/api/quarantine/count").then((d) => { $("#q-count").textContent = d.total || ""; }).catch(() => {});   // the badge only: one label read per account
 // every 2 minutes: account counts, and the list unless Load more was used (reloading would drop those pages and the
 // selection in them; r, a new search or another account starts from page one again)
 setInterval(() => { if (!document.hidden && S.tab === "inbox") { loadAccounts(); if (!S.paged) loadList(true); } }, 120000);

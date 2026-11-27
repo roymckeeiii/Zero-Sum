@@ -47,8 +47,8 @@ def _subjects(addr, per_account=60):
     """The sender's subject lines: from the locally collected history (all of it, no Gmail calls) when there is any,
     else a fresh sample from Gmail."""
     with db() as c:
-        rows = c.execute("SELECT subject FROM unified.msg WHERE from_addr = %s AND subject IS NOT NULL AND subject <> ''",
-                         (addr,)).fetchall()
+        rows = c.execute("SELECT subject FROM unified.msg WHERE from_addr = %s AND subject IS NOT NULL AND subject <> '' "
+                         "AND account_id = ANY(%s)", (addr, [a["id"] for a in ACC.list()])).fetchall()
     if rows:
         norm = collections.Counter(re.sub(r"\d+", "#", r[0].strip())[:120] for r in rows)
         return norm.most_common(80), len(rows)
@@ -245,10 +245,10 @@ def analyze(d):
         prot = protected_set()
         with db() as c:
             rows = c.execute(
-                "SELECT m.from_addr FROM unified.msg m WHERE m.ts > now() - interval '365 days' "
+                "SELECT m.from_addr FROM unified.msg m WHERE m.ts > now() - interval '365 days' AND m.account_id = ANY(%s) "
                 "AND NOT EXISTS (SELECT 1 FROM unified.ai_plan p WHERE p.addr = m.from_addr) "
                 "AND NOT EXISTS (SELECT 1 FROM \"Newsletter\" nl WHERE lower(nl.email) = m.from_addr AND nl.status IS NOT NULL) "
-                "GROUP BY 1 ORDER BY count(*) DESC LIMIT %s", (n * 2,)).fetchall()
+                "GROUP BY 1 ORDER BY count(*) DESC LIMIT %s", ([a["id"] for a in ACC.list()], n * 2)).fetchall()
         addrs = [r[0] for r in rows if not is_protected(r[0], prot)][:n]
     threading.Thread(target=_analyze, args=(addrs,), daemon=True).start()
     return {"started": True, "senders": len(addrs)}
@@ -258,8 +258,10 @@ def plans(q):
     with db() as c:
         rows = c.execute(
             "SELECT p.addr, p.plan, p.status, p.updated_at, coalesce(s.n, 0), coalesce(s.accounts, '{}') FROM unified.ai_plan p "
-            "LEFT JOIN (SELECT from_addr, count(*) n, array_agg(DISTINCT account_id) accounts FROM unified.msg GROUP BY 1) s "
-            "ON s.from_addr = p.addr ORDER BY (p.status IN ('new', 'partial')) DESC, coalesce(s.n, 0) DESC").fetchall()
+            "LEFT JOIN (SELECT from_addr, count(*) n, array_agg(DISTINCT account_id) accounts FROM unified.msg "
+            "WHERE account_id = ANY(%s) GROUP BY 1) s "
+            "ON s.from_addr = p.addr ORDER BY (p.status IN ('new', 'partial')) DESC, coalesce(s.n, 0) DESC",
+            ([a["id"] for a in ACC.list()],)).fetchall()
     accs = {a["id"]: a["email"] for a in ACC.list()}
     return {"ai": bool(KEY), "running": _running, "plans": [
         {**plan, "addr": addr, "status": status, "updated": upd.isoformat(), "count": n,
@@ -356,10 +358,12 @@ def background_plan():
         rows = c.execute(
             "SELECT m.from_addr, count(*) FROM unified.msg m "
             "LEFT JOIN unified.ai_plan p ON p.addr = m.from_addr "
-            "WHERE m.subject IS NOT NULL AND (p.addr IS NULL OR (p.status = 'new' AND "
-            "  coalesce((p.plan->>'sampled')::int, 0) * 1.5 < (SELECT count(*) FROM unified.msg x WHERE x.from_addr = m.from_addr))) "
+            "WHERE m.subject IS NOT NULL AND m.account_id = ANY(%(live)s) AND (p.addr IS NULL OR (p.status = 'new' AND "
+            "  coalesce((p.plan->>'sampled')::int, 0) * 1.5 < (SELECT count(*) FROM unified.msg x WHERE x.from_addr = m.from_addr "
+            "  AND x.account_id = ANY(%(live)s)))) "
             "AND NOT EXISTS (SELECT 1 FROM \"Newsletter\" nl WHERE lower(nl.email) = m.from_addr AND nl.status IS NOT NULL) "
-            "GROUP BY 1 HAVING count(*) >= %s ORDER BY 2 DESC LIMIT %s", (MIN_EMAILS, PLANS_PER_RUN * 3)).fetchall()
+            "GROUP BY 1 HAVING count(*) >= %(min)s ORDER BY 2 DESC LIMIT %(n)s",
+            {"live": [a["id"] for a in ACC.list()], "min": MIN_EMAILS, "n": PLANS_PER_RUN * 3}).fetchall()
     addrs = [a for a, _ in rows if not is_protected(a, prot)][:PLANS_PER_RUN]
     if addrs:
         _analyze(addrs)
@@ -375,11 +379,14 @@ def progress(q=None):
             return None
     totals = dict(zip([a["id"] for a in ACC.list()], POOL.map(total, ACC.list())))
     known = [t for t in totals.values() if t is not None]
+    live = list(totals)   # linked accounts only (ACCOUNT_OWNERS)
     with db() as c:
-        coll = dict(c.execute("SELECT account_id, count(*) FROM unified.msg GROUP BY 1").fetchall())
-        with_subj = c.execute("SELECT count(*) FROM unified.msg WHERE subject IS NOT NULL").fetchone()[0]
-        senders = c.execute("SELECT count(*) FROM (SELECT from_addr FROM unified.msg GROUP BY 1 HAVING count(*) >= %s) s",
-                            (MIN_EMAILS,)).fetchone()[0]
+        coll = dict(c.execute("SELECT account_id, count(*) FROM unified.msg WHERE account_id = ANY(%s) GROUP BY 1",
+                              (live,)).fetchall())
+        with_subj = c.execute("SELECT count(*) FROM unified.msg WHERE subject IS NOT NULL AND account_id = ANY(%s)",
+                              (live,)).fetchone()[0]
+        senders = c.execute("SELECT count(*) FROM (SELECT from_addr FROM unified.msg WHERE account_id = ANY(%s) "
+                            "GROUP BY 1 HAVING count(*) >= %s) s", (live, MIN_EMAILS)).fetchone()[0]
         planned = c.execute("SELECT count(*) FROM unified.ai_plan").fetchone()[0]
         calls = c.execute("SELECT v FROM unified.settings WHERE k = %s",
                           (f"ai_calls:{datetime.datetime.utcnow():%Y-%m-%d}",)).fetchone()

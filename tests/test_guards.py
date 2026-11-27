@@ -19,6 +19,7 @@ class World(unittest.TestCase):
         self.db, self.g, self.acc = Db(), Gmail(), Accounts(ME, "two@x.com")
         self.db.protected = {"@bank.com", VIP}
         self.db.on("SELECT DISTINCT account_id FROM unified.msg", [("acc1",)]).on("DISTINCT ON (account_id)", [])
+        self.db.on("SET undo_started_at = clock_timestamp()", [("T1",)])   # an undo renewing its claim
         self.g.found["from:"] = ["aa11bb", "aa22cc"]
         self.p = Patched(cleanup, db=self.db, gmail=self.g, ACC=self.acc, log=lambda *a, **k: None,
                          gmail_list=lambda a, path, key, limit: self.g(a, path).get(key, []),
@@ -205,8 +206,8 @@ class EntryPoints(World):
 
     def test_undoing_a_quarantine_delete_brings_a_since_protected_senders_mail_out_of_trash_too(self):
         # Quarantine "Delete all" took the bank's mail too; the bank was protected afterwards, then Undo pressed
-        self.db.on("UPDATE unified.action_log SET undone_at = now()",
-                   [("acc1", ["TRASH"], ["Label_Q"], ["aa11bb", "aa22cc"])])
+        self.db.on("UPDATE unified.action_log SET undo_started_at = now()",
+                   [("acc1", ["TRASH"], ["Label_Q"], ["aa11bb", "aa22cc"], "T0")])
         self.db.on("SELECT id, from_addr FROM unified.msg", [("aa11bb", JUNK), ("aa22cc", BANK)])
         self.db.on("SELECT id FROM unified.msg", [("aa22cc",)])   # the held one is still in the local history
         self.g.meta = {"aa11bb": JUNK, "aa22cc": BANK}
@@ -222,7 +223,7 @@ class EntryPoints(World):
         self.assertIn("protected", r["note"])
 
     def test_undoing_an_archive_does_not_call_mail_trashed_since_in_the_inbox(self):
-        self.db.on("UPDATE unified.action_log SET undone_at = now()", [("acc1", [], ["INBOX"], ["aa11bb", "aa22cc"])])
+        self.db.on("UPDATE unified.action_log SET undo_started_at = now()", [("acc1", [], ["INBOX"], ["aa11bb", "aa22cc"], "T0")])
         self.g.meta = {"aa11bb": JUNK, "aa22cc": JUNK}
         # aa22cc was deleted by hand after it was archived: Gmail now has INBOX on it, but in Trash
         self.g.msg_labels = {"aa11bb": ["INBOX"], "aa22cc": ["INBOX", "TRASH"]}
@@ -234,7 +235,7 @@ class EntryPoints(World):
 
     def test_undo_reads_back_only_the_restored_mail_not_the_whole_trash(self):
         # after a big clean-up, undoing a 2-message archive must not page through every message in Trash and Spam
-        self.db.on("UPDATE unified.action_log SET undone_at = now()", [("acc1", [], ["INBOX"], ["aa11bb", "aa22cc"])])
+        self.db.on("UPDATE unified.action_log SET undo_started_at = now()", [("acc1", [], ["INBOX"], ["aa11bb", "aa22cc"], "T0")])
         self.g.meta = {"aa11bb": JUNK, "aa22cc": JUNK}
         self.g.found = {"in:trash": [f"t{i}" for i in range(500)]}
         cleanup.undo_action({"id": 7})
@@ -243,7 +244,7 @@ class EntryPoints(World):
 
     def test_undo_reads_back_at_most_undo_refresh_messages(self):
         many = [f"m{i}" for i in range(12)]
-        self.db.on("UPDATE unified.action_log SET undone_at = now()", [("acc1", [], ["INBOX"], many)])
+        self.db.on("UPDATE unified.action_log SET undo_started_at = now()", [("acc1", [], ["INBOX"], many, "T0")])
         self.g.meta = {i: JUNK for i in many}
         with Patched(cleanup, UNDO_REFRESH=5):
             cleanup.undo_action({"id": 7})
@@ -253,7 +254,7 @@ class EntryPoints(World):
 
     def test_undo_answers_before_it_reads_anything_back(self):
         many = [f"m{i}" for i in range(50)]
-        self.db.on("UPDATE unified.action_log SET undone_at = now()", [("acc1", [], ["INBOX"], many)])
+        self.db.on("UPDATE unified.action_log SET undo_started_at = now()", [("acc1", [], ["INBOX"], many, "T0")])
         self.g.meta = {i: JUNK for i in many}
         jobs, spare = [], []
         with Patched(cleanup, _background=lambda fn, *a: jobs.append((fn, a)),
@@ -269,7 +270,7 @@ class EntryPoints(World):
 
     def test_undo_read_back_stops_while_the_accounts_quota_is_busy(self):
         many = [f"m{i}" for i in range(50)]
-        self.db.on("UPDATE unified.action_log SET undone_at = now()", [("acc1", [], ["INBOX"], many)])
+        self.db.on("UPDATE unified.action_log SET undo_started_at = now()", [("acc1", [], ["INBOX"], many, "T0")])
         self.g.meta = {i: JUNK for i in many}
         answers = iter([True, False])
         with Patched(cleanup, gmail_spare=lambda acc, **k: next(answers)):
@@ -298,6 +299,144 @@ class EntryPoints(World):
         with Patched(cleanup, start_ai_sort=lambda *a: started.append(a[0])):
             cleanup.resume_ai_sorts()
         self.assertEqual(started, [JUNK])
+
+
+class InboxOrigin(World):
+    """Quarantine, Spam and AI sort act on a sender's mail in every folder: the inbox part and the already-archived
+    part are separate changes, so Undo and Release put back in the inbox only what was in it."""
+
+    def setUp(self):
+        super().setUp()
+        self.g.found["from:"] = ["aa11bb", "aa22cc"]
+        self.g.meta = {"aa11bb": JUNK, "aa22cc": JUNK}
+        self.g.inbox = {"aa11bb"}            # aa22cc was archived years ago
+
+    def bodies(self):
+        return [c[3] for c in self.g.changes("batchModify")]
+
+    def test_quarantine_and_spam_take_out_of_the_inbox_only_what_was_in_it(self):
+        for act, label in (("quarantine", "Label_Q"), ("unsub_quarantine", "Label_Q"), ("spam", "SPAM")):
+            self.g.calls.clear()
+            self.db.sql.clear()
+            cleanup.sender_action({"addr": JUNK, "action": act})
+            self.assertEqual(self.bodies(), [{"ids": ["aa11bb"], "addLabelIds": [label], "removeLabelIds": ["INBOX"]},
+                                             {"ids": ["aa22cc"], "addLabelIds": [label], "removeLabelIds": []}], act)
+            logged = [(p[2], p[3], p[4]) for _, p in self.db.said("INSERT INTO unified.action_log")]
+            self.assertEqual(logged, [([label], ["INBOX"], ["aa11bb"]), ([label], [], ["aa22cc"])], act)
+            notes = [p[1] for _, p in self.db.said("INSERT INTO unified.action_log")]   # the Undo list tells them apart
+            self.assertEqual(notes, [f"{act} {JUNK} (in the inbox)", f"{act} {JUNK} (already archived)"], act)
+        self.assertEqual([p[1] for _, p in self.db.said("INSERT INTO unified.quarantine_archived")], [])  # spam: none
+
+    def test_quarantine_remembers_which_mail_was_archived(self):
+        cleanup.sender_action({"addr": JUNK, "action": "quarantine"})
+        self.assertEqual([p for _, p in self.db.said("INSERT INTO unified.quarantine_archived")], [("acc1", ["aa22cc"])])
+        self.assertEqual([p for _, p in self.db.said("DELETE FROM unified.quarantine_archived")], [("acc1", ["aa11bb"])])
+
+    def test_a_plan_quarantine_is_split_too(self):
+        cleanup._plan_action("acc1", JUNK, "quarantine", {}, "", "Label_Q")
+        self.assertEqual(self.bodies(), [{"ids": ["aa11bb"], "addLabelIds": ["Label_Q"], "removeLabelIds": ["INBOX"]},
+                                         {"ids": ["aa22cc"], "addLabelIds": ["Label_Q"], "removeLabelIds": []}])
+
+    def test_undoing_the_archived_part_does_not_put_it_in_the_inbox(self):
+        self.db.on("UPDATE unified.action_log SET undo_started_at = now()", [("acc1", ["Label_Q"], [], ["aa22cc"], "T0")])
+        cleanup.undo_action({"id": 8})
+        self.assertEqual(self.bodies(), [{"ids": ["aa22cc"], "addLabelIds": [], "removeLabelIds": ["Label_Q"]}])
+
+    def test_release_puts_only_formerly_inbox_mail_back_in_the_inbox(self):
+        # DEFAULT - Roy may change: mail quarantined from the archive is released to the archive
+        self.acc.accs = self.acc.accs[:1]
+        self.g.found = {"labelIds=Label_Q": ["aa11bb", "aa22cc"]}
+        self.db.on("SELECT id, from_addr FROM unified.msg", [("aa11bb", JUNK), ("aa22cc", JUNK)])
+        self.db.on("SELECT id FROM unified.quarantine_archived", [("aa22cc",)])
+        for req in ({"action": "release", "sender": JUNK}, {"action": "release", "all": True}):
+            self.g.calls.clear()
+            r = cleanup.quarantine_action(req)
+            self.assertEqual(self.bodies(), [{"ids": ["aa11bb"], "addLabelIds": ["INBOX"], "removeLabelIds": ["Label_Q"]},
+                                             {"ids": ["aa22cc"], "addLabelIds": [], "removeLabelIds": ["Label_Q"]}], req)
+            self.assertIn("1 back in the inbox, 1 archived", r["results"][0]["note"])
+            notes = [p[1] for _, p in self.db.said("INSERT INTO unified.action_log")][-2:]
+            self.assertTrue(notes[0].endswith("(back to the inbox)") and notes[1].endswith("(kept archived)"), notes)
+
+    def test_entries_are_pruned_after_the_mail_left_quarantine_and_kept_through_an_undo(self):
+        self.acc.accs = self.acc.accs[:1]
+        self.g.found = {"labelIds=Label_Q": ["aa11bb", "aa22cc"]}
+        self.db.on("SELECT id, from_addr FROM unified.msg", [("aa11bb", JUNK), ("aa22cc", JUNK)])
+        for act in ("release", "archive", "delete"):
+            self.db.sql.clear()
+            cleanup.quarantine_action({"action": act, "sender": JUNK})
+            left = self.db.said("SET left_at = now()")
+            self.assertEqual([p for _, p in left], [("acc1", ["aa11bb", "aa22cc"])], act)
+            prune = self.db.said("DELETE FROM unified.quarantine_archived WHERE left_at <")
+            self.assertEqual([p for _, p in prune], [(cleanup.UNDO_DAYS,)], act)
+        # undoing the release puts them back in Quarantine: the entries count again
+        self.db.sql.clear()
+        self.db.on("UPDATE unified.action_log SET undo_started_at = now()", [("acc1", [], ["Label_Q"], ["aa22cc"], "T0")])
+        cleanup.undo_action({"id": 9})
+        self.assertEqual([p for _, p in self.db.said("SET left_at = NULL")], [("acc1", ["aa22cc"])])
+
+    def test_only_mail_that_really_left_quarantine_is_stamped(self):
+        # Gmail says aa22cc is from deals@, but the local history says the protected bank sent it: _batch holds it
+        # back, so it stays in Quarantine and keeps its origin entry
+        self.acc.accs = self.acc.accs[:1]
+        self.g.found = {"labelIds=Label_Q": ["aa11bb", "aa22cc"]}
+        self.g.meta = {"aa11bb": JUNK, "aa22cc": JUNK}
+        self.db.on("SELECT id, from_addr FROM unified.msg", lambda p: [("aa22cc", BANK)] if "aa22cc" in p[1] else [])
+        with Patched(cleanup, senders_of=lambda acc, ids, budget=None: {i: JUNK for i in ids}):
+            cleanup.quarantine_action({"action": "delete", "sender": JUNK})
+        self.assertEqual([c[3]["ids"] for c in self.g.changes("batchModify")], [["aa11bb"]])
+        self.assertEqual([p for _, p in self.db.said("SET left_at = now()")], [("acc1", ["aa11bb"])])
+
+    def test_the_archived_part_holds_back_token_matched_mail_of_protected_and_other_senders(self):
+        # from:"deals@shop.com" also finds a protected bank and another sender that use the address in their name
+        self.g.found["from:"] = ["aa11bb", "aa22cc", "aa33dd", "aa44ee"]
+        self.g.inbox = {"aa11bb"}                                   # everything else is archived
+        self.g.meta = {"aa11bb": JUNK, "aa22cc": JUNK, "aa33dd": f'"{JUNK}" <{BANK}>', "aa44ee": f'"{JUNK}" <x@y.org>'}
+        r = cleanup.sender_action({"addr": JUNK, "action": "quarantine"})
+        self.assertEqual(self.bodies(), [{"ids": ["aa11bb"], "addLabelIds": ["Label_Q"], "removeLabelIds": ["INBOX"]},
+                                         {"ids": ["aa22cc"], "addLabelIds": ["Label_Q"], "removeLabelIds": []}])
+        note = r["results"][0]["note"]
+        self.assertIn("1 from a protected sender or your own address left alone", note)
+        self.assertIn("1 sent by someone else (or sender unknown) left alone", note)
+
+    def test_ai_sort_of_existing_mail_leaves_archived_mail_archived(self):
+        import ai
+        self.db.on("FROM unified.ai_sort WHERE addr", [("keep receipts", "quarantine")])
+        self.db.on("SELECT account_id, id, subject", [("acc1", "aa11bb", "Sale", ""), ("acc1", "aa22cc", "Sale", "")])
+        self.acc.accs = self.acc.accs[:1]
+        with Patched(ai, classify=lambda rule, items: [False] * len(items)):
+            cleanup._ai_sort_existing(JUNK, "keep receipts", "quarantine")
+        self.assertEqual([p[1] for _, p in self.db.said("INSERT INTO unified.action_log")],
+                         [f"AI sort {JUNK} (in the inbox)", f"AI sort {JUNK} (already archived)"])
+        self.assertEqual(self.bodies(), [{"ids": ["aa11bb"], "addLabelIds": ["Label_Q"], "removeLabelIds": ["INBOX"]},
+                                         {"ids": ["aa22cc"], "addLabelIds": ["Label_Q"], "removeLabelIds": []}])
+
+
+class UnlinkedAccounts(World):
+    """unified.msg keeps rows of accounts that were unlinked or that ACCOUNT_OWNERS leaves out: a sender action,
+    preview, plan or protect acts on the linked ones and never fails because of the others."""
+
+    def setUp(self):
+        super().setUp()
+        self.db.on("SELECT DISTINCT account_id FROM unified.msg", [("acc-gone",), ("acc1",)])
+        self.g.meta = {"aa11bb": JUNK, "aa22cc": JUNK}
+
+    def test_delete_preview_and_plan_skip_an_unlinked_account(self):
+        r = cleanup.sender_action({"addr": JUNK, "action": "delete"})
+        self.assertEqual([(x["email"], x["ok"]) for x in r["results"]], [(ME, True)])
+        p = cleanup.preview({"addr": JUNK, "action": "delete"})
+        self.assertEqual([a["id"] for a in p["steps"][0]["accounts"]], ["acc1"])
+        r = cleanup.apply_plan({"addr": JUNK, "groups": [], "default": "archive"})
+        self.assertEqual([x["email"] for x in r["results"]], [ME])
+
+    def test_protect_marks_no_newsletter_row_for_an_unlinked_account(self):
+        cleanup.sender_action({"addr": JUNK, "action": "protect"})
+        self.assertEqual([p[3] for _, p in self.db.said('INSERT INTO "Newsletter"')], ["acc1"])
+
+    def test_the_cleanup_list_reads_only_linked_accounts(self):
+        cleanup.senders({})
+        sql, params = self.db.said("FROM unified.msg WHERE ts >")[0]
+        self.assertIn("account_id = ANY(%s)", sql)
+        self.assertIn(["acc1", "acc2"], list(params))
 
 
 class LookupBudget(World):
@@ -330,6 +469,19 @@ class LookupBudget(World):
         self.assertIn("run it again", r["results"][0]["note"])
         r = cleanup.sender_action({"addr": JUNK, "action": "star"})   # no look-ups needed: not partial
         self.assertFalse(r["partial"])
+
+    def test_a_partly_done_delete_keeps_the_local_history_so_run_it_again_finds_the_account(self):
+        for act in ("delete", "block", "spam", "unsub_delete"):
+            self.db.sql.clear()
+            self.db.seen.clear()   # each starts with no sender read yet
+            r = cleanup.sender_action({"addr": JUNK, "action": act})
+            self.assertTrue(r["partial"], act)
+            self.assertEqual(self.db.said("DELETE FROM unified.msg"), [], act)
+        with Patched(__import__("gmailops"), BULK_LOOKUPS=100):   # everything looked up: the history goes
+            self.db.sql.clear()
+            r = cleanup.sender_action({"addr": JUNK, "action": "delete"})
+            self.assertFalse(r["partial"])
+            self.assertEqual(len(self.db.said("DELETE FROM unified.msg")), 1)
 
     def test_quarantine_delete_keeps_to_the_budget_too(self):
         self.g.found = {"labelIds=Label_Q": ["aa0001", "aa0002", "aa0003"]}
@@ -528,9 +680,96 @@ class Quarantine(World):
         self.assertEqual(self.g.calls, [])
         self.assertIn("1 not in Quarantine", r["results"][0]["note"])
 
+    def test_a_group_without_a_plain_address_offers_no_sender_buttons(self):
+        import actions
+        metas = {"aaaa01": JUNK, "bbbb02": "", "cccc03": '"odd local"@x.com'}
+        self.g.found = {"labelIds=Label_Q": list(metas)}
+        with Patched(actions, meta=lambda a, i: {"fromAddr": metas[i], "from": "x", "account": a["id"], "email": a["email"],
+                                                 "id": i, "ts": 1}):
+            d = cleanup.quarantine_list()
+        self.assertEqual({g["addr"]: g["actionable"] for g in d["senders"]},
+                         {JUNK: True, "": False, '"odd local"@x.com': False})
+
     def test_archive_and_release_still_work_for_everything(self):
         cleanup.quarantine_action({"action": "release", "all": True})
         self.assertEqual([len(c[3]["ids"]) for c in self.g.changes("batchModify")], [5])
+
+
+class TrashFallback(World):
+    """Some accounts refuse TRASH in batchModify: only that refusal switches to trashing one by one, and the other
+    label changes still happen; a rate limit is raised, not turned into a thousand single calls."""
+
+    def refuse(self, error):
+        real = self.g
+
+        def gmail(acc, path, method="GET", body=None, retry=True):
+            if path == "/messages/batchModify" and "TRASH" in body["addLabelIds"]:
+                real.calls.append((acc, path, method, body))
+                raise RuntimeError(error)
+            return real(acc, path, method, body)
+        return Patched(cleanup, gmail=gmail)
+
+    def test_a_rate_limit_is_raised_not_fallen_back_on(self):
+        with self.refuse("Gmail POST /messages/batchModify: 429 Too many requests"):
+            with self.assertRaises(RuntimeError):
+                cleanup._batch("acc1", ["aa11bb", "aa22cc"], add=["TRASH"], remove=["Label_Q"])
+        self.assertEqual(self.g.changes("/trash"), [])
+
+    def test_the_trash_refusal_trashes_one_by_one_and_still_removes_the_quarantine_label(self):
+        with self.refuse("Gmail POST /messages/batchModify: 400 Invalid label: TRASH"):
+            cleanup._batch("acc1", ["aa11bb", "aa22cc"], add=["TRASH"], remove=["Label_Q"])
+        self.assertEqual([c[1] for c in self.g.changes("/trash")], ["/messages/aa11bb/trash", "/messages/aa22cc/trash"])
+        self.assertEqual(self.g.changes("batchModify")[-1][3],
+                         {"ids": ["aa11bb", "aa22cc"], "addLabelIds": [], "removeLabelIds": ["Label_Q"]})
+
+
+class JudgedOnce(World):
+    """New mail is looked at again in the next run's one-hour overlap: a message judged under a rule is not judged
+    again, so a second, different verdict cannot trash mail the first one kept."""
+
+    def test_a_kept_message_is_not_judged_again_by_the_next_run(self):
+        import ai
+        judged = set()
+        self.db.on("SELECT account_id, id FROM unified.ai_sorted",
+                   lambda p: [(a, i) for (a, i, rk) in judged if rk == p[1] and i in p[2]])
+        self.db.on("INSERT INTO unified.ai_sorted", lambda p: judged.add((p[2], p[3], p[1])) or [])
+        self.db.on("FROM unified.ai_sort WHERE addr", [("keep receipts", "delete")])
+        self.db.on("SELECT account_id, id, subject", [("acc1", "aa11bb", "Receipt", "")])
+        self.g.meta = {"aa11bb": JUNK}
+        a1 = self.acc.list()[0]
+        verdicts = iter([[True], [False]])                 # kept at 10:00, "drop" if asked again at 10:15
+        asked = []
+        with Patched(ai, classify=lambda rule, items: asked.append(items) or next(verdicts)[:len(items)]):
+            cleanup._ai_sort_ids(JUNK, "keep receipts", "delete", [(a1, "aa11bb")])
+            cleanup._ai_sort_ids(JUNK, "keep receipts", "delete", [(a1, "aa11bb")])
+        self.assertEqual(self.g.changes("batchModify"), [])
+        self.assertEqual([len(x) for x in asked if x], [1])   # asked once
+        with Patched(ai, classify=lambda rule, items: [False] * len(items)):   # a new rule judges afresh
+            self.db.on("FROM unified.ai_sort WHERE addr", [("keep invoices", "delete")])
+            cleanup._ai_sort_ids(JUNK, "keep invoices", "delete", [(a1, "aa11bb")])
+        self.assertEqual([c[3]["ids"] for c in self.g.changes("batchModify")], [["aa11bb"]])
+
+
+class QuarantineBadge(World):
+    def test_the_badge_reads_one_label_per_account_and_lists_nothing(self):
+        real = self.g
+
+        def gmail(acc, path, method="GET", body=None, retry=True):
+            if path == "/labels/Label_Q":
+                real.reads.append(path)
+                return {"messagesTotal": {"acc1": 3, "acc2": 4}[acc]}
+            return real(acc, path, method, body)
+        with Patched(cleanup, gmail=gmail):
+            self.assertEqual(cleanup.quarantine_count(), {"total": 7})
+        self.assertEqual(self.g.reads, ["/labels/Label_Q", "/labels/Label_Q"])
+
+    def test_page_start_asks_only_for_the_count(self):
+        with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app.js"), encoding="utf-8") as f:
+            js = f.read()
+        self.assertIn('api("/api/quarantine/count")', js)
+        self.assertEqual(js.count('api("/api/quarantine")'), 1)   # the full listing: only in the tab's own load
+        tab = js[js.index("async function loadQuarantine("):]
+        self.assertLess(tab.index('api("/api/quarantine")'), tab.index("\n}\n"))
 
 
 class Background(unittest.TestCase):

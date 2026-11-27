@@ -78,12 +78,23 @@ def collect_account(acc):
         ids = [m["id"] for m in gmail_list(a, qs(f"{SKIP} after:{int(newest) - 3600}"),
                                            "messages", NEW_MAIL_MAX)]
     added = _store(a, ids)
+    horizon = oldest   # how far back the back-fill has got: moved only by the back-fill's own batches
     if not done:
         before = int(oldest) if oldest else int(time.time()) - 7 * 86400
         age = f" newer_than:{BACKFILL_DAYS}d" if BACKFILL_DAYS > 0 else ""
         older = [m["id"] for m in gmail_list(a, qs(f"{SKIP} before:{before}{age}"), "messages", BACKFILL_STEP)]
         added += _store(a, older)
         done = len(older) < BACKFILL_STEP
+        # The oldest message of this batch, not of the whole table: an undo reads back mail of any year, and taking
+        # the table's oldest row would jump the horizon past years never collected. A message without a date (stored
+        # at 1970) never counts.
+        low = None
+        if older:
+            with db() as c:
+                r = c.execute("SELECT extract(epoch from min(ts)) FROM unified.msg WHERE account_id = %s AND id = ANY(%s) "
+                              "AND ts > to_timestamp(86400)", (a, older)).fetchone()
+            low = float(r[0]) if r and r[0] is not None else None
+        horizon = min(x for x in (oldest, low, before if oldest is None else None) if x is not None)
     # mail collected before subjects were stored: fill BACKFILL_STEP of them per run, newest first
     with db() as c:
         missing = [r[0] for r in c.execute("SELECT id FROM unified.msg WHERE account_id = %s AND subject IS NULL "
@@ -99,9 +110,10 @@ def collect_account(acc):
         c.execute("UPDATE unified.msg SET inbox = (id = ANY(%s)), unread = (id = ANY(%s)) "
                   "WHERE account_id = %s AND ts > now() - interval '30 days'", (inbox, unread, a))
         c.execute("INSERT INTO unified.collect_state (account_id, newest, oldest, backfill_done, updated_at, error) "
-                  "SELECT %s, least(max(ts), now()), min(ts), %s, now(), NULL FROM unified.msg WHERE account_id = %s "
+                  "SELECT %s, least(max(ts), now()), coalesce(to_timestamp(%s), min(ts)), %s, now(), NULL "
+                  "FROM unified.msg WHERE account_id = %s "
                   "ON CONFLICT (account_id) DO UPDATE SET newest = EXCLUDED.newest, oldest = EXCLUDED.oldest, "
-                  "backfill_done = EXCLUDED.backfill_done, updated_at = now(), error = NULL", (a, done, a))
+                  "backfill_done = EXCLUDED.backfill_done, updated_at = now(), error = NULL", (a, horizon, done, a))
     return added
 
 

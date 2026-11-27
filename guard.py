@@ -25,15 +25,32 @@ def frm(addr):
     return f'from:"{sender_addr(addr)}"'
 
 
+class Protected(frozenset):
+    """The protected keys, with the addresses among them also as mailboxes (.boxes), worked out once when the set is
+    read: is_protected runs once per message of a bulk change. Immutable, so the two can never disagree."""
+
+    def __new__(cls, keys=()):
+        self = super().__new__(cls, keys)
+        self.boxes = frozenset(mailbox(k) for k in self if not str(k).startswith("@"))
+        return self
+
+
 def protected_set():
     with db() as c:
-        return {r[0] for r in c.execute("SELECT key FROM unified.protected").fetchall()}
+        return Protected(r[0] for r in c.execute("SELECT key FROM unified.protected").fetchall())
+
+
+def _protected_boxes(prot):
+    """The protected addresses as mailboxes: kept with a Protected set; worked out here for any other collection."""
+    boxes = getattr(prot, "boxes", None)
+    return boxes if boxes is not None else {mailbox(k) for k in prot if not str(k).startswith("@")}
 
 
 def is_protected(addr, prot=None):
-    """A sender is protected by its exact address or its domain ("@example.com")."""
+    """A sender is protected by its address, in any spelling that reaches the same mailbox (+tag, and for Gmail the
+    dots and googlemail.com, as for the user's own addresses), or by its domain ("@example.com")."""
     prot = protected_set() if prot is None else prot
-    if addr in prot:
+    if addr in prot or mailbox(addr) in _protected_boxes(prot):
         return True
     labels = addr.rsplit("@", 1)[-1].split(".")  # "@chase.com" also covers alerts.chase.com, never a bare TLD
     return any("@" + ".".join(labels[i:]) in prot for i in range(max(1, len(labels) - 1)))
@@ -104,6 +121,9 @@ def parse_protect_keys(text):
     return keys, rejected
 
 
+GMAIL_OPERATORS = {"OR", "AND", "AROUND", "NOT"}
+
+
 def keep_query(words):
     """Gmail search for 'subject contains any of these words/phrases', or None. Input is cleaned, not trusted."""
     out = []
@@ -113,7 +133,8 @@ def keep_query(words):
     for w in words:
         w = re.sub(r"[^\w\s'&$%!-]", " ", str(w), flags=re.U).strip().lstrip("-").strip()[:40]  # "-word" would negate
         if w:
-            out.append(f'"{w}"' if " " in w else w)
+            # a phrase, or a word Gmail reads as an operator (subject:(a OR OR) excludes nothing): quoted, so literal
+            out.append(f'"{w}"' if " " in w or w.upper() in GMAIL_OPERATORS else w)
     return f"subject:({' OR '.join(out)})" if out else None
 
 

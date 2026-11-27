@@ -334,11 +334,15 @@ CREATE TABLE IF NOT EXISTS unified.ai_sort (
   addr text PRIMARY KEY, rule text NOT NULL, action text NOT NULL, last_ts timestamptz, status text NOT NULL DEFAULT 'sorting',
   done int NOT NULL DEFAULT 0, total int NOT NULL DEFAULT 0, kept int NOT NULL DEFAULT 0, updated_at timestamptz NOT NULL DEFAULT now());
 ALTER TABLE unified.ai_sort ADD COLUMN IF NOT EXISTS retries int NOT NULL DEFAULT 0;
+CREATE TABLE IF NOT EXISTS unified.ai_sorted (
+  addr text NOT NULL, rule_key text NOT NULL, account_id text NOT NULL, id text NOT NULL,
+  at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (account_id, id, rule_key));
 CREATE TABLE IF NOT EXISTS unified.protected (
   key text PRIMARY KEY, created_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS unified.action_log (
   id bigserial PRIMARY KEY, at timestamptz NOT NULL DEFAULT now(), account_id text NOT NULL, note text NOT NULL DEFAULT '',
   add_labels text[] NOT NULL, remove_labels text[] NOT NULL, ids text[] NOT NULL, undone_at timestamptz);
+ALTER TABLE unified.action_log ADD COLUMN IF NOT EXISTS undo_started_at timestamptz;
 CREATE TABLE IF NOT EXISTS unified.rule_backup (
   id bigserial PRIMARY KEY, at timestamptz NOT NULL DEFAULT now(), account_id text NOT NULL, rule_id text NOT NULL,
   reason text NOT NULL DEFAULT '', rule jsonb NOT NULL, actions jsonb NOT NULL);
@@ -349,6 +353,12 @@ CREATE INDEX IF NOT EXISTS filter_addr ON unified.filter (addr);
 CREATE TABLE IF NOT EXISTS unified.sender_seen (
   account_id text NOT NULL, id text NOT NULL, from_addr text, seen_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (account_id, id));
+CREATE TABLE IF NOT EXISTS unified.quarantine_archived (
+  account_id text NOT NULL, id text NOT NULL, at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (account_id, id));
+ALTER TABLE unified.quarantine_archived ADD COLUMN IF NOT EXISTS left_at timestamptz;
+CREATE TABLE IF NOT EXISTS unified.protect_pending (
+  key text NOT NULL, account_id text NOT NULL, error text, attempts int NOT NULL DEFAULT 0,
+  updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (key, account_id));
 CREATE TABLE IF NOT EXISTS unified.collect_state (
   account_id text PRIMARY KEY, newest timestamptz, oldest timestamptz, backfill_done boolean NOT NULL DEFAULT false,
   updated_at timestamptz NOT NULL DEFAULT now(), error text);

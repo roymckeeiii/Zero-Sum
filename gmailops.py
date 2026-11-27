@@ -374,20 +374,38 @@ def undo_action(d):
     """Put the messages of one recorded bulk change back as they were: its added labels come off (out of Trash,
     Spam or Quarantine), its removed labels go back on (INBOX). Filters are not touched: Keep or Reset removes those.
 
-    The change is claimed (undone_at set) in the same statement that reads it, so a double click or a second tab
-    cannot run one undo twice; if Gmail then fails, the claim is released and Undo can be tried again. A change older
-    than UNDO_DAYS is refused even before the journal is pruned: Gmail may already have emptied that Trash."""
+    The change is claimed (undo_started_at set) in the same statement that reads it, so a double click or a second tab
+    cannot run one undo twice; undone_at is set only once every message is back. The claim is a lease, renewed after
+    every 1,000 messages, so a long undo never lapses while it runs. If Gmail fails, the claim is released and Undo can
+    be tried again; if the process dies midway (a restart during a long undo), the claim lapses after UNDO_LEASE_MIN
+    minutes and Undo can be run again (putting labels back is safe to repeat). Renewing and releasing only touch the
+    claim this run holds (its undo_started_at), never one another run has taken since. A change older than UNDO_DAYS is
+    refused even before the journal is pruned: Gmail may already have emptied that Trash."""
     aid = int(d.get("id") or 0)
     with db() as c:
-        row = c.execute("UPDATE unified.action_log SET undone_at = now() WHERE id = %s AND undone_at IS NULL "
+        row = c.execute("UPDATE unified.action_log SET undo_started_at = now() WHERE id = %s AND undone_at IS NULL "
+                        "AND (undo_started_at IS NULL OR undo_started_at < now() - make_interval(mins => %s)) "
                         "AND at > now() - make_interval(days => %s) "
-                        "RETURNING account_id, add_labels, remove_labels, ids", (aid, UNDO_DAYS)).fetchone()
+                        "RETURNING account_id, add_labels, remove_labels, ids, undo_started_at",
+                        (aid, UNDO_LEASE_MIN, UNDO_DAYS)).fetchone()
         if not row:
-            seen = c.execute("SELECT undone_at FROM unified.action_log WHERE id = %s "
+            seen = c.execute("SELECT undone_at, undo_started_at FROM unified.action_log WHERE id = %s "
                              "AND at > now() - make_interval(days => %s)", (aid, UNDO_DAYS)).fetchone()
     if not row:
-        raise ValueError("already undone" if seen and seen[0] else "no such action (older than %d days?)" % UNDO_DAYS)
-    acc, add, rem, ids = row
+        raise ValueError("already undone" if seen and seen[0] else
+                         "being undone right now (try again in a few minutes if it does not finish)" if seen and seen[1]
+                         else "no such action (older than %d days?)" % UNDO_DAYS)
+    acc, add, rem, ids, claim = row
+    lease = [claim]
+
+    def renew():   # after each chunk: this run is alive, its claim must not lapse
+        with db() as c:
+            r = c.execute("UPDATE unified.action_log SET undo_started_at = clock_timestamp() WHERE id = %s "
+                          "AND undo_started_at = %s AND undone_at IS NULL RETURNING undo_started_at",
+                          (aid, lease[0])).fetchone()
+        if not r:
+            raise RuntimeError("another undo of this change took over")
+        lease[0] = r[0]
     back_add, back_rem, ids, held = list(rem), list(add), list(ids), []
     if ids and removes_mail(back_add, back_rem):
         # putting mail back somewhere out of view (Quarantine, after a delete from Quarantine) would be refused by
@@ -399,13 +417,17 @@ def undo_action(d):
         mine = {i for i, frm in known if own_address(frm, own) or is_protected(frm, prot)}
         held, ids = [i for i in ids if i in mine], [i for i in ids if i not in mine]
     try:
-        n = _batch(acc, ids, add=back_add, remove=back_rem, record=False)
+        n = _batch(acc, ids, add=back_add, remove=back_rem, record=False, after_chunk=renew)
         if held:
-            n += _batch(acc, held, add=["INBOX"], remove=[x for x in back_rem if x != "INBOX"], record=False)
+            n += _batch(acc, held, add=["INBOX"], remove=[x for x in back_rem if x != "INBOX"], record=False,
+                        after_chunk=renew)
     except Exception:
-        with db() as c:   # nothing (or not everything) was put back: let the person try again
-            c.execute("UPDATE unified.action_log SET undone_at = NULL WHERE id = %s", (aid,))
+        with db() as c:   # nothing (or not everything) was put back: let the person try again (if the claim is ours)
+            c.execute("UPDATE unified.action_log SET undo_started_at = NULL WHERE id = %s AND undo_started_at = %s",
+                      (aid, lease[0]))
         raise
+    with db() as c:
+        c.execute("UPDATE unified.action_log SET undone_at = now() WHERE id = %s AND undo_started_at = %s", (aid, lease[0]))
     try:
         # Where the restored mail is now. Mail the undo took out of the inbox is out of it; mail it put INBOX back on is
         # marked as in the inbox right away. INBOX also goes back on mail that has been put in Trash or Spam since (an
@@ -472,6 +494,14 @@ def _undo_read_back(aid, acc, check, rest):
         log("cleanup-error", f"undo #{aid}: history not fully refreshed: {failed[0]}"[:300], ACC.email(acc))
 
 
+_IN_INBOX = re.compile(r"(?:^|\s)in:inbox(?:\s|$)")   # a search already limited to the inbox (not "-in:inbox")
+
+
+def inbox_parts(query):
+    """[query] when it is limited to the inbox already, else [the inbox part, the archived part] (_modify_existing)."""
+    return [query] if _IN_INBOX.search(query) else [f"{query} in:inbox", f"{query} -in:inbox"]
+
+
 def bulk_query(query):
     """The search a bulk change really runs: a sender action never reaches what the account itself sent, its drafts
     or chats. Used by the action and by its preview, so the two cannot drift apart."""
@@ -486,7 +516,20 @@ def _modify_existing(acc_id, query, add=(), remove=(), *, sender):
     contains addr ("deals@shop.com" <alerts@bank.com>, deals@shop.com.au). So when the change takes mail out of view,
     every message's real sender is looked up (senders_of, as Quarantine delete does) and only mail really from
     `sender` is changed. The rest is left alone and counted in _ACTION.held: "protected" (a protected sender or one of
-    the user's own addresses) and "other" (someone else, or a sender that could not be told)."""
+    the user's own addresses) and "other" (someone else, or a sender that could not be told).
+
+    A change that takes mail out of the inbox over every folder (Quarantine, Spam) is run as two: the mail in the
+    inbox, and the mail already archived, which keeps everything but INBOX. Each part is its own Undo entry, so undoing
+    it (or releasing it from Quarantine) puts only the mail that was in the inbox back there, not years of archive."""
+    if "INBOX" in remove and not _IN_INBOX.search(query):
+        inbox, archived = inbox_parts(query)
+        rest = [x for x in remove if x != "INBOX"]
+        with part_note(INBOX_PART):
+            n = _modify_existing(acc_id, inbox, add, remove, sender=sender)
+        if add or rest:
+            with part_note(ARCHIVED_PART):
+                n += _modify_existing(acc_id, archived, add, rest, sender=sender)
+        return n
     ids = [m["id"] for m in gmail_list(acc_id, qs(bulk_query(query)), "messages", MAX_BULK)]
     if ids and removes_mail(add, remove):
         prot = protected_set()
@@ -596,7 +639,23 @@ def lookup_budget():
 
 
 _ACTION = threading.local()   # .note: what the person asked for ("block deals@shop.com"), for the undo list
+UNDO_LEASE_MIN = 15          # an undo claimed this long ago and never finished (the process died) may run again
 UNDO_DAYS = 28               # Gmail empties Trash after 30 days: past that an undo could not bring mail back
+
+
+INBOX_PART, ARCHIVED_PART = " (in the inbox)", " (already archived)"
+
+
+@contextlib.contextmanager
+def part_note(text):
+    """Add `text` to the Undo-list note of the changes recorded inside (the inbox and archived parts of one action are
+    separate entries: the list must say which is which)."""
+    old = getattr(_ACTION, "part", "")
+    _ACTION.part = text
+    try:
+        yield
+    finally:
+        _ACTION.part = old
 
 
 def _record(acc_id, ids, add, remove):
@@ -605,17 +664,69 @@ def _record(acc_id, ids, add, remove):
     with db() as c:
         c.execute("INSERT INTO unified.action_log (account_id, note, add_labels, remove_labels, ids) "
                   "VALUES (%s, %s, %s, %s, %s)",
-                  (acc_id, str(getattr(_ACTION, "note", "") or "")[:300], list(add), list(remove), list(ids)))
+                  (acc_id, (str(getattr(_ACTION, "note", "") or "")[:270] + (getattr(_ACTION, "part", "") or ""))[:300],
+                   list(add), list(remove), list(ids)))
         c.execute("DELETE FROM unified.action_log WHERE at < now() - make_interval(days => %s)", (UNDO_DAYS,))
 
 
-def _batch(acc_id, ids, add=(), remove=(), record=True, sender=None):
+def _quarantine_origin(acc_id, ids, add, remove, undo=False):
+    """Remember which messages were already archived when an action put them in Quarantine (and forget it for the
+    ones taken out of the inbox), so that Release puts only formerly-inbox mail back in the inbox. Mail the Quarantine
+    filter catches on arrival has no entry: it was on its way to the inbox, and Release puts it there. An undo that
+    puts mail back in Quarantine (undo=True) keeps the entries it finds (clears left_at, see quarantine_left)."""
+    if not ids or not any(str(x).startswith("Label_") for x in add):   # user labels only: no lookup otherwise
+        return
+    qlid = label_id(acc_id, QUARANTINE, create=False)
+    if not qlid or qlid not in add:
+        return
+    with db() as c:
+        for i in range(0, len(ids), 5000):
+            part = ids[i:i + 5000]
+            if undo:
+                c.execute("UPDATE unified.quarantine_archived SET left_at = NULL WHERE account_id = %s AND id = ANY(%s)",
+                          (acc_id, part))
+            elif "INBOX" in remove:
+                c.execute("DELETE FROM unified.quarantine_archived WHERE account_id = %s AND id = ANY(%s)", (acc_id, part))
+            else:
+                c.execute("INSERT INTO unified.quarantine_archived (account_id, id) SELECT %s, unnest(%s::text[]) "
+                          "ON CONFLICT (account_id, id) DO UPDATE SET left_at = NULL", (acc_id, part))
+
+
+def quarantine_left(acc_id, ids):
+    """These messages left Quarantine (released, archived or deleted from the tab): their entries are kept while that
+    change can still be undone (UNDO_DAYS; an undo puts them back in Quarantine, where the entry is still right), then
+    pruned with every other entry whose mail left that long ago."""
+    with db() as c:
+        for i in range(0, len(ids), 5000):
+            c.execute("UPDATE unified.quarantine_archived SET left_at = now() WHERE account_id = %s AND id = ANY(%s)",
+                      (acc_id, list(ids[i:i + 5000])))
+        c.execute("DELETE FROM unified.quarantine_archived WHERE left_at < now() - make_interval(days => %s)", (UNDO_DAYS,))
+
+
+def quarantine_archived(acc_id, ids):
+    """The ids among these that were already archived when they were quarantined (see _quarantine_origin)."""
+    if not ids:
+        return set()
+    with db() as c:
+        return {r[0] for r in c.execute("SELECT id FROM unified.quarantine_archived WHERE account_id = %s "
+                                        "AND id = ANY(%s)", (acc_id, list(ids))).fetchall()}
+
+
+def _trash_refused(e):
+    """Is this batchModify error Gmail refusing the TRASH label itself (a 400 naming it), the one case the
+    one-by-one trash / untrash fallback is for?"""
+    text = str(e)
+    return ": 400 " in text and ("trash" in text.lower() or "label" in text.lower())
+
+
+def _batch(acc_id, ids, add=(), remove=(), record=True, sender=None, after_chunk=None, acted=None):
     """Apply label changes to these message ids (batches of 1000). Returns the count.
 
     Every bulk change ends here, so this is where a protected sender and the user's own address are refused, whatever
     the entry point checked. `sender` is the address (or addresses) the ids belong to. Without it, a change that takes
     mail out of view leaves out the messages the local history attributes to a protected or own address; with it, the
-    messages the local history attributes to anyone else are left out (callers look the real sender up first)."""
+    messages the local history attributes to anyone else are left out (callers look the real sender up first).
+    `acted`, a list, receives the ids that are changed (the rest were held back)."""
     ids = list(ids)
     if ids and removes_mail(add, remove):
         prot = protected_set()
@@ -635,17 +746,28 @@ def _batch(acc_id, ids, add=(), remove=(), record=True, sender=None):
                 own = own_set()
                 held = {i for i, frm in known if own_address(frm, own) or is_protected(frm, prot)}
                 ids = [i for i in ids if i not in held]
+    if acted is not None:   # the ids this call really changes, after the guards above held some back
+        acted.extend(ids)
     if ids and record and (add or remove):
         _record(acc_id, ids, add, remove)
+        _quarantine_origin(acc_id, ids, add, remove)
+    elif ids and not record:
+        _quarantine_origin(acc_id, ids, add, remove, undo=True)
     for i in range(0, len(ids), 1000):
         chunk = ids[i:i + 1000]
         try:
             gmail(acc_id, "/messages/batchModify", "POST",
                   {"ids": chunk, "addLabelIds": list(add), "removeLabelIds": list(remove)})
-        except RuntimeError:
+        except RuntimeError as e:
+            if not _trash_refused(e):   # rate limits, quota, other refusals: not a reason for 1,000 single calls
+                raise
             if "TRASH" in add:
-                for mid in chunk:  # some accounts refuse TRASH in batchModify: trash one by one
+                for mid in chunk:  # some accounts refuse TRASH in batchModify: trash one by one, then the other labels
                     gmail(acc_id, f"/messages/{mid}/trash", "POST")
+                rest_add, rest_rem = [x for x in add if x != "TRASH"], list(remove)
+                if rest_add or rest_rem:
+                    gmail(acc_id, "/messages/batchModify", "POST",
+                          {"ids": chunk, "addLabelIds": rest_add, "removeLabelIds": rest_rem})
             elif "TRASH" in remove:  # the same accounts, on an undo: out of Trash one by one, then the other labels
                 for mid in chunk:
                     gmail(acc_id, f"/messages/{mid}/untrash", "POST")
@@ -655,6 +777,8 @@ def _batch(acc_id, ids, add=(), remove=(), record=True, sender=None):
                           {"ids": chunk, "addLabelIds": rest_add, "removeLabelIds": rest_rem})
             else:
                 raise
+        if after_chunk:
+            after_chunk()
     return len(ids)
 
 

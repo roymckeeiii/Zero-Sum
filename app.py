@@ -53,6 +53,7 @@ GET = {
     "/api/rules": lambda q: rulesync.state(),
     "/api/protected": actions.protected_list,
     "/api/quarantine": actions.quarantine_list,
+    "/api/quarantine/count": actions.quarantine_count,
     "/api/undo": gmailops.undo_list,
     "/api/sender/recent": gmailops.sender_recent,
     "/api/ai/plans": ai.plans,
@@ -488,6 +489,7 @@ if __name__ == "__main__":
     check_upstream_schema()
     every(60 * int(os.environ.get("COLLECT_EVERY_MIN", "15")), collector.collect_all, 20)
     every(60 * int(os.environ.get("COLLECT_EVERY_MIN", "15")), aisort.ai_sort_new, 120)
+    every(60 * int(os.environ.get("COLLECT_EVERY_MIN", "15")), actions.retry_protect, 40)   # unfinished protections
     every(60 * int(os.environ.get("COLLECT_EVERY_MIN", "15")), ai.background_plan, 300)
     every(60 * int(os.environ.get("RULES_EVERY_MIN", "10")), auto_rules, 60)
     port = int(os.environ.get("PORT", "8080"))

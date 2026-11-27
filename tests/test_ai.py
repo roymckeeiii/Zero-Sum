@@ -37,7 +37,7 @@ class World(unittest.TestCase):
         self.db, self.net, self.slept = Db(), Provider(*script), []
         self.db.on("INSERT INTO unified.settings", [(calls_today,)])
         self.db.on("SELECT subject FROM unified.msg", [("Your order shipped",), ("SALE ends tonight",)])
-        for mod, names in ((ai, dict(db=self.db, KEY="k", _sleep=self.slept.append)),
+        for mod, names in ((ai, dict(db=self.db, KEY="k", _sleep=self.slept.append, ACC=Accounts("me@x.com"))),
                            (ai.urllib.request, dict(urlopen=self.net))):
             p = Patched(mod, **names)
             p.__enter__()
@@ -213,7 +213,7 @@ class BackgroundDefault(unittest.TestCase):
 
     def run_with(self, stored):
         db, ran = Db(), []
-        with Patched(ai, db=db, KEY="k", _analyze=ran.append,
+        with Patched(ai, db=db, KEY="k", _analyze=ran.append, ACC=Accounts("me@x.com"),
                      setting=lambda k, d=None: stored.get(k, d), protected_set=lambda: set()):
             db.on("FROM unified.msg m", [("big@shop.com", 50)])
             ai.background_plan()

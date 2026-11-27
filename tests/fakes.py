@@ -95,6 +95,7 @@ class Gmail:
         self.meta = {}  # message id -> From header, for metadata reads
         self.msg_labels = {}  # message id -> labelIds, for metadata reads (default none)
         self.reads = []  # every GET path, in order
+        self.inbox = None  # ids in the inbox, for in:inbox / -in:inbox searches; None: everything found is in the inbox
 
     def changes(self, part=""):
         return [c for c in self.calls if part in c[1]]
@@ -127,6 +128,12 @@ class Gmail:
             q = urllib.parse.unquote(path)
             for part, ids in self.found.items():
                 if part in q:
+                    if self.inbox is None and "-in:inbox" in q:
+                        ids = []
+                    elif self.inbox is not None and "-in:inbox" in q:
+                        ids = [i for i in ids if i not in self.inbox]
+                    elif self.inbox is not None and re.search(r"(^|\s)in:inbox", q):
+                        ids = [i for i in ids if i in self.inbox]
                     return {"messages": [{"id": i} for i in ids]}
             return {}
         m = re.match(r"/messages/([^/?]+)\?", path)

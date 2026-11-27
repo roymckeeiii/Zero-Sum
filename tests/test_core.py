@@ -63,6 +63,26 @@ class Parsing(unittest.TestCase):
         self.assertTrue(cleanup.is_protected("alerts@bank.com", prot))
         self.assertFalse(cleanup.is_protected("b@x.com", prot))
 
+    def test_protection_covers_every_spelling_of_the_same_mailbox(self):
+        prot = {"johndoe@gmail.com", "alerts@bank.com", "@shop.com"}
+        for addr in ("john.doe@gmail.com", "JohnDoe+news@googlemail.com", "alerts+2026@bank.com", "deals@shop.com"):
+            self.assertTrue(cleanup.is_protected(addr, prot), addr)
+        for addr in ("john.doe@bank.com", "alert@bank.com", "johndoe@gmail.co"):
+            self.assertFalse(cleanup.is_protected(addr, prot), addr)
+        prot.add("bob@x.org")                      # a plain set changed in place is not served stale
+        self.assertTrue(cleanup.is_protected("bob+1@x.org", prot))
+
+    def test_the_protected_set_carries_its_mailboxes_worked_out_once(self):
+        import guard
+        from fakes import Patched
+        p = guard.Protected(["JohnDoe@gmail.com", "alerts@bank.com", "@shop.com"])
+        self.assertEqual(p.boxes, {"johndoe@gmail.com", "alerts@bank.com"})
+        with Patched(guard, mailbox=lambda a: (_ for _ in ()).throw(AssertionError("worked out again"))):
+            self.assertIs(guard._protected_boxes(p), p.boxes)
+        self.assertTrue(cleanup.is_protected("john.doe+x@googlemail.com", p))
+        with self.assertRaises(AttributeError):
+            p.add("x@y.com")                       # immutable: the mailboxes cannot go stale
+
 
 class KeepWords(unittest.TestCase):
     def test_keep_query(self):
@@ -121,6 +141,11 @@ class Guards(unittest.TestCase):
         with self.assertRaises(ValueError):
             cleanup.keep_query([f"w{i}" for i in range(11)])
         self.assertEqual(cleanup.keep_query(["-order", " receipt "]), "subject:(order OR receipt)")
+
+    def test_keep_words_that_are_gmail_operators_are_literal(self):
+        self.assertEqual(cleanup.keep_query(["OR", "order"]), 'subject:("OR" OR order)')
+        self.assertEqual(cleanup.keep_query(["and", "Around"]), 'subject:("and" OR "Around")')
+        self.assertTrue(cleanup.KEEPQ.fullmatch(cleanup.keep_query(["OR", "order"])))   # still adopted as Zero Sum's shape
 
 
 class Rules(unittest.TestCase):
@@ -301,6 +326,47 @@ class Collector(unittest.TestCase):
         self.assertNotIn(" max(ts), min(ts)", state)
 
 
+class BackfillHorizon(unittest.TestCase):
+    """The back-fill continues from its own progress: mail of any year stored by an undo's read-back, or a message
+    without a date (stored at 1970), must not move the horizon past history that was never collected."""
+
+    def run_collect(self, oldest, batch, batch_min):
+        sql = []
+        T = 1_700_000_000.0
+
+        def execute(q, params=None):
+            sql.append((q, params))
+            one = None
+            if "FROM unified.collect_state WHERE account_id" in q:
+                one = (T + 86400, oldest, False)
+            elif "SELECT extract(epoch from min(ts)) FROM unified.msg" in q:
+                one = (batch_min,)
+            return type("R", (), {"fetchall": staticmethod(lambda: []), "fetchone": staticmethod(lambda: one)})()
+        fake = FakeDb()
+        fake.execute = execute
+        old = (cleanup.gmail_list, cleanup._store, cleanup.db)
+        cleanup.gmail_list = lambda acc, path, key, limit: [{"id": i} for i in batch] if "before%3A" in path else []
+        cleanup._store, cleanup.db = (lambda *a, **k: 0), fake
+        try:
+            cleanup.collect_account({"id": "acc"})
+        finally:
+            cleanup.gmail_list, cleanup._store, cleanup.db = old
+        q, params = next((q, p) for q, p in sql if "INSERT INTO unified.collect_state" in q)
+        self.assertNotIn("), min(ts), ", q)   # never simply the table's oldest row
+        return params[1], [p for q, p in sql if "SELECT extract(epoch from min(ts))" in q]
+
+    def test_the_horizon_moves_to_the_oldest_of_the_batch_only(self):
+        T = 1_700_000_000.0
+        horizon, asked = self.run_collect(T, ["b1", "b2"], T - 5000)   # an undo stored a 2016 message meanwhile
+        self.assertEqual(horizon, T - 5000)
+        self.assertEqual(asked, [("acc", ["b1", "b2"])])
+
+    def test_an_undated_batch_or_no_batch_keeps_the_horizon(self):
+        T = 1_700_000_000.0
+        self.assertEqual(self.run_collect(T, ["b1"], None)[0], T)         # only 1970 rows in the batch
+        self.assertEqual(self.run_collect(T, [], None)[0], T)             # nothing older: back-fill done, horizon stays
+
+
 class Previews(unittest.TestCase):
     def test_preview_matches_whole_words_like_the_gmail_search(self):
         for words, subject, expect in ((["order"], "Your order shipped", True), (["order"], "Reorder now", False),
@@ -343,19 +409,30 @@ class Undo(unittest.TestCase):
     def setUp(self):
         self.calls, self.sql = [], []
         fake = FakeDb()
-        self.log_row = {"undone": None}   # the journal row #7: a Delete of m1, m2; undone_at as set by the SQL below
+        # the journal row #7: a Delete of m1, m2; undone_at and undo_started_at as set by the SQL below ("old": a claim
+        # older than the lease)
+        self.log_row = {"undone": None, "started": None}
 
         def execute(sql, params=None):
             self.sql.append((sql, params))
             one = None
-            if "SET undone_at = now()" in sql:   # the claim: only a row nobody has undone yet
-                if self.log_row["undone"] is None:
-                    self.log_row["undone"] = "now"
-                    one = ("acc", ["TRASH"], ["INBOX"], ["m1", "m2"])
-            elif "SET undone_at = NULL" in sql:
-                self.log_row["undone"] = None
-            elif "SELECT undone_at FROM unified.action_log" in sql:
-                one = (self.log_row["undone"],)
+            row = self.log_row
+            if "SET undo_started_at = now()" in sql:   # the claim: only a row nobody has undone or is undoing now
+                if row["undone"] is None and row["started"] in (None, "old"):
+                    row["started"] = "now"
+                    one = ("acc", ["TRASH"], ["INBOX"], ["m1", "m2"], "now")
+            elif "SET undo_started_at = clock_timestamp()" in sql:   # renewed, by the run holding the claim only
+                if row["started"] == params[1] and row["undone"] is None:
+                    row["renewals"] = row.get("renewals", 0) + 1
+                    one = ("now",)
+            elif "SET undo_started_at = NULL" in sql:   # released, by the run holding the claim only
+                if row["started"] == params[1]:
+                    row["started"] = None
+            elif "SET undone_at = now()" in sql:
+                if row["started"] == params[1]:
+                    row["undone"] = "now"
+            elif "SELECT undone_at, undo_started_at FROM unified.action_log" in sql:
+                one = (self.log_row["undone"], self.log_row["started"])
             return type("R", (), {"fetchall": staticmethod(lambda: []), "fetchone": staticmethod(lambda: one)})()
         fake.execute = execute
         self.old = (cleanup.db, cleanup.gmail, cleanup._store, cleanup.log)
@@ -398,8 +475,9 @@ class Undo(unittest.TestCase):
             cleanup.undo_action({"id": 7})
         self.assertIn("already undone", str(e.exception))
         self.assertEqual(len(self.calls), 1)   # Gmail was asked once
-        claim = [s for s, _ in self.sql if "SET undone_at = now()" in s][0]
+        claim = [s for s, _ in self.sql if "SET undo_started_at = now()" in s][0]
         self.assertIn("undone_at IS NULL", claim)   # the check and the claim are one statement: no race between them
+        self.assertIn("undo_started_at < now() - make_interval(mins", claim)   # a claim that lapsed may be taken again
         self.assertIn("make_interval", claim)       # nor is a change past UNDO_DAYS (its Trash may be gone) undone
 
     def test_a_failed_undo_can_be_tried_again(self):
@@ -409,8 +487,39 @@ class Undo(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             cleanup.undo_action({"id": 7})
         self.assertIsNone(self.log_row["undone"])   # released: not shown as undone when nothing came back
+        self.assertIsNone(self.log_row["started"])
         cleanup.gmail = lambda acc, path, method="GET", body=None: self.calls.append((path, body)) or {}
         self.assertEqual(cleanup.undo_action({"id": 7}), {"ok": True, "restored": 2})
+
+    def test_an_undo_cut_off_by_a_restart_can_be_run_again_after_the_lease(self):
+        def killed(*a, **k):
+            raise SystemExit("container stopped")   # skips every except Exception: the claim is never released
+        cleanup.gmail = killed
+        with self.assertRaises(SystemExit):
+            cleanup.undo_action({"id": 7})
+        self.assertEqual((self.log_row["undone"], self.log_row["started"]), (None, "now"))   # not shown as undone
+        cleanup.gmail = lambda acc, path, method="GET", body=None: self.calls.append((path, body)) or {}
+        with self.assertRaises(ValueError) as e:   # while the lease runs, a second click does not start another
+            cleanup.undo_action({"id": 7})
+        self.assertIn("being undone", str(e.exception))
+        self.log_row["started"] = "old"            # the lease has run out
+        self.assertEqual(cleanup.undo_action({"id": 7})["restored"], 2)
+        self.assertEqual(self.log_row["undone"], "now")
+
+    def test_a_long_undo_renews_its_claim_and_never_releases_one_it_lost(self):
+        cleanup.undo_action({"id": 7})
+        self.assertEqual(self.log_row["renewals"], 1)                  # after its one chunk
+        renew = [s for s, _ in self.sql if "clock_timestamp()" in s][0]
+        self.assertIn("undo_started_at = %s", renew)                   # only the claim this run holds
+        self.log_row.update(undone=None, started=None)
+
+        def taken_over(*a, **k):                                       # another run re-claimed the row meanwhile
+            self.log_row["started"] = "theirs"
+            raise RuntimeError("Gmail POST /messages/batchModify: 500 backend error")
+        cleanup.gmail = taken_over
+        with self.assertRaises(RuntimeError):
+            cleanup.undo_action({"id": 7})
+        self.assertEqual(self.log_row["started"], "theirs")            # their claim is not released by this run
 
     def test_an_unknown_or_expired_change_is_refused(self):
         self.log_row["undone"] = "earlier"
