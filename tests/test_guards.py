@@ -430,7 +430,9 @@ class UnlinkedAccounts(World):
 
     def test_protect_marks_no_newsletter_row_for_an_unlinked_account(self):
         cleanup.sender_action({"addr": JUNK, "action": "protect"})
-        self.assertEqual([p[3] for _, p in self.db.said('INSERT INTO "Newsletter"')], ["acc1"])
+        marked = [p[3] for _, p in self.db.said('INSERT INTO "Newsletter"')]
+        self.assertIn("acc1", marked)
+        self.assertNotIn("acc-gone", marked)   # acc2 may be marked too: protect put a never-spam filter there
 
     def test_the_cleanup_list_reads_only_linked_accounts(self):
         cleanup.senders({})

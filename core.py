@@ -353,6 +353,7 @@ CREATE INDEX IF NOT EXISTS filter_addr ON unified.filter (addr);
 CREATE TABLE IF NOT EXISTS unified.sender_seen (
   account_id text NOT NULL, id text NOT NULL, from_addr text, seen_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (account_id, id));
+CREATE INDEX IF NOT EXISTS sender_seen_from ON unified.sender_seen (from_addr);
 CREATE TABLE IF NOT EXISTS unified.quarantine_archived (
   account_id text NOT NULL, id text NOT NULL, at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (account_id, id));
 ALTER TABLE unified.quarantine_archived ADD COLUMN IF NOT EXISTS left_at timestamptz;

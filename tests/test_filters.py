@@ -543,6 +543,47 @@ class Removed(World):
         self.assertEqual(self.deleted(), ["F3"])
 
 
+class SenderAccounts(World):
+    """A sender action reaches every linked account that knows the sender locally: its collected history
+    (unified.msg), senders read from Gmail for mail the back-fill has not reached (unified.sender_seen), and filters on
+    record (unified.filter). Rows of unlinked accounts are left out, and no live Gmail search is made to find more."""
+
+    def setUp(self):
+        super().setUp()
+        self.acc = Accounts("me@x.com", "two@x.com", "three@x.com")
+        p = Patched(cleanup, ACC=self.acc)
+        p.__enter__()
+        self.addCleanup(p.__exit__)
+        self.db.on("SELECT DISTINCT account_id FROM unified.msg", [("acc1",)])   # history: acc1 only
+
+    def test_history_senders_read_and_recorded_filters_all_count(self):
+        self.db.seen[("acc2", "aa0001")] = S                 # read from Gmail earlier: acc2 gets its mail too
+        self.db.seen[("acc3", "aa0002")] = "other@else.com"  # someone else's mail: not a reason to act in acc3
+        self.assertEqual(cleanup.sender_accounts(S), ["acc1", "acc2"])
+        self.db.filters.append(("acc3", "F9", S, "archive", "autoarchive"))   # an earlier action left a filter in acc3
+        self.assertEqual(cleanup.sender_accounts(S), ["acc1", "acc2", "acc3"])
+
+    def test_unlinked_accounts_are_never_returned(self):
+        self.db.on("SELECT DISTINCT account_id FROM unified.msg", [("acc-gone",), ("acc1",)])
+        self.db.seen[("acc-gone2", "aa0001")] = S
+        self.db.filters.append(("acc-gone3", "F9", S, "trash", "block"))
+        self.assertEqual(cleanup.sender_accounts(S), ["acc1"])
+
+    def test_block_makes_a_filter_in_an_account_known_only_from_a_sender_read(self):
+        self.db.seen[("acc2", "aa0001")] = S
+        r = cleanup.sender_action({"addr": S, "action": "block"})
+        self.assertEqual(sorted(x["email"] for x in r["results"]), ["me@x.com", "two@x.com"])
+        self.assertTrue([f for f in self.db.filters if f[0] == "acc2" and f[2] == S and f[3] == "trash"])
+        self.assertFalse([f for f in self.db.filters if f[0] == "acc3"])
+        self.assertEqual([c for c in self.g.calls if c[0] == "acc3"], [])   # an account that never saw it: untouched
+
+    def test_no_gmail_search_is_made_to_find_the_accounts(self):
+        self.g.reads.clear()
+        cleanup.sender_accounts(S)
+        self.assertEqual(self.g.reads, [])
+        self.assertEqual(self.g.calls, [])
+
+
 class Adoption(World):
     def setUp(self):
         super().setUp()
