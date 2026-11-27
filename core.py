@@ -20,8 +20,124 @@ POOL = ThreadPoolExecutor(max_workers=24)
 _key = None
 
 
+class _Pool:
+    """Postgres connections for this app, reused instead of opened per call: the database (and its max_connections)
+    is shared with Inbox Zero, whose own pool must never be starved. `with db() as c:` keeps psycopg's contract: the
+    block is one transaction, committed when it ends, rolled back on an exception; the connection then goes back to
+    the pool instead of being closed.
+
+    - At most DB_POOL_SIZE (default 10) idle connections are kept; one coming back to a full pool is closed.
+    - A `with db()` in a thread that holds no connection yet waits (up to WAIT seconds) while DB_POOL_SIZE are in use.
+      A nested one (a log line written inside a transaction) never waits, so nesting cannot deadlock, and it gets its
+      own connection: the inner block never commits the outer one. After WAIT the caller is served anyway.
+    - A broken connection is never handed out or kept: one psycopg reports closed or broken is dropped, and one idle
+      for more than PING_AFTER seconds is checked with SELECT 1 first (Postgres restarted, an idle timeout) and
+      replaced by a fresh one if that fails. One that breaks mid-block raises there, as before, and is dropped."""
+    PING_AFTER, WAIT = 30.0, 10.0
+
+    def __init__(self, size=None):
+        self.size = max(1, int(os.environ.get("DB_POOL_SIZE", "10") if size is None else size))
+        self.lock, self.idle, self.busy = threading.Lock(), [], 0
+        self.free = threading.Condition(self.lock)
+        self.local = threading.local()   # .depth: connections this thread holds right now
+
+    def _open(self):
+        return psycopg.connect(os.environ["DATABASE_URL"], connect_timeout=10, autocommit=False)
+
+    @staticmethod
+    def _bad(conn):
+        return conn.closed or conn.broken
+
+    def _drop(self, conn):
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001 - it is going away anyway
+            pass
+
+    def get(self):
+        depth = getattr(self.local, "depth", 0)
+        with self.lock:
+            if depth == 0:   # a thread's first connection waits its turn; a nested one never does
+                end = time.monotonic() + self.WAIT
+                while self.busy >= self.size and time.monotonic() < end:
+                    self.free.wait(max(0.0, end - time.monotonic()))
+            self.busy += 1
+            conn, at = self.idle.pop() if self.idle else (None, 0.0)
+        self.local.depth = depth + 1
+        try:
+            if conn is not None and not self._bad(conn) and time.monotonic() - at > self.PING_AFTER:
+                try:
+                    conn.execute("SELECT 1")
+                    conn.rollback()
+                except psycopg.Error:
+                    self._drop(conn)
+                    conn = None
+            if conn is None or self._bad(conn):
+                if conn is not None:
+                    self._drop(conn)
+                conn = self._open()
+            return conn
+        except BaseException:
+            self._release()
+            raise
+
+    def _release(self):
+        self.local.depth = max(0, getattr(self.local, "depth", 1) - 1)
+        with self.lock:
+            self.busy = max(0, self.busy - 1)
+            self.free.notify()
+
+    def put(self, conn):
+        keep = False
+        try:
+            keep = not self._bad(conn) and conn.info.transaction_status == psycopg.pq.TransactionStatus.IDLE
+        except Exception:  # noqa: BLE001
+            keep = False
+        with self.lock:
+            if keep and len(self.idle) < self.size:
+                self.idle.append((conn, time.monotonic()))
+                conn = None
+        if conn is not None:
+            self._drop(conn)
+        self._release()
+
+    def close_all(self):
+        with self.lock:
+            idle, self.idle = self.idle, []
+        for conn, _ in idle:
+            self._drop(conn)
+
+
+class _Checkout:
+    """What db() returns: `with db() as c` gives a pooled psycopg connection, one transaction per block."""
+    __slots__ = ("conn",)
+
+    def __enter__(self):
+        self.conn = POOL_DB.get()
+        return self.conn
+
+    def __exit__(self, kind, value, tb):
+        conn, self.conn = self.conn, None
+        try:
+            if kind is None:
+                conn.commit()
+            elif not POOL_DB._bad(conn):
+                conn.rollback()
+        except BaseException:
+            POOL_DB._drop(conn)   # a failed commit or rollback: this connection is not reused
+            POOL_DB._release()
+            if kind is None:
+                raise
+            return False
+        POOL_DB.put(conn)
+        return False
+
+
+POOL_DB = _Pool()
+
+
 def db():
-    return psycopg.connect(os.environ["DATABASE_URL"], connect_timeout=10, autocommit=False)
+    return _Checkout()
 
 
 def new_id():
