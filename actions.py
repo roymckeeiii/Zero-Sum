@@ -52,18 +52,23 @@ def senders(q):
     return {"senders": out, "collect": collect_status(), "protected": sorted(protset), "protectPending": protect_pending_list()}
 
 
-def sender_accounts(addr, filters=False):
-    """The linked accounts (ACC) that have mail from addr in the local history, and with filters=True also those with
-    a filter on record for it. unified.msg and unified.filter keep rows of accounts that were unlinked in Inbox Zero
-    or that ACCOUNT_OWNERS leaves out: those are never acted on (one used to fail a whole action halfway)."""
+def sender_accounts(addr):
+    """The linked accounts (ACC) that know this sender locally: mail from addr in the collected history (unified.msg),
+    a message whose sender was read from Gmail (unified.sender_seen: mail the back-fill has not reached yet, read by an
+    earlier action or preview), or a filter on record for it (unified.filter: Delete and Block drop the sender's
+    history rows, its filters still say where it was handled). No live Gmail search is made here.
+    unified.* keeps rows of accounts that were unlinked in Inbox Zero or that ACCOUNT_OWNERS leaves out: those are
+    never acted on (one used to fail a whole action halfway)."""
     live = [a["id"] for a in ACC.list()]
     with db() as c:
         ids = [r[0] for r in c.execute("SELECT DISTINCT account_id FROM unified.msg WHERE from_addr = %s "
                                        "AND account_id = ANY(%s)", (addr, live)).fetchall()]
-        if filters:
-            ids += [r[0] for r in c.execute("SELECT DISTINCT account_id FROM unified.filter WHERE addr = %s",
-                                            (addr,)).fetchall() if r[0] not in ids]
-    return [a for a in dict.fromkeys(ids) if a in live]
+        ids += [r[0] for r in c.execute("SELECT DISTINCT account_id FROM unified.sender_seen WHERE from_addr = %s "
+                                        "AND account_id = ANY(%s)", (addr, live)).fetchall()]
+        ids += [r[0] for r in c.execute("SELECT DISTINCT account_id FROM unified.filter WHERE addr = %s",
+                                        (addr,)).fetchall()]
+    order = {a: k for k, a in enumerate(live)}   # the accounts' own order, whichever table named them first
+    return sorted((a for a in dict.fromkeys(ids) if a in order), key=order.get)
 
 
 def _newsletter(c, acc_id, addr, status):
@@ -418,8 +423,8 @@ def sender_action(d):
     _ACTION.note = f"{act} {addr}"
     if act in ("keep", "reset"):
         stop_automation(addr)
-    # Delete and Block drop the sender's local history: for Keep and Reset its filters still say where
-    acc_ids = sender_accounts(addr, filters=act in ("keep", "reset"))
+    # the history, senders read from Gmail, and recorded filters (Delete and Block drop the sender's history rows)
+    acc_ids = sender_accounts(addr)
     with db() as c:
         unsub = {a: (u, p) for a, u, p in c.execute(
             "SELECT DISTINCT ON (account_id) account_id, unsub, unsub_post FROM unified.msg "

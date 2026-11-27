@@ -75,6 +75,8 @@ class Db:
                 return Result(sorted({(f[0],) for f in self.filters if f[2] == p[0]}))
         elif "INSERT INTO unified.sender_seen" in sql:
             self.seen[(p[0], p[1])] = p[2]
+        elif "SELECT DISTINCT account_id FROM unified.sender_seen" in sql:
+            return Result(sorted({(a,) for (a, _), frm in self.seen.items() if frm == p[0] and a in p[1]}))
         elif "SELECT id, from_addr FROM unified.sender_seen" in sql:
             return Result([(i, self.seen[(p[0], i)]) for i in p[1] if (p[0], i) in self.seen])
         elif "SELECT key FROM unified.protected" in sql:

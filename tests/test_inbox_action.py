@@ -1,5 +1,6 @@
 """inbox.action, the Inbox tab's one-thread triage: only the fixed actions, only a thread id of Gmail's shape, only a
-linked account, and each action is exactly one Gmail call on that account's thread. No network or DB."""
+linked account, and each action but Delete is exactly one Gmail call on that account's thread (Delete moves one
+message through the guard and the Undo journal: test_inbox_delete). No network or DB."""
 import os, sys, unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -31,7 +32,7 @@ class Action(unittest.TestCase):
                  "inbox": ("/threads/abc123/modify", {"addLabelIds": ["INBOX"]}),
                  "read": ("/threads/abc123/modify", {"removeLabelIds": ["UNREAD"]}),
                  "unread": ("/threads/abc123/modify", {"addLabelIds": ["UNREAD"]}),
-                 "delete": ("/threads/abc123/trash", None), "undelete": ("/threads/abc123/untrash", None),
+                 "undelete": ("/threads/abc123/untrash", None),
                  "star": ("/messages/def456/modify", {"addLabelIds": ["STARRED"]}),   # Gmail stars one message
                  "unstar": ("/messages/def456/modify", {"removeLabelIds": ["STARRED"]})}
         for act, (path, body) in cases.items():

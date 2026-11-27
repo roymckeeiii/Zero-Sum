@@ -152,11 +152,14 @@ function redraw() {
 async function act(i, action) {
   const it = S.items[i];
   if (!it) return;
-  try { await api("/api/action", { account: it.account, threadId: it.threadId, id: it.id, action }); }
+  let res;
+  try { res = await api("/api/action", { account: it.account, threadId: it.threadId, id: it.id, action }); }
   catch (e) { alert(`${action} failed: ${e.message}`); return; }
   if (action === "archive" || action === "delete") {
-    // the selection follows the message, not its row number: the rows above it may be the ones going away
-    const gone = (x) => x.threadId === it.threadId && x.account === it.account;
+    // the selection follows the message, not its row number: the rows above it may be the ones going away.
+    // Archive moves the thread; Delete moves only this message (the server refuses protected senders)
+    const gone = action === "delete" ? (x) => x.id === it.id && x.account === it.account
+      : (x) => x.threadId === it.threadId && x.account === it.account;
     const cur = S.items[S.sel], openGone = !!cur && gone(cur);
     const next = S.items.slice(0, Math.max(S.sel, 0)).filter((x) => !gone(x)).length;   // where the following one lands
     S.items = S.items.filter((x) => !gone(x));
@@ -164,9 +167,12 @@ async function act(i, action) {
     redraw();
     // undo: out of Trash, or back in the inbox; but archiving a search result that was not in the inbox changed
     // nothing, and an "undo" would put it in the inbox for the first time
-    const undo = action === "delete" ? "undelete" : it.folder === "Inbox" ? "inbox" : null;
+    // a delete is undone from its Undo-list entry: exactly the messages it moved come out of Trash
+    const undoId = action === "delete" ? res?.undo : null;
+    const undo = action === "delete" ? (undoId ? "undo" : null) : it.folder === "Inbox" ? "inbox" : null;
     toast(`${action === "delete" ? "Moved to Trash" : "Archived"}: ${esc(it.subject)}`, undo && "Undo",
-      () => api("/api/action", { account: it.account, threadId: it.threadId, action: undo }).then(() => { loadList(true); loadAccounts(); })
+      () => (undoId ? api("/api/undo", { id: undoId }) : api("/api/action", { account: it.account, threadId: it.threadId, action: undo }))
+        .then(() => { loadList(true); loadAccounts(); })
         .catch((e) => alert(`Undo failed: ${e.message}`)));
     // another row was acted on: the open message stays open as it is, and no other message is opened (or marked read)
     if (openGone && S.sel >= 0) open(S.sel);
