@@ -1,4 +1,6 @@
-"""Merged inbox and search across every linked account, read, and thread-level triage (no sending).
+"""Merged inbox and search across every linked account, read, and triage (no sending). Delete acts on the chosen
+message only, refuses a protected sender or your own address, and is recorded in the Undo list like every bulk change;
+the other actions act on the thread (star on the message).
 
 /api/messages takes scope=inbox (the default: INBOX only), all (every folder but Spam/Trash: Inbox, Sent, archived,
 labels), sent, spamtrash, or label (with label=<name>). The user's query passes through unchanged (from:, to:,
@@ -265,8 +267,16 @@ def action(d):
     acc = d["account"]
     ACC.row(acc)
     if act == "delete":  # Trash (Gmail empties it after 30 days); gmail.modify cannot delete permanently
-        gmail(acc, f"/threads/{tid}/trash", "POST")
-    elif act == "undelete":
+        # only the chosen message, through the protected-sender guard, recorded for Undo (gmailops imports this module)
+        import gmailops
+        if not mid:
+            raise ValueError("choose a message")
+        n, undo = gmailops.trash_chosen(acc, [mid])
+        if not n:
+            raise PermissionError("this email was not moved to Trash: its sender is protected or could not be checked")
+        _meta.pop((acc, mid), None)
+        return {"ok": True, "count": n, "undo": undo}
+    if act == "undelete":
         gmail(acc, f"/threads/{tid}/untrash", "POST")
     elif act in ("star", "unstar") and mid:
         gmail(acc, f"/messages/{mid}/modify", "POST", ACTIONS[act])  # Gmail stars one message

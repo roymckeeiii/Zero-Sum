@@ -662,11 +662,38 @@ def _record(acc_id, ids, add, remove):
     """Write down which messages a bulk change is about to touch, before it happens. A wrong Delete or Block used to
     leave only a count in the log: nothing said which mail had moved, so the only way back was searching Trash by hand."""
     with db() as c:
-        c.execute("INSERT INTO unified.action_log (account_id, note, add_labels, remove_labels, ids) "
-                  "VALUES (%s, %s, %s, %s, %s)",
-                  (acc_id, (str(getattr(_ACTION, "note", "") or "")[:270] + (getattr(_ACTION, "part", "") or ""))[:300],
-                   list(add), list(remove), list(ids)))
+        row = c.execute("INSERT INTO unified.action_log (account_id, note, add_labels, remove_labels, ids) "
+                        "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+                        (acc_id, (str(getattr(_ACTION, "note", "") or "")[:270] + (getattr(_ACTION, "part", "") or ""))[:300],
+                         list(add), list(remove), list(ids))).fetchone()
         c.execute("DELETE FROM unified.action_log WHERE at < now() - make_interval(days => %s)", (UNDO_DAYS,))
+    logged = getattr(_ACTION, "logged", None)
+    if logged is not None and row:   # the caller wants the journal entries (the Inbox tab's Undo button)
+        logged.append(row[0])
+
+
+def trash_chosen(acc_id, ids):
+    """The Inbox tab's Delete: these messages (not their whole thread: a thread holds your own replies and may hold
+    other senders' mail) go to Trash, through the same guard and journal as every bulk change. Each message's real
+    sender is looked up first; if any is protected, one of your own addresses, or cannot be read, nothing is moved.
+    Returns (count, action_log id for Undo, or None)."""
+    ids = list(dict.fromkeys(ids))
+    if not ids:
+        raise ValueError("choose a message")
+    who = senders_of(acc_id, ids)
+    prot = protected_set()
+    for i in ids:
+        if not who.get(i):
+            raise PermissionError("the sender of this email could not be read, so it was not moved to Trash: try again")
+        guard_sender(who[i], prot)
+    whose = sorted({who[i] for i in ids})
+    _ACTION.note, _ACTION.logged = "delete from the Inbox tab (%s)" % ", ".join(whose)[:200], []
+    try:
+        n = _batch(acc_id, ids, add=["TRASH"], sender=set(whose))
+        logged = list(_ACTION.logged)
+    finally:
+        _ACTION.note, _ACTION.logged = "", None
+    return n, (logged[0] if logged else None)
 
 
 def _quarantine_origin(acc_id, ids, add, remove, undo=False):

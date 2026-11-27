@@ -31,6 +31,19 @@ const { t: { S, act }, els, pending, ok, settle } = load(["S", "act"]);
   const again = act(0, "archive");
   pending.splice(0).find((p) => p.url === "/api/action").resolve(ok({ ok: true })); await again; await settle();
   if (String(els["#toast"].innerHTML).includes("Undo")) fail("undo offered for mail that was not in the inbox");
+  // Delete moves only that message (another message of the same thread stays listed), and its Undo is the journal
+  // entry the server recorded: exactly that message comes out of Trash
+  S.items = [item("dddddd4", "A"), { ...item("eeeeee5", "A"), threadId: "tdddddd4" }]; S.sel = -1;
+  const del = act(0, "delete");
+  const dreq = pending.splice(0).find((p) => p.url === "/api/action");
+  if (!dreq || dreq.body.action !== "delete" || dreq.body.id !== "dddddd4") fail(`delete not sent for the message ${JSON.stringify(dreq && dreq.body)}`);
+  dreq.resolve(ok({ ok: true, count: 1, undo: 42 })); await del; await settle();
+  if (S.items.length !== 1 || S.items[0].id !== "eeeeee5") fail(`delete removed the wrong rows: ${S.items.map((x) => x.id)}`);
+  if (!String(els["#toast"].innerHTML).includes("Undo")) fail("no undo offered for a delete");
+  els["#toast button"].onclick();
+  const dundo = pending.splice(0).find((p) => p.url === "/api/undo" || p.url === "/api/action");
+  if (!dundo || dundo.url !== "/api/undo" || dundo.body.id !== 42) fail(`delete undo was not the journal entry ${JSON.stringify(dundo)}`);
+  dundo.resolve(ok({ ok: true, restored: 1 })); await settle();
   console.log("INBOX-UNDO OK");
   process.exit(0);
 })().catch((e) => { console.log("INBOX-UNDO ERROR " + e.stack); process.exit(2); });
